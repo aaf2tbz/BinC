@@ -248,6 +248,24 @@ static const char *bin_op(BinOp b, int isf, int uns){
         case B_SHL:return "shl"; case B_SHR:return uns?"lshr":"ashr"; default:return NULL; }
 }
 static int bitwise_assign(AssignOp a){ return a==A_ANDEQ||a==A_OREQ||a==A_XOREQ||a==A_SHLEQ||a==A_SHREQ; }
+/* warn when an implicit numeric conversion can lose precision.
+ * explicit casts (E_CAST) never route through here. small int constants
+ * are exactly representable as float and stay silent. */
+static void warn_implicit(CG *c, Expr *src, ValKind from, TypeKind tk, int vecn){
+    (void)c; (void)vecn;
+    ValKind to=scalar_vk(tk);
+    if(from==to) return;
+    if((from==VK_I32&&to==VK_U32)||(from==VK_U32&&to==VK_I32)) return;
+    if(from==VK_I1) return;
+    if(from==VK_F32&&(to==VK_I32||to==VK_U32)){
+        fprintf(stderr,"binc: note (line %d): implicit float->int conversion truncates; cast explicitly to silence\n",src->line);
+        return;
+    }
+    if((from==VK_I32||from==VK_U32)&&to==VK_F32){
+        if(src->kind==E_ICONST && src->ival>-16777216 && src->ival<16777216) return;
+        fprintf(stderr,"binc: note (line %d): implicit int->float conversion may lose precision; cast explicitly to silence\n",src->line);
+    }
+}
 static const char *as_op(AssignOp a, int isfloat, int isuns){
     if(isfloat) switch(a){ case A_ADDEQ:return "fadd"; case A_SUBEQ:return "fsub"; case A_MULEQ:return "fmul";
         case A_DIVEQ:return "fdiv"; case A_MODEQ:return "frem"; default:return NULL; }
@@ -411,6 +429,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             rhs=nv; rk=ok;
         }
         const char *sv, *ev;
+        warn_implicit(c,e->rhs,rk,li.tk,vw);
         if(vw){ sv=to_storage(c,rhs,rk,rw,li.tk,vw); ev=sv; }
         else { if(rw) die(0,"cannot store a vector into a scalar"); sv=store_val(c,rhs,rk,li.tk,&ev); }
         char pty[96]; pty_str(pty,sizeof pty,li.tk,li.sname,li.as,li.is_local,vw);
@@ -466,6 +485,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         else ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn);
                     o+=snprintf(args+o,sizeof args-o,"%s addrspace(%d)* %%_%s",elt,p->ty.as,cp->name);
                 } else { ValKind ak; const char *v=gen_rval(c,e->args[i],&ak);
+                    warn_implicit(c,e->args[i],ak,p->ty.kind,p->ty.vecn);
                     const char *sv=to_storage(c,v,ak,c->rvw,p->ty.kind,p->ty.vecn);
                     char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn);
                     o+=snprintf(args+o,sizeof args-o,"%s %s",ll,sv); }
@@ -605,6 +625,7 @@ static void gen_stmt(CG *c, Stmt *s){
         c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
         c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,s->ty.vecn};
         if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
+            warn_implicit(c,s->init,k,kk,s->ty.vecn);
             const char *sv=to_storage(c,v,k,c->rvw,kk,s->ty.vecn);
             emit(c,"  store %s %s, %s* %s, align %d\n",ll,sv,ll,slot,type_align(kk,s->ty.vecn)); }
         break; }
