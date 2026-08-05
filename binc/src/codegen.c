@@ -665,7 +665,7 @@ void emit_air(FILE *out, const Program *prog){
     fprintf(out,"\n");
 
     typedef struct { int *read,*written; int np, nmeta; } KF; KF *kf=calloc(prog->nfuncs,sizeof(KF));
-    for(size_t fi=0;fi<prog->nfuncs;fi++){
+    for(volatile size_t fi=0;fi<prog->nfuncs;fi++){
         Function *fn=&prog->funcs[fi]; CG c={0};
         SB pr={0},bd={0}; c.pre=&pr; c.body=&bd; c.prog=prog; c.fn=fn; c.tmp=0;
         c.read=calloc(fn->nparams,sizeof(int)); c.written=calloc(fn->nparams,sizeof(int));
@@ -674,6 +674,11 @@ void emit_air(FILE *out, const Program *prog){
             if(fn->params[i].ty.kind==T_COORD){ c.explicit_domain=1; c.coord_param=(int)i; }
             if(fn->params[i].ty.kind==T_GRID_EXTENT) c.grid_extent_param=(int)i;
         }
+        kf[fi].read=c.read; kf[fi].written=c.written; kf[fi].np=(int)fn->nparams;
+        kf[fi].nmeta=fn->is_kernel?meta_count(fn):0;
+        g_last_line=fn->line; g_last_col=0;
+        jmp_buf env; g_recover=&env;
+        if(setjmp(env)!=0) continue; /* codegen error: this function is aborted; others still emit */
         /* signature: explicit domains carry coordinate/grid built-ins by value;
          * implicit kernels retain the historical hidden scalar thread id. */
         g_last_line=fn->line; g_last_col=0;
@@ -715,9 +720,8 @@ void emit_air(FILE *out, const Program *prog){
         fprintf(out,"%s #%d {\n",sig,c.uses_sync?1:0);
         fwrite(pr.p,1,pr.n,out); fwrite(bd.p,1,bd.n,out);
         fprintf(out,"}\n\n");
-        kf[fi].read=c.read; kf[fi].written=c.written; kf[fi].np=(int)fn->nparams;
-        kf[fi].nmeta=fn->is_kernel?meta_count(fn):0;
     }
+    g_recover=NULL;
     if(atomic_add_used[0]) fprintf(out,"declare float @air.atomic.global.add.f32(float addrspace(1)*, float, i32, i32, i32, i1) local_unnamed_addr\n");
     if(atomic_add_used[1]) fprintf(out,"declare i32 @air.atomic.global.add.i32(i32 addrspace(1)*, i32, i32, i32, i32, i1) local_unnamed_addr\n");
     /* declares for the builtins that were actually used */

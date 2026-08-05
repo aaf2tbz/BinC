@@ -54,6 +54,7 @@ int main(int argc, char **argv) {
     lex(src, &toks, &ntoks);
     TokStream ts = { toks, ntoks, 0 };
     Program prog = parse_program(&ts);
+    if (had_errors()) return 1;
 
     char base[512]; base_name(infile, base, sizeof base);
     char ll[600], air[600], lib[700];
@@ -65,6 +66,7 @@ int main(int argc, char **argv) {
     if (!out) die(0, "cannot write %s", ll);
     emit_air(out, &prog);
     fclose(out);
+    if (had_errors()) { remove(ll); return 1; }
     fprintf(stderr, "binc: emitted AIR -> %s\n", ll);
 
     char cmd[1600];

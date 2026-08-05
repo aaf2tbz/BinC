@@ -242,10 +242,51 @@ static void parse_struct(TokStream *ts, Program *prog){
     prog->structs[prog->nstructs++]=(StructDef){strdup(tag->text),f,n};
     stags=realloc(stags,(nstags+1)*sizeof(char*)); stags[nstags++]=prog->structs[prog->nstructs-1].tag;
 }
-Program parse_program(TokStream *ts){
-    Program prog={0};
-    while(peek(ts)->kind!=TK_EOF){
-        if(peek(ts)->kind==TK_KW_STRUCT){ advance(ts); parse_struct(ts,&prog); } else parse_function(ts,&prog);
+/* tokens that may legally begin a statement or top-level construct; used by error recovery */
+static int stmt_start(Token *t){
+    switch(t->kind){
+    case TK_KW_STRUCT: case TK_KW_RETURN: case TK_KW_BREAK: case TK_KW_CONTINUE:
+    case TK_KW_IF: case TK_KW_WHILE: case TK_KW_FOR:
+    case TK_KW_VERTEX: case TK_KW_FRAGMENT: case TK_KW_KERNEL:
+    case TK_LBRACE: case TK_SEMI: case TK_KW_DEVICE: case TK_KW_CONSTANT:
+    case TK_KW_THREADGROUP: case TK_KW_THREAD: case TK_KW_UNIFORM: case TK_KW_VARYING:
+    case TK_KW_FLOAT: case TK_KW_HALF: case TK_KW_INT: case TK_KW_UINT: case TK_KW_BOOL:
+    case TK_KW_VOID: case TK_KW_COORD: case TK_KW_GRID_EXTENT: case TK_KW_ATOMIC:
+        return 1;
+    default:
+        return t->kind==TK_IDENT && is_stag(t->text);
     }
+}
+/* skip forward past a failed construct so parsing can continue and report more errors.
+ * always consumes at least one token, so recovery is guaranteed to make progress. */
+static void recover_skip(TokStream *ts){
+    int depth=0, consumed=0;
+    for(;;){
+        Token *t=peek(ts);
+        if(t->kind==TK_EOF) return;
+        if(consumed && depth==0 && stmt_start(t)) return;
+        if(t->kind==TK_LBRACE) depth++;
+        else if(t->kind==TK_RBRACE){ if(depth==0){ advance(ts); return; } depth--; }
+        advance(ts); consumed=1;
+    }
+}
+Program parse_program(TokStream *ts){
+    /* static so the struct and stream survive the longjmp in die() with defined values */
+    static Program prog;
+    static TokStream *cur;
+    prog.structs=NULL; prog.nstructs=0; prog.funcs=NULL; prog.nfuncs=0;
+    cur=ts;
+    jmp_buf env;
+    g_recover=&env;
+    while(peek(cur)->kind!=TK_EOF){
+        if(setjmp(env)==0){
+            if(peek(cur)->kind==TK_KW_STRUCT){ advance(cur); parse_struct(cur,&prog); } else parse_function(cur,&prog);
+        } else {
+            recover_skip(cur);
+            /* swallow stray closers/semicolons left by the failed construct */
+            while(peek(cur)->kind==TK_SEMI || peek(cur)->kind==TK_RBRACE) advance(cur);
+        }
+    }
+    g_recover=NULL;
     return prog;
 }
