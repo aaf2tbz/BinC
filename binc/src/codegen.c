@@ -270,6 +270,14 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
          * hidden built-in arguments when referenced. */
         if(e->kind==E_FIELD){
             if(e->operand->kind==E_IDENT){
+                int vi; RKind vr=resolve(c,e->operand->name,&vi);
+                if(vr==R_SCALAR && c->fn->params[vi].ty.vecn>1){
+                    Param *vp=&c->fn->params[vi]; int x=comp_idx(e->field); if(x<0||x>=vp->ty.vecn)die(0,"invalid vector component .%s",e->field);
+                    char vl[32]; ll_of(vl,sizeof vl,vp->ty.kind,vp->ty.vecn); char nm[64]; snprintf(nm,sizeof nm,"%%_%s",vp->name); const char *r=newtmp(c);
+                    emit(c,"  %s = extractelement %s %s, i32 %d\n",r,vl,nm,x); *k=scalar_vk(vp->ty.kind); c->rvw=0; return r;
+                }
+            }
+            if(e->operand->kind==E_IDENT){
             int ci; RKind cr=resolve(c,e->operand->name,&ci);
             if(cr==R_COORD && (!strcmp(e->field,"global")||!strcmp(e->field,"local")||!strcmp(e->field,"group"))){
                 Param *cp=&c->fn->params[ci]; char nm[64];
@@ -793,6 +801,7 @@ void emit_air(FILE *out, const Program *prog){
         fprintf(out,"!%d = !{%s, !%d, !%d}\n",node,fp,outs,args);
         for(size_t a=0;a<fn->nparams;a++){ Param *p=&fn->params[a]; char tn[64]; tn_of(tn,sizeof tn,p->ty.kind,p->ty.vecn);
             if(fn->stage==ST_VERTEX && p->ty.as==AS_THREAD){ fprintf(out,"!%d = !{i32 %d, !\"air.vertex_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",an[a],(int)a,p->name); }
+            else if(fn->stage==ST_FRAGMENT && p->ty.kind==T_FLOAT && p->ty.vecn==4){ fprintf(out,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"%s\"}\n",an[a],(int)a,p->name); }
             else if(p->ty.is_ptr) fprintf(out,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an[a],(int)a,(int)a,p->ty.as,type_size(p->ty.kind,p->ty.vecn),type_align(p->ty.kind,p->ty.vecn),tn,p->name);
             else fprintf(out,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an[a],(int)a,type_size(p->ty.kind,p->ty.vecn),(int)a,type_size(p->ty.kind,p->ty.vecn),type_align(p->ty.kind,p->ty.vecn),tn,p->name);
         }

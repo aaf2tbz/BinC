@@ -36,7 +36,9 @@ rather than exposed as fake host arguments.
 `binc_runtime.h` and `binc_runtime.m` provide the deliberately thin implementation: open a metallib, allocate
 shared buffers, bind buffer/constant arguments at their reflected locations, dispatch, wait for completion, and
 expose shared contents. The runtime is compiled with `make runtime` and intentionally does not invent a second
-binding schema; generated wrappers use the same parameter order and locations as the AIR metadata.
+binding schema; generated wrappers use the same parameter order and locations as the AIR metadata. The Pong host
+adds only Cocoa window/input, AVFoundation looping music, drawable/depth setup, and render-command encoding;
+arrow-up/W move up and arrow-down/D move down.
 
 ## The dispatch declaration
 

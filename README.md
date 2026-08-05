@@ -53,7 +53,10 @@ data-dependent branches and loop bounds are flagged at compile time (live today)
 
 The full function-by-function map of the compiler, every BinC→AIR mapping, and the metadata contract:
 **[`ARCHITECTURE.md`](ARCHITECTURE.md)**. The end-to-end playable sample is `examples/pong.binc` plus
-`examples/pong_host.m`; run `cd binc && make pong`, then `./pong_host` (W/S or A/Z moves the left paddle).
+`examples/pong_host.m`; run `cd binc && make pong`, then `./pong_host`. It is a GPU-generated 3-D arena with
+neon depth layers, a unique continuously varying atmospheric palette per round, a 30-second countdown,
+infinite 25%-faster rounds, GPU HUD scoreboard/lives geometry, arrow/W/D keyboard control, a full-length
+multi-section chiptune soundtrack, and GPU-event-triggered sound effects.
 
 ## Status: ✅ WORKING — compiles & runs on the GPU
 

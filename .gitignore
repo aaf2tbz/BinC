@@ -4,6 +4,9 @@
 *.metallib
 binc/binc
 binc/harness
+binc/pong_host
+binc/pong_host.log
+binc/binc_runtime.o
 .DS_Store
 build/
 # BUT keep the verified evidence in proof/ and reference/

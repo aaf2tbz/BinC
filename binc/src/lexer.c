@@ -20,7 +20,10 @@ void lex(const char *src, Token **out, size_t *out_n){
     for(;;){
         for(;;){ while(*l.p&&isspace((unsigned char)*l.p)){ if(*l.p=='\n')l.line++; l.p++; }
             if(l.p[0]=='/'&&l.p[1]=='/'){ while(*l.p&&*l.p!='\n')l.p++; }
-            else break; }
+            else if(l.p[0]=='/'&&l.p[1]=='*'){
+                l.p+=2; while(*l.p && !(l.p[0]=='*'&&l.p[1]=='/')){ if(*l.p=='\n')l.line++; l.p++; }
+                if(!*l.p) die(l.line,"unterminated block comment"); l.p+=2;
+            } else break; }
         if(!*l.p){ PUSH(tk(TK_EOF,l.line)); break; }
         int ln=l.line; char c=*l.p;
         if(c=='('){l.p++;PUSH(tk(TK_LPAREN,ln));continue;}

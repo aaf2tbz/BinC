@@ -1,34 +1,112 @@
-struct Game { float ballx, bally, vx, vy, left, right; };
+/* BinC owns the complete game: simulation, physics, rounds, lives, scoreboard,
+ * 3-D arena geometry, motion trails, vertex stage, and atmospheric fragment stage. */
+struct Game {
+    float ballx, bally, ballz, vx, vy, vz;
+    float left, right, trail, clock, round_time;
+    int round, lives, flash, event, player_score, ai_score;
+};
 
-void rect(device float4* v, int b, float cx, float cy, float hw, float hh) {
-    v[b + 0] = float4(cx - hw, cy - hh, 0.0f, 1.0f);
-    v[b + 1] = float4(cx + hw, cy - hh, 0.0f, 1.0f);
-    v[b + 2] = float4(cx + hw, cy + hh, 0.0f, 1.0f);
-    v[b + 3] = float4(cx - hw, cy - hh, 0.0f, 1.0f);
-    v[b + 4] = float4(cx + hw, cy + hh, 0.0f, 1.0f);
-    v[b + 5] = float4(cx - hw, cy + hh, 0.0f, 1.0f);
+void rect3(device float4* v, int b, float cx, float cy, float z, float hw, float hh) {
+    v[b + 0] = float4(cx - hw, cy - hh, z, 1.0f);
+    v[b + 1] = float4(cx + hw, cy - hh, z, 1.0f);
+    v[b + 2] = float4(cx + hw, cy + hh, z, 1.0f);
+    v[b + 3] = float4(cx - hw, cy - hh, z, 1.0f);
+    v[b + 4] = float4(cx + hw, cy + hh, z, 1.0f);
+    v[b + 5] = float4(cx - hw, cy + hh, z, 1.0f);
+}
+
+void arena(device float4* v, int b, int round) {
+    float bgz = 0.921875f + 0.015625f * sin(round * 0.5f);
+    rect3(v, b, 0.0f, 0.0f, bgz, 1.0f, 1.0f);
+    rect3(v, b + 6, 0.0f, -0.75f, 0.75f, 0.875f, 0.0078125f);
+    rect3(v, b + 12, 0.0f, -0.5f, 0.6875f, 0.875f, 0.0078125f);
+    rect3(v, b + 18, 0.0f, -0.25f, 0.625f, 0.875f, 0.0078125f);
+    rect3(v, b + 24, 0.0f, 0.0f, 0.5625f, 0.875f, 0.0078125f);
+    rect3(v, b + 30, 0.0f, 0.25f, 0.5f, 0.875f, 0.0078125f);
+    rect3(v, b + 36, 0.0f, 0.5f, 0.4375f, 0.875f, 0.0078125f);
+    rect3(v, b + 42, 0.0f, 0.75f, 0.375f, 0.875f, 0.0078125f);
+    rect3(v, b + 48, -0.75f, 0.0f, 0.5f, 0.0078125f, 0.875f);
+    rect3(v, b + 54, -0.5f, 0.0f, 0.4375f, 0.0078125f, 0.875f);
+    rect3(v, b + 60, -0.25f, 0.0f, 0.375f, 0.0078125f, 0.875f);
+    rect3(v, b + 66, 0.25f, 0.0f, 0.375f, 0.0078125f, 0.875f);
+    rect3(v, b + 72, 0.5f, 0.0f, 0.4375f, 0.0078125f, 0.875f);
+    rect3(v, b + 78, 0.75f, 0.0f, 0.5f, 0.0078125f, 0.875f);
+    rect3(v, b + 84, 0.0f, 0.875f, 0.25f, 0.03125f + round * 0.00390625f, 0.015625f);
+}
+
+void reset_ball(device Game* g, float direction) {
+    g[0].ballx = 0.0f; g[0].bally = 0.0f; g[0].ballz = 0.1875f;
+    g[0].vx = direction * 0.5f; g[0].vy = 0.25f; g[0].vz = 0.0f;
+    g[0].round_time = 30.0f;
 }
 
 kernel void update(device Game* g, device float4* vertices, float dt, float input) {
-    g->ballx += g->vx * dt;
-    g->bally += g->vy * dt;
-    g->left += input * dt * 2.5f;
+    g->event = 0;
+    g->clock += dt;
+    g->round_time -= dt;
+    float factor = pow(1.25f, g->round - 1);
+    float ball_speed = 0.5f * factor;
+    float paddle_speed = 0.75f * factor;
+    g->trail = g->ballx;
+    g->ballx += g->vx * factor * dt;
+    g->bally += g->vy * factor * dt;
+    g->ballz += g->vz * dt;
+    g->vz -= 0.75f * dt;
+    g->left += input * paddle_speed * dt;
+    /* The AI deliberately misses on a deterministic 5% slice of its cycle. */
+    float ai_roll = (0.5f + 0.5f * sin(g->clock * 3.0f + g->round)) * 100.0f;
+    if (ai_roll > 5.0f) {
+        if (g->right < g->bally) g->right += paddle_speed * dt;
+        if (g->right > g->bally) g->right -= paddle_speed * dt;
+    }
     if (g->left > 0.75f) g->left = 0.75f;
     if (g->left < -0.75f) g->left = -0.75f;
-    if (g->bally > 0.875f || g->bally < -0.875f) g->vy = -g->vy;
-    if (g->ballx > 0.875f) g->vx = -fabs(g->vx);
-    if (g->ballx < -0.875f) g->vx = fabs(g->vx);
-    if (g->ballx < -0.75f && fabs(g->bally - g->left) < 0.25f) g->vx = fabs(g->vx);
-    if (g->ballx > 0.75f && fabs(g->bally - g->right) < 0.25f) g->vx = -fabs(g->vx);
-    rect(vertices, 0, -0.875f, g->left, 0.03125f, 0.25f);
-    rect(vertices, 6, 0.875f, g->right, 0.03125f, 0.25f);
-    rect(vertices, 12, g->ballx, g->bally, 0.03125f, 0.03125f);
+    if (g->right > 0.75f) g->right = 0.75f;
+    if (g->right < -0.75f) g->right = -0.75f;
+    if (g->bally > 0.875f || g->bally < -0.875f) { g->vy = -g->vy; g->event = 1; }
+    if (g->ballz > 0.375f || g->ballz < 0.0625f) g->vz = -g->vz;
+    if (g->ballx < -0.75f && fabs(g->bally - g->left) < 0.25f) { g->vx = fabs(g->vx); g->event = 1; }
+    if (g->ballx > 0.75f && fabs(g->bally - g->right) < 0.25f) { g->vx = -fabs(g->vx); g->event = 1; }
+    /* A ball through the player costs a life and restarts the same round. */
+    if (g->ballx < -1.0f) {
+        g->lives -= 1; g->event = 2; g->flash = 1; reset_ball(g, 1.0f);
+        if (g->lives < 1) { g->lives = 3; g->round = 1; g->player_score = 0; g->ai_score = 0; }
+    }
+    /* Score, timeout, and restart advance an infinite round ladder. */
+    if (g->ballx > 1.0f || g->round_time < 0.0f) {
+        g->player_score += 1; g->round += 1; g->event = 3; g->flash = 2; reset_ball(g, -1.0f);
+    }
+
+    arena(vertices, 0, g->round);
+    /* Six depth-separated samples create a real GPU motion-blur trail. */
+    rect3(vertices, 90,  g->ballx - g->vx * 0.0625f, g->bally - g->vy * 0.0625f, 0.1875f, 0.0390625f, 0.0390625f);
+    rect3(vertices, 96,  g->ballx - g->vx * 0.125f,  g->bally - g->vy * 0.125f,  0.21875f, 0.03125f, 0.03125f);
+    rect3(vertices, 102, g->ballx - g->vx * 0.1875f, g->bally - g->vy * 0.1875f, 0.25f, 0.0234375f, 0.0234375f);
+    rect3(vertices, 108, g->ballx - g->vx * 0.25f,   g->bally - g->vy * 0.25f,   0.28125f, 0.015625f, 0.015625f);
+    rect3(vertices, 114, g->ballx - g->vx * 0.3125f, g->bally - g->vy * 0.3125f, 0.3125f, 0.01171875f, 0.01171875f);
+    rect3(vertices, 120, g->ballx - g->vx * 0.375f, g->bally - g->vy * 0.375f, 0.34375f, 0.0078125f, 0.0078125f);
+    rect3(vertices, 126, -0.875f, g->left, 0.125f, 0.03125f, 0.25f);
+    rect3(vertices, 132, 0.875f, g->right, 0.125f, 0.03125f, 0.25f);
+    rect3(vertices, 138, g->ballx, g->bally, g->ballz, 0.046875f, 0.046875f);
+    /* Lives and compact score bars are GPU-generated HUD geometry. */
+    for (int i = 0; i < 3; i += 1) {
+        if (i < g->lives) rect3(vertices, 144 + i * 6, -0.75f + i * 0.046875f, 0.875f, 0.125f, 0.015625f, 0.015625f);
+        else rect3(vertices, 144 + i * 6, 2.0f, 2.0f, 0.125f, 0.015625f, 0.015625f);
+    }
+    for (int i = 0; i < 5; i += 1) {
+        if (i < g->player_score % 6) rect3(vertices, 162 + i * 6, -0.5f + i * 0.03125f, 0.875f, 0.0625f, 0.01171875f, 0.0078125f);
+        else rect3(vertices, 162 + i * 6, 2.0f, 2.0f, 0.0625f, 0.0078125f, 0.0078125f);
+        if (i < g->ai_score % 6) rect3(vertices, 192 + i * 6, 0.5f - i * 0.03125f, 0.875f, 0.0625f, 0.01171875f, 0.0078125f);
+        else rect3(vertices, 192 + i * 6, 2.0f, 2.0f, 0.0625f, 0.0078125f, 0.0078125f);
+    }
 }
 
-vertex float4 pong_vs(device float4* vertices, vertex_id vid) {
-    return vertices[vid];
-}
+vertex float4 pong_vs(device float4* vertices, vertex_id vid) { return vertices[vid]; }
 
-fragment float4 pong_fs() {
-    return float4(1.0f, 1.0f, 1.0f, 1.0f);
+fragment float4 pong_fs(float4 pos) {
+    float wave = 0.5f + 0.5f * sin(pos.x * 4.0f + pos.y * 3.0f + pos.z * 8.0f);
+    if (pos.z > 0.890625f) return float4(0.015625f + wave * 0.25f, 0.03125f + wave * 0.1875f, 0.1875f + wave * 0.5f, 1.0f);
+    if (pos.z > 0.25f) return float4(0.0f, 0.5f + wave * 0.25f, 0.75f + wave * 0.25f, 1.0f);
+    if (pos.z > 0.125f) return float4(0.75f + wave * 0.25f, 0.03125f, 0.5f + wave * 0.25f, 1.0f);
+    return float4(0.875f + wave * 0.125f, 0.875f + wave * 0.125f, 1.0f, 1.0f);
 }

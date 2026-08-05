@@ -100,8 +100,11 @@ an `air.render_target` at index 0. `vertex_id` lowers to the `air.vertex_id` bui
 with the smallest useful stage-I/O contract: position-only vertices and a constant fragment color are sufficient
 for the Pong sample, while varying vertex outputs and `stage_in` remain future work.
 
-`examples/pong.binc` contains the GPU update kernel, geometry generation helper, vertex shader, and fragment
-shader. `examples/pong_host.m` is only the window/input/Metal command-loop seam.
+`examples/pong.binc` contains the GPU update kernel, 3-D depth-layered arena/HUD geometry, vertex shader, and
+position-driven atmospheric fragment shader. It owns rounds, a 30-second countdown, 25%-per-round ball/paddle speed scaling, lives, scoreboard
+state, opponent motion with a 5% miss window, and the neon effects. `examples/pong_host.m` is only the
+window/input/audio/Metal command-loop seam; `pong_music.wav` is a 96-second multi-section chiptune composition,
+with separate GPU-event-triggered hit, life-loss, and score sound effects.
 
 ## Coverage & what's left
 

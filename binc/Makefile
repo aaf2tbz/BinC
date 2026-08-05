@@ -22,7 +22,7 @@ examples: binc
 
 # Build the playable BinC Pong host after the compiler has generated its binding header.
 pong: runtime examples
-	DEVELOPER_DIR=$(DEV) xcrun clang -fobjc-arc -framework Metal -framework Foundation -framework Cocoa -framework QuartzCore ../examples/pong_host.m binc_runtime.o -I. -o pong_host
+	DEVELOPER_DIR=$(DEV) xcrun clang -fobjc-arc -framework Metal -framework Foundation -framework Cocoa -framework QuartzCore -framework AVFoundation ../examples/pong_host.m binc_runtime.o -I. -o pong_host
 
 # Compile + run each on the GPU, verifying against its .spec
 verify: binc harness examples
@@ -32,4 +32,4 @@ verify: binc harness examples
 clean:
 	rm -f binc harness pong_host binc_runtime.o build/*.metallib build/*.h *.ll *.air
 
-.PHONY: binc harness examples verify clean
+.PHONY: binc harness runtime examples pong verify clean
