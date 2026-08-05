@@ -100,7 +100,7 @@ typedef enum {
 typedef struct { TokKind kind; char *text; double fval; long ival; int line, col; } Token;
 typedef struct { Token *toks; size_t n; size_t i; } TokStream;
 
-void lex(const char *src, Token **out, size_t *out_n);
+void lex(const char *src, Token **out, size_t *out_n, int first_line);
 _Noreturn void die(int line, const char *fmt, ...);
 int had_errors(void);
 /* position of the expression/statement being lowered, for located die(0, ...) errors */

@@ -45,6 +45,10 @@ test-interp: binc
 		if [ "$$out" = "$$want" ]; then echo "PASS: $$t"; else echo "FAIL: $$t"; echo "  got: $$out"; echo "  want: $$want"; fail=1; fi; done; \
 	if [ $$fail -eq 0 ]; then echo "ALL INTERP TESTS PASS"; else exit 1; fi
 
+# tree-sitter grammar: every example + the prelude must parse with no ERROR nodes
+test-grammar:
+	@bash ../tools/tree-sitter-binc/test/parse_all.sh
+
 # GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
 ci: binc test-negative test-fuzz test-interp examples
 	@echo "CI OK"

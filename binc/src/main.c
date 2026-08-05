@@ -17,6 +17,7 @@ static const char *usage_text =
     "  -I <dir>             add an include search path\n"
     "  -no-prelude          disable the automatic prelude include\n"
     "  -i                   interpret on the CPU (scalar/vector subset, no GPU)\n"
+    "  -fsyntax-only        parse and type-check only; no AIR, metal, or output\n"
     "environment: METAL / METALLIB override the AIR tool invocations\n"
     "             (defaults: \"xcrun metal\" / \"xcrun metallib\")\n";
 
@@ -66,12 +67,18 @@ static char *splice_file(const char *path){
     fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
     char *text=malloc(n+1); if(n)fread(text,1,n,f); text[n]='\0'; fclose(f);
     char *dir=dirname_of(path);
-    Buf out={0}; long line=0; char *save=NULL;
-    for(char *ln=strtok_r(text,"\n",&save); ln; ln=strtok_r(NULL,"\n",&save)){
-        line++;
+    Buf out={0}; long line=0;
+    /* iterate lines preserving blanks (strtok_r would collapse them and shift
+     * every subsequent diagnostic line) */
+    char *ls=text;
+    for(char *p=text;;p++){
+        if(*p!='\n'&&*p!='\0') continue;
+        int is_last=(*p=='\0');
+        *p='\0';
+        char *ln=ls; line++;
         char *t=ln; while(*t==' '||*t=='\t')t++;
-        if(!strncmp(t,"once;",5)){ mark_once(path); continue; }
-        if(!strncmp(t,"include ",8)){
+        if(!strncmp(t,"once;",5)){ mark_once(path); }
+        else if(!strncmp(t,"include ",8)){
             char *q=t+8; while(*q==' '||*q=='\t')q++;
             if(*q!='"'){ fprintf(stderr,"binc: error (%s line %ld): include needs \"path\";\n",path,line); free(out.p); return NULL; }
             q++; char *end=strchr(q,'"'); if(!end){ fprintf(stderr,"binc: error (%s line %ld): unterminated include path\n",path,line); free(out.p); return NULL; }
@@ -86,9 +93,10 @@ static char *splice_file(const char *path){
                 if(!sub){ free(res); free(out.p); return NULL; }
                 bput(&out,sub,strlen(sub)); free(sub);
             }
-            free(res); continue;
-        }
-        bput(&out,ln,strlen(ln)); bput(&out,"\n",1);
+            free(res);
+        } else { bput(&out,ln,strlen(ln)); bput(&out,"\n",1); }
+        if(is_last) break;
+        ls=p+1;
     }
     free(text); free(dir);
     return out.p;
@@ -156,13 +164,14 @@ int main(int argc, char **argv) {
         char triple[64]; snprintf(triple,sizeof triple,"air64_v%d-apple-macosx%d.0.0",sdk+2,sdk);
         binc_set_air(triple,sdk,sdk-18);
     }
-    const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0; int no_prelude = 0; int interpret = 0;
+    const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0; int no_prelude = 0; int interpret = 0; int syntax_only = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i+1 < argc) outfile = argv[++i];
         else if (!strcmp(argv[i], "-I") && i+1 < argc) add_inc_dir(argv[++i]);
         else if (!strcmp(argv[i], "--emit-ll")) emit_ll_only = 1;
         else if (!strcmp(argv[i], "-no-prelude")) no_prelude = 1;
         else if (!strcmp(argv[i], "-i")) interpret = 1;
+        else if (!strcmp(argv[i], "-fsyntax-only")) syntax_only = 1;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { fputs(usage_text, stdout); return 0; }
         else if (!strcmp(argv[i], "--version")) { printf("binc %s\n", BINC_VERSION); return 0; }
         else if (argv[i][0] != '-') infile = argv[i];
@@ -171,13 +180,16 @@ int main(int argc, char **argv) {
     if (!infile) { fputs(usage_text, stderr); return 2; }
 
     /* preprocess: optional prelude, then the user file, splicing includes */
-    char *src;
+    char *src; int first_line = 1;
     {
         Buf all={0};
         if(!no_prelude){
             char *pre=find_prelude(argv[0]);
             if(pre){ char *spl=splice_file(pre);
                 if(!spl){ fprintf(stderr,"binc: error: prelude %s failed to load\n",pre); return 1; }
+                /* count prelude lines so user-file diagnostics keep their true line numbers */
+                for(const char *q=spl;*q;q++) if(*q=='\n') first_line++;
+                first_line = 1 - first_line; /* plus the separator newline the driver adds */
                 bput(&all,spl,strlen(spl)); bput(&all,"\n",1); free(spl); free(pre); }
         }
         char *main_spl=splice_file(infile);
@@ -187,11 +199,19 @@ int main(int argc, char **argv) {
     }
 
     Token *toks; size_t ntoks;
-    lex(src, &toks, &ntoks);
+    lex(src, &toks, &ntoks, first_line);
     TokStream ts = { toks, ntoks, 0 };
     Program prog = parse_program(&ts);
     if (had_errors()) return 1;
     if (interpret) { interp_run(&prog); return 0; }
+    if (syntax_only) {
+        /* the codegen is the type checker: run it into the void and report */
+        FILE *nullout = fopen("/dev/null", "wb");
+        if (!nullout) { fprintf(stderr, "binc: cannot open /dev/null\n"); return 1; }
+        emit_air(nullout, &prog);
+        fclose(nullout);
+        return had_errors() ? 1 : 0;
+    }
 
     char base[512]; base_name(infile, base, sizeof base);
     char ll[600], air[600], lib[700];

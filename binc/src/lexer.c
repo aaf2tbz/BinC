@@ -24,8 +24,8 @@ static char *dup_n(const char *s, size_t n){ char *p=malloc(n+1); memcpy(p,s,n);
 typedef struct { const char *p; int line; const char *line_start; } L;
 static Token tk(TokKind k,int ln,int col){ Token t={k,NULL,0,0,ln,col}; return t; }
 
-void lex(const char *src, Token **out, size_t *out_n){
-    L l={src,1,src}; Token *t=NULL; size_t n=0,cap=0;
+void lex(const char *src, Token **out, size_t *out_n, int first_line){
+    L l={src,first_line,src}; Token *t=NULL; size_t n=0,cap=0;
     #define PUSH(x) do{ if(n==cap){cap=cap?cap*2:64;t=realloc(t,cap*sizeof(Token));} t[n++]=(x);}while(0)
     for(;;){
         for(;;){ while(*l.p&&isspace((unsigned char)*l.p)){ if(*l.p=='\n'){l.line++; l.line_start=l.p+1;} l.p++; }
