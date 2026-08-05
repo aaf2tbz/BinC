@@ -43,7 +43,9 @@ int main(int argc, char **argv){
     if(!spec) die(@"cannot read spec file");
 
     NSString *kernel=nil;
+    NSString *vertexFn=nil, *fragmentFn=nil;
     long gx=-1, gy=1, gz=1, tx=-1, ty=1, tz=1;
+    long rw=-1, rh=-1, nrt=1, nverts=-1;
     id<MTLBuffer> bufs[31]; memset(bufs,0,sizeof bufs);
     id<MTLTexture> texs[31]; memset(texs,0,sizeof texs);
     NSMutableDictionary<NSNumber*,NSArray<NSString*>*> *bufSpec=[NSMutableDictionary dictionary];
@@ -51,6 +53,8 @@ int main(int argc, char **argv){
     NSMutableArray<NSArray<NSString*>*> *expectVals=[NSMutableArray array];
     NSMutableArray<NSNumber*> *expectHex=[NSMutableArray array];
     NSMutableDictionary<NSNumber*,NSArray<NSString*>*> *expectTexVals=[NSMutableDictionary dictionary];
+    NSMutableArray<NSArray<NSString*>*> *pixExpect=[NSMutableArray array];   /* rt x y r g b a */
+    NSMutableArray<NSArray<NSString*>*> *depExpect=[NSMutableArray array];   /* x y v */
 
     NSCharacterSet *ws=[NSCharacterSet whitespaceAndNewlineCharacterSet];
     for(NSString *line in [spec componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]){
@@ -60,6 +64,12 @@ int main(int argc, char **argv){
         if(!toks.count) continue;
         NSString *d=toks[0];
         if([d isEqualToString:@"kernel"]){ kernel=toks[1]; }
+        else if([d isEqualToString:@"vertex"]){ vertexFn=toks[1]; }
+        else if([d isEqualToString:@"fragment"]){ fragmentFn=toks[1]; }
+        else if([d isEqualToString:@"render"]){ rw=toks[1].integerValue; rh=toks[2].integerValue; if(toks.count>3) nrt=toks[3].integerValue; }
+        else if([d isEqualToString:@"draw"]){ nverts=toks[1].integerValue; }
+        else if([d isEqualToString:@"expectpix"]){ [pixExpect addObject:[toks subarrayWithRange:NSMakeRange(1,toks.count-1)]]; }
+        else if([d isEqualToString:@"expectdepth"]){ [depExpect addObject:[toks subarrayWithRange:NSMakeRange(1,toks.count-1)]]; }
         else if([d isEqualToString:@"grid"]){ gx=toks[1].integerValue; tx=gx; }
         else if([d isEqualToString:@"grid2"]){ gx=toks[1].integerValue; gy=toks[2].integerValue; tx=gx; ty=gy; }
         else if([d isEqualToString:@"grid3"]){ gx=toks[1].integerValue; gy=toks[2].integerValue; gz=toks[3].integerValue; tx=gx; ty=gy; tz=gz; }
@@ -88,17 +98,19 @@ int main(int argc, char **argv){
             [expectHex addObject:@([d isEqualToString:@"expecth"])]; }
         else die([NSString stringWithFormat:@"unknown directive '%@'",d]);
     }
-    if(!kernel||gx<0) die(@"spec needs 'kernel' and a grid directive");
+    if(vertexFn && fragmentFn){ if(rw<0||rh<0) die(@"render spec needs a size"); }
+    else if(!kernel||gx<0) die(@"spec needs 'kernel' and a grid directive, or 'vertex'/'fragment' for a render");
 
     id<MTLDevice> dev=MTLCreateSystemDefaultDevice();
     id<MTLCommandQueue> q=[dev newCommandQueue];
     NSError *err=nil;
     id<MTLLibrary> lib=[dev newLibraryWithURL:[NSURL fileURLWithPath:libPath] error:&err];
     if(!lib) die([err localizedDescription]);
-    id<MTLFunction> f=[lib newFunctionWithName:kernel];
-    if(!f) die([NSString stringWithFormat:@"no function %@",kernel]);
-    id<MTLComputePipelineState> cps=[dev newComputePipelineStateWithFunction:f error:&err];
-    if(!cps) die([err localizedDescription]);
+    id<MTLFunction> f=nil;
+    if(kernel) f=[lib newFunctionWithName:kernel];
+    if(!f && !(vertexFn&&fragmentFn)) die([NSString stringWithFormat:@"no function %@",kernel]);
+    id<MTLComputePipelineState> cps=nil;
+    if(f){ cps=[dev newComputePipelineStateWithFunction:f error:&err]; if(!cps) die([err localizedDescription]); }
 
     for(NSNumber *k in bufSpec){
         NSArray<NSString*> *toks=bufSpec[k]; int idx=k.intValue;
@@ -134,6 +146,52 @@ int main(int argc, char **argv){
     }
 
     id<MTLCommandBuffer> cb=[q commandBuffer];
+    id<MTLTexture> colorTexs[8]; memset(colorTexs,0,sizeof colorTexs);
+    id<MTLTexture> depthTex=nil;
+    if(vertexFn && fragmentFn){
+        /* ---- render mode: vertex + fragment pipeline ---- */
+        if(rw<0||rh<0) die(@"render spec needs a size");
+        MTLRenderPipelineDescriptor *rpd=[MTLRenderPipelineDescriptor new];
+        rpd.vertexFunction=[lib newFunctionWithName:vertexFn];
+        rpd.fragmentFunction=[lib newFunctionWithName:fragmentFn];
+        if(!rpd.vertexFunction||!rpd.fragmentFunction) die(@"render functions not found in library");
+        for(int i=0;i<nrt;i++) rpd.colorAttachments[i].pixelFormat=MTLPixelFormatRGBA32Float;
+        rpd.depthAttachmentPixelFormat=MTLPixelFormatDepth32Float;
+        id<MTLRenderPipelineState> rps=[dev newRenderPipelineStateWithDescriptor:rpd error:&err];
+        if(!rps) die([err localizedDescription]);
+        for(int i=0;i<nrt;i++){
+            MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:(NSUInteger)rw height:(NSUInteger)rh mipmapped:NO];
+            td.usage=MTLTextureUsageRenderTarget;
+            colorTexs[i]=[dev newTextureWithDescriptor:td];
+        }
+        MTLTextureDescriptor *dtd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:(NSUInteger)rw height:(NSUInteger)rh mipmapped:NO];
+        dtd.usage=MTLTextureUsageRenderTarget;
+        depthTex=[dev newTextureWithDescriptor:dtd];
+        MTLRenderPassDescriptor *rpd2=[MTLRenderPassDescriptor renderPassDescriptor];
+        for(int i=0;i<nrt;i++){
+            rpd2.colorAttachments[i].texture=colorTexs[i];
+            rpd2.colorAttachments[i].loadAction=MTLLoadActionClear;
+            rpd2.colorAttachments[i].storeAction=MTLStoreActionStore;
+            rpd2.colorAttachments[i].clearColor=MTLClearColorMake(0,0,0,0);
+        }
+        rpd2.depthAttachment.texture=depthTex;
+        rpd2.depthAttachment.loadAction=MTLLoadActionClear;
+        rpd2.depthAttachment.storeAction=MTLStoreActionStore;
+        rpd2.depthAttachment.clearDepth=1.0;
+        id<MTLRenderCommandEncoder> renc=[cb renderCommandEncoderWithDescriptor:rpd2];
+        [renc setRenderPipelineState:rps];
+        [renc setViewport:(MTLViewport){0,0,(double)rw,(double)rh,0,1}];
+        /* depth writes are disabled without a depth-stencil state */
+        MTLDepthStencilDescriptor *dsd=[MTLDepthStencilDescriptor new];
+        dsd.depthWriteEnabled=YES;
+        dsd.depthCompareFunction=MTLCompareFunctionAlways;
+        id<MTLDepthStencilState> dss=[dev newDepthStencilStateWithDescriptor:dsd];
+        [renc setDepthStencilState:dss];
+        for(int i=0;i<31;i++) if(bufs[i]) [renc setVertexBuffer:bufs[i] offset:0 atIndex:i];
+        if(nverts<0) die(@"render spec needs a 'draw' directive");
+        [renc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)nverts];
+        [renc endEncoding];
+    } else {
     id<MTLComputeCommandEncoder> enc=[cb computeCommandEncoder];
     [enc setComputePipelineState:cps];
     for(int i=0;i<31;i++) if(bufs[i]) [enc setBuffer:bufs[i] offset:0 atIndex:i];
@@ -146,7 +204,9 @@ int main(int argc, char **argv){
     for(int i=0;i<31;i++) if(!bufs[i]&&!texs[i]) [enc setSamplerState:defsamp atIndex:i];
     [enc dispatchThreads:MTLSizeMake((NSUInteger)gx,(NSUInteger)gy,(NSUInteger)gz)
        threadsPerThreadgroup:MTLSizeMake((NSUInteger)tx,(NSUInteger)ty,(NSUInteger)tz)];
-    [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    [enc endEncoding];
+    }
+    [cb commit]; [cb waitUntilCompleted];
     if(cb.status!=MTLCommandBufferStatusCompleted) die(@"GPU command buffer failed");
 
     int ok=1;
@@ -202,6 +262,33 @@ int main(int argc, char **argv){
         }
         free(px);
         printf("  tex%d readback %lux%lu verified\n",idx,(unsigned long)w,(unsigned long)h);
+    }
+    /* render-mode pixel and depth verification */
+    if(vertexFn && fragmentFn){
+        for(NSArray *pe in pixExpect){
+            int rt=[pe[0] intValue], x=[pe[1] intValue], y=[pe[2] intValue];
+            if(rt<0||rt>=nrt||!colorTexs[rt]) die(@"expectpix target out of range");
+            id<MTLTexture> t=colorTexs[rt];
+            float *px=malloc((size_t)rw*rh*16);
+            [t getBytes:px bytesPerRow:(NSUInteger)rw*16 fromRegion:MTLRegionMake2D(0,0,(NSUInteger)rw,(NSUInteger)rh) mipmapLevel:0];
+            for(int c=0;c<4;c++){
+                Word expw=parse_word(pe[3+c]); float expf; memcpy(&expf,&expw.bits,4);
+                float gotf=px[(y*rw+x)*4+c];
+                float tol=1e-4f*(fabsf(expf)+1.0f);
+                if(fabsf(gotf-expf)>tol){ printf("  rt%d[%d,%d].%c=%g exp %s X\n",rt,x,y,"rgba"[c],(double)gotf,[pe[3+c] UTF8String]); ok=0; }
+            }
+            free(px);
+        }
+        for(NSArray *de in depExpect){
+            int x=[de[0] intValue], y=[de[1] intValue];
+            float *db=malloc((size_t)rw*rh*4);
+            [depthTex getBytes:db bytesPerRow:(NSUInteger)rw*4 fromRegion:MTLRegionMake2D(0,0,(NSUInteger)rw,(NSUInteger)rh) mipmapLevel:0];
+            float gotf=db[y*rw+x];
+            Word expw=parse_word(de[2]); float expf; memcpy(&expf,&expw.bits,4);
+            float tol=1e-4f*(fabsf(expf)+1.0f);
+            if(fabsf(gotf-expf)>tol){ printf("  depth[%d,%d]=%g exp %s X\n",x,y,(double)gotf,[de[2] UTF8String]); ok=0; }
+            free(db);
+        }
     }
     printf(ok?"\n✅ %s correct on GPU\n":"\n❌ %s mismatch\n",[kernel UTF8String]);
     return ok?0:1;

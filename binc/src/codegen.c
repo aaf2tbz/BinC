@@ -1422,7 +1422,7 @@ static void gen_stmt(CG *c, Stmt *s){
                     char fl[32]; ll_of(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.vecn);
                     char lt[256]; stage_lit_type(lt,sizeof lt,sd);
                     const char *ins=newtmp(c);
-                    emit(c,"  %s = insertvalue %s undef, %s %s, %zu\n",ins,lt,fl,ev,f);
+                    emit(c,"  %s = insertvalue %s %s, %s %s, %zu\n",ins,lt,lit,fl,ev,f);
                     lit=ins;
                 }
                 char lt[256]; stage_lit_type(lt,sizeof lt,sd);
