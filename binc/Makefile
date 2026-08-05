@@ -82,7 +82,7 @@ corpus-parse:
 
 # differential smoke: reference side (DXC -> SPIRV-Cross -> metal -> harness)
 diff-smoke:
-	@bash ../tools/hlsl-diff/diff.sh --reference-only -g 4 -w 4 ../tools/hlsl-diff/tests/hello_hlsl/main.hlsl
+	@bash ../tools/hlsl-diff/diff.sh --reference-only -g 4 -w 4 $(abspath ../tools/hlsl-diff/tests/hello_hlsl/main.hlsl)
 
 # GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
 ci: binc test-negative test-fuzz test-interp examples

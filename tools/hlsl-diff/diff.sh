@@ -47,13 +47,18 @@ fi
 dxc -E "$ENTRY" -T "$PROFILE" -spirv -fspv-target-env=vulkan1.2 \
     -fvk-use-dx-layout "$SRC" -Fo "$WORK/ref.spv" || { echo "FAIL: dxc rejected $SRC"; exit 1; }
 spirv-cross "$WORK/ref.spv" --msl --msl-version 30000 --entry "$ENTRY" \
-    -o "$WORK/ref.metal" || { echo "FAIL: spirv-cross"; exit 1; }
+    --output "$WORK/ref.metal" || { echo "FAIL: spirv-cross"; exit 1; }
 DEVELOPER_DIR="$DEV" xcrun metal -c "$WORK/ref.metal" -o "$WORK/ref.air" 2>"$WORK/ref.metal.log" \
     || { echo "FAIL: metal rejected the MSL (see $WORK/ref.metal.log)"; exit 1; }
 DEVELOPER_DIR="$DEV" xcrun metallib "$WORK/ref.air" -o "$WORK/ref.metallib" || exit 1
 
+# spirv-cross renames entry points that collide with Metal's reserved 'main'
+# (main -> main0); the harness needs the real kernel name from the MSL.
+KERN=$(grep -oE "kernel void [A-Za-z_][A-Za-z0-9_]*" "$WORK/ref.metal" | head -1 | awk '{print $3}')
+[ -n "${KERN:-}" ] || { echo "FAIL: no kernel found in generated MSL"; exit 1; }
+
 SPEC="$WORK/run.spec"
-printf "kernel %s\ngrid %d\nout %d %d\ndump %d\n" "$ENTRY" "$GRID" "$OUTIDX" "$WORDS" "$OUTIDX" > "$SPEC"
+printf "kernel %s\ngrid %d\nout %d %d\ndump %d\n" "$KERN" "$GRID" "$OUTIDX" "$WORDS" "$OUTIDX" > "$SPEC"
 
 run_ref() {
   binc/harness "$WORK/ref.metallib" "$SPEC" 2>/dev/null | grep "^buf$OUTIDX:" || { echo "FAIL: reference dispatch"; exit 1; }

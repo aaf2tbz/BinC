@@ -1,11 +1,12 @@
 #!/bin/bash
 # tools/hlsl-diff/corpus-parse.sh — DXC acceptance gate over the manifest.
 #
-# For every shader in tools/vendor/corpus.json that has a vs/ps/cs profile,
-# compile it with DXC using that profile (the reference toolchain). Reports
-# pass/fail counts and the worst offenders. This validates the corpus
-# manifest + the reference toolchain; the BinC-frontend gate replaces the
-# "ours" side in Phase 1.
+# Compiles a curated set of corpus shaders with DXC (the reference toolchain):
+#   - tools/vendor/sample_profiles.json: hand-maintained (profile, entry) map
+#     for sample shaders whose build system drives -E/-T externally
+#   - scanner-guessed sm4+ profiles from corpus.json as a fallback
+# Reports pass/fail counts. This validates the manifest + reference toolchain;
+# the BinC-frontend gate replaces the "ours" side in Phase 1.
 #
 # env: CORPUS_LIMIT=N  cap the number of files tried (default: all)
 set -u
@@ -19,19 +20,36 @@ pass=0; fail=0; skip=0; : > /tmp/corpus_fail.txt
 count=0
 python3 - <<'EOF' > /tmp/corpus_jobs.txt
 import json
+jobs = []
+
+# 1. curated profiles (authoritative where present)
+curated = json.load(open("tools/vendor/sample_profiles.json"))
+for path, info in curated.items():
+    for i, prof in enumerate(info["profiles"]):
+        entry = info["entries"][i] if i < len(info["entries"]) else info["entries"][0]
+        jobs.append((path, prof, entry))
+
+# 2. scanner guesses: sm4+ vs/ps/cs, excluding DXC's own test tree
 d = json.load(open("tools/vendor/corpus.json"))
 for s in d["shaders"]:
-    profs = [p for p in s["profiles"] if p.startswith(("vs_", "ps_", "cs_"))]
+    if s["file"].startswith("DirectXShaderCompiler/") or s["file"] in curated:
+        continue
+    profs = [p for p in s["profiles"]
+             if p.startswith(("vs_", "ps_", "cs_")) and int(p.split("_")[1]) >= 4]
     if not profs:
         continue
     entry = s["entries"][0] if s["entries"] else "main"
-    print(f"{s['file']}\t{profs[0]}\t{entry}")
+    jobs.append((s["file"], profs[0], entry))
+
+for path, prof, entry in jobs:
+    print(f"{path}\t{prof}\t{entry}")
 EOF
 while IFS=$'\t' read -r file profile entry; do
-    [ -f "third_party/$file" ] || { skip=$((skip+1)); continue; }
+    [ -f "third_party/$file" ] && f="third_party/$file" || f="$file"
+    [ -f "$f" ] || { skip=$((skip+1)); continue; }
     if [ "$LIMIT" -gt 0 ] && [ "$count" -ge "$LIMIT" ]; then break; fi
     count=$((count+1))
-    if dxc -T "$profile" -E "$entry" "third_party/$file" -Fo /tmp/corpus.dxil >/dev/null 2>&1; then
+    if dxc -T "$profile" -E "$entry" "$f" -Fo /tmp/corpus.dxil >/dev/null 2>&1; then
         pass=$((pass+1))
     else
         fail=$((fail+1)); echo "$file ($profile, -E $entry)" >> /tmp/corpus_fail.txt

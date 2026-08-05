@@ -32,9 +32,9 @@ plus every texture.
 
 ## Toolchain (reference side of the differential harness)
 
-- `dxc` — `brew install directxshadercompiler` (prebuilt; the source in
-  `DirectXShaderCompiler/` can build it too via cmake+ninja). Emits DXIL and
-  SPIR-V.
+- `dxc` — built from the vendored source (`make` in
+  `DirectXShaderCompiler/build`), or `brew install directx-headers` provides
+  the d3d12 headers the build needs. Emits DXIL and SPIR-V.
 - `spirv-cross` — `brew install spirv-cross` (prebuilt CLI). Emits MSL from
   SPIR-V.
 

@@ -1,0 +1,10 @@
+{
+  "DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloTriangle/shaders.hlsl": { "profiles": ["vs_6_0", "ps_6_0"], "entries": ["VSMain", "PSMain"] },
+  "DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloConstBuffers/shaders.hlsl": { "profiles": ["vs_6_0", "ps_6_0"], "entries": ["VSMain", "PSMain"] },
+  "DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloTexture/shaders.hlsl": { "profiles": ["vs_6_0", "ps_6_0"], "entries": ["VSMain", "PSMain"] },
+  "DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloFrameBuffering/shaders.hlsl": { "profiles": ["vs_6_0", "ps_6_0"], "entries": ["VSMain", "PSMain"] },
+  "DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloBundles/shaders.hlsl": { "profiles": ["vs_6_0", "ps_6_0"], "entries": ["VSMain", "PSMain"] },
+  "DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloPartialGraphicsPrograms/shaders.hlsl": { "profiles": ["vs_6_0", "ps_6_0"], "entries": ["VSMain", "PSMain"] },
+  "DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloGenericPrograms/shaders.hlsl": { "profiles": ["vs_6_0", "ps_6_0"], "entries": ["VSMain", "PSMain"] },
+  "tools/hlsl-diff/tests/hello_hlsl/main.hlsl": { "profiles": ["cs_6_0"], "entries": ["main"] }
+}
