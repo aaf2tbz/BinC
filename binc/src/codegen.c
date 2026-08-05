@@ -131,6 +131,7 @@ static char *element_ptr_idx(CG *c,int pi,const char *ix){
     return s;
 }
 static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark);
+static const char *gen_cond(CG *c, Expr *e);
 
 static const char *gen_rval(CG *c, Expr *e, ValKind *k);
 
@@ -437,6 +438,23 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         emit(c,"  store %s %s, %s %s, align %d\n",ll,sv,pty,addr,type_align(li.tk,vw));
         *k=scalar_vk(li.tk); c->rvw=vw; return ev;
     }
+    case E_TERNARY:{
+        const char *cv=gen_cond(c,e->operand);
+        ValKind ak; const char *av=gen_rval(c,e->lhs,&ak); int aw=c->rvw;
+        ValKind bk; const char *bv=gen_rval(c,e->rhs,&bk); int bw=c->rvw;
+        int vw=aw?aw:bw;
+        if(aw&&bw&&aw!=bw) die(0,"vector width mismatch in ternary");
+        int isf=(ak==VK_F32||bk==VK_F32);
+        ValKind ok=isf?VK_F32:((ak==VK_U32||bk==VK_U32)?VK_U32:VK_I32);
+        av=coerce(c,av,ak,ok); bv=coerce(c,bv,bk,ok);
+        const char *elt=ok==VK_F32?"float":"i32";
+        const char *r=newtmp(c); *k=ok; c->rvw=vw;
+        if(vw){ if(!aw) av=splat(c,av,elt,vw); if(!bw) bv=splat(c,bv,elt,vw);
+            const char *mask=splat(c,cv,"i1",vw);
+            char ty[32]; ll_of(ty,sizeof ty,ok==VK_F32?T_FLOAT:T_INT32,vw);
+            emit(c,"  %s = select %s %s, %s %s, %s %s\n",r,ty,mask,ty,av,ty,bv); }
+        else emit(c,"  %s = select i1 %s, %s %s, %s %s\n",r,cv,elt,av,elt,bv);
+        return r; }
     case E_CALL:{
         if(e->callee && e->callee->kind==E_FIELD){
             if(strcmp(e->name,"add")) die(0,"unsupported atomic method %s",e->name);

@@ -1,0 +1,8 @@
+kernel void k(device float* out, device int* iout, coord1D i) {
+    out[i] = i < 4 ? 1.0f : 0.5f;       /* threads 0-3: 1.0; 4-7: 0.5 */
+    iout[i] = i == 0 ? 7 : (i == 1 ? 42 : -1);  /* nested ternary */
+    float4 a = (float4)1.0f;
+    float4 b = (float4)2.0f;
+    float4 c = i < 2 ? a : b;           /* vector arms, scalar condition */
+    out[i + 8] = c.x;                   /* 1.0, 1.0, then 2.0 */
+}

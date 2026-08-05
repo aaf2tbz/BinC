@@ -158,8 +158,18 @@ static Expr *parse_or(TokStream *ts){
     while(peek(ts)->kind==TK_OR){ Token *ot=peek(ts); advance(ts); Expr *r=parse_and(ts); Expr *e=E(E_LOG,ot->line,ot->col); e->log=L_OR; e->lhs=l; e->rhs=r; l=e; }
     return l;
 }
+static Expr *parse_ternary(TokStream *ts){
+    Expr *c=parse_or(ts);
+    Token *qt=peek(ts);
+    if(qt->kind!=TK_QUESTION) return c;
+    advance(ts);
+    Expr *a=parse_expr(ts);           /* full expression: allows nested ternaries */
+    expect(ts,TK_COLON,":");
+    Expr *b=parse_ternary(ts);        /* right-associative */
+    Expr *e=E(E_TERNARY,qt->line,qt->col); e->operand=c; e->lhs=a; e->rhs=b; return e;
+}
 static Expr *parse_assign(TokStream *ts){
-    Expr *l=parse_or(ts); Token *ot=peek(ts); TokKind k=ot->kind; AssignOp op;
+    Expr *l=parse_ternary(ts); Token *ot=peek(ts); TokKind k=ot->kind; AssignOp op;
     if(k==TK_EQ)op=A_ASSIGN; else if(k==TK_PLUSEQ)op=A_ADDEQ; else if(k==TK_MINUSEQ)op=A_SUBEQ;
     else if(k==TK_STAREQ)op=A_MULEQ; else if(k==TK_SLASHEQ)op=A_DIVEQ; else if(k==TK_MODEQ)op=A_MODEQ;
     else if(k==TK_AMPEQ)op=A_ANDEQ; else if(k==TK_PIPEEQ)op=A_OREQ; else if(k==TK_CARETEQ)op=A_XOREQ;
