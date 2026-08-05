@@ -1,0 +1,12 @@
+kernel void k(device float* out, coord1D i) {
+    float4 a = float4(1.0f, 5.0f, 3.0f, 9.0f);
+    float4 b = float4(4.0f, 2.0f, 8.0f, 6.0f);
+    float4 r = select(a, b, a < b);      /* a[i] where a<b, else b[i] */
+    out[i]      = r.x + r.y + r.z + r.w; /* 1+2+3+6 = 12 */
+    int4 ia = int4(1, 2, 3, 4);
+    int4 ib = int4(4, 3, 2, 1);
+    int4 ir = select(ia, ib, ia < ib);   /* 1, 2, 2, 1 */
+    out[i + 8]  = (float)(ir.x + ir.y + ir.z + ir.w);  /* 6 */
+    float s = select(3.0f, 7.0f, i < 4); /* scalar select */
+    out[i + 16] = s;
+}

@@ -458,11 +458,22 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         const char *v=newtmp(c); *k=ok;
         emit(c,"  %s = %s %s %s, %s\n",v,op,isf?"float":"i32",l,r); return v; }
     case E_CMP:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw;
-        const char *r=gen_rval(c,e->rhs,&rk);
-        if(lw||c->rvw) die(0,"vector comparison not supported");
+        const char *r=gen_rval(c,e->rhs,&rk); int rw=c->rvw;
+        int vw=lw?lw:rw;
+        if(lw&&rw&&lw!=rw) die(0,"vector width mismatch in comparison");
         int isf=(lk==VK_F32||rk==VK_F32);
-        if(isf){ l=coerce(c,l,lk,VK_F32); r=coerce(c,r,rk,VK_F32); }
         int uns=(lk==VK_U32||rk==VK_U32);
+        if(vw){
+            /* vector comparison: <n x i1> mask, usable with select() */
+            const char *elt=isf?"float":"i32";
+            ValKind want=isf?VK_F32:(uns?VK_U32:VK_I32);
+            if(!lw){ l=coerce(c,l,lk,want); l=splat(c,l,elt,vw); } else if(lk!=want) l=vconv(c,l,vw,lk,want);
+            if(!rw){ r=coerce(c,r,rk,want); r=splat(c,r,elt,vw); } else if(rk!=want) r=vconv(c,r,vw,rk,want);
+            const char *v=newtmp(c); *k=VK_I1; c->rvw=vw;
+            emit(c,"  %s = %s %s <%d x %s> %s, %s\n",v,isf?"fcmp":"icmp",cmp_name(e->cmp,isf,uns),vw,elt,l,r);
+            return v;
+        }
+        if(isf){ l=coerce(c,l,lk,VK_F32); r=coerce(c,r,rk,VK_F32); }
         const char *v=newtmp(c); *k=VK_I1;
         emit(c,"  %s = %s %s %s %s, %s\n",v,isf?"fcmp":"icmp",cmp_name(e->cmp,isf,uns),isf?"float":"i32",l,r); return v; }
     case E_LOG:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw;
@@ -544,6 +555,29 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 const char *r=newtmp(c);
                 emit(c,"  %s = insertelement <%d x %s> %s, %s %s, i32 %d\n",r,cn,elt,acc,elt,v,i); acc=r; }
             *k=scalar_vk(cb); c->rvw=cn; return acc;
+        }
+        /* select(a, b, mask): per-element pick, scalar or vector */
+        if(!strcmp(e->name,"select")){
+            if(e->nargs!=3) die(0,"select expects 3 arguments");
+            ValKind ak; const char *av=gen_rval(c,e->args[0],&ak); int aw=c->rvw;
+            ValKind bk; const char *bv=gen_rval(c,e->args[1],&bk); int bw=c->rvw;
+            ValKind mk; const char *mv=gen_rval(c,e->args[2],&mk); int mw=c->rvw;
+            if(mk!=VK_I1) die(0,"select mask must be a bool");
+            int vw=aw?aw:(bw?bw:mw);
+            if((aw&&bw&&aw!=bw)||(aw&&mw&&aw!=mw)||(bw&&mw&&bw!=mw)) die(0,"select vector width mismatch");
+            int isf=(ak==VK_F32||bk==VK_F32);
+            ValKind ok=isf?VK_F32:((ak==VK_U32||bk==VK_U32)?VK_U32:VK_I32);
+            av=coerce(c,av,ak,ok); bv=coerce(c,bv,bk,ok);
+            const char *elt=ok==VK_F32?"float":"i32";
+            const char *r=newtmp(c); *k=ok; c->rvw=vw;
+            if(vw){
+                if(!aw) av=splat(c,av,elt,vw); if(!bw) bv=splat(c,bv,elt,vw);
+                if(!mw) mv=splat(c,mv,"i1",vw);
+                char ty[32], mty[32]; ll_of(ty,sizeof ty,ok==VK_F32?T_FLOAT:T_INT32,vw);
+                snprintf(mty,sizeof mty,"<%d x i1>",vw);
+                emit(c,"  %s = select %s %s, %s %s, %s %s\n",r,mty,mv,ty,av,ty,bv);
+            } else emit(c,"  %s = select i1 %s, %s %s, %s %s\n",r,mv,elt,av,elt,bv);
+            return r;
         }
         /* user function? the whole Program is visible, so definition order doesn't matter */
         Function *f=NULL; for(size_t i=0;i<c->prog->nfuncs;i++)
@@ -879,7 +913,8 @@ static void emit_kernel_meta(Meta *m, const Program *prog, Function *fn, KernelM
             tn_of(tnb,sizeof tnb,p->ty.kind,p->ty.vecn); const char *tn=tnb;
             if(p->ty.kind==T_ATOMIC){ snprintf(tnb,sizeof tnb,"metal::_atomic"); tn=tnb; }
             if(p->ty.kind==T_STRUCT){ StructDef *s=find_struct(prog,p->ty.struct_name);
-                sz=struct_layout(s,&al); snprintf(tnb,sizeof tnb,"%s",p->ty.struct_name); tn=tnb; }
+                if(s){ sz=struct_layout(s,&al); snprintf(tnb,sizeof tnb,"%s",p->ty.struct_name); tn=tnb; }
+                else { sz=4; al=4; snprintf(tnb,sizeof tnb,"%s",p->ty.struct_name); tn=tnb; } }
             int an=km->argnode[ai++];
             if(p->ty.kind==T_ATOMIC) meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.struct_type_info\", !%d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an,a,a,acc,p->ty.as,km->structnode[a],sz,al,tn,p->name);
             else meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an,a,a,acc,p->ty.as,sz,al,tn,p->name); }
