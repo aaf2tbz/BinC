@@ -1,0 +1,6 @@
+// blend.binc — the canonical BinC "hello world".
+// A plain-C-looking kernel that blends two float buffers 50/50.
+// BinC runs it as a Metal compute grid (one thread per element).
+kernel void blend(device float* a, device float* b, device float* out) {
+    *out = *a * 0.5 + *b * 0.5;
+}

@@ -1,0 +1,12 @@
+# build artifacts
+*.ll
+*.air
+*.metallib
+binc/binc
+binc/harness
+.DS_Store
+build/
+# BUT keep the verified evidence in proof/ and reference/
+!/proof/*.ll
+!/proof/*.metallib
+!/reference/*.ll

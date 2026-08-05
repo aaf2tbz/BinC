@@ -1,0 +1,19 @@
+// control.binc — exercises the broadened language:
+//   scalar locals, integer loop counter, uniform `for`, if/else-if/else, comparisons, division.
+// Computes out = clamp(a * k, lo, hi); the loop is just to exercise control flow + locals.
+kernel void sc(device float* a, device float* out, float k, float lo, float hi) {
+    float v = *a * k;
+    int n = 3;
+    float acc = 0;
+    for (int i = 0; i < n; i = i + 1) {
+        acc = acc + v;
+    }
+    float avg = acc / 3;        // == v
+    if (avg < lo) {
+        *out = lo;
+    } else if (avg > hi) {
+        *out = hi;
+    } else {
+        *out = avg;
+    }
+}

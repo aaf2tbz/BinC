@@ -1,0 +1,18 @@
+// dogpark.binc — every good dog gets a bone.
+struct Dog {
+    float bones;
+    float happy;
+    float tail_wags;
+};
+
+kernel void give_bone(device Dog* dogs, float treat) {
+    dogs->bones = dogs->bones + 1;
+    float joy = dogs->happy + treat;
+    if (joy > 1) {
+        dogs->tail_wags = dogs->tail_wags + 10;
+        joy = 1;
+    } else {
+        dogs->tail_wags = dogs->tail_wags + joy * 5;
+    }
+    dogs->happy = joy;
+}

@@ -1,0 +1,13 @@
+// step.binc — a struct + scalar-param kernel: one physics step over particles.
+// `p` is a device array of Particles; `dt` is a uniform scalar (BinC auto-lowers
+// it to a constant buffer). The body reads `p->vx`, writes `p->x`, etc.
+struct Particle {
+    float x, y, z;
+    float vx, vy, vz;
+};
+
+kernel void step(device Particle* p, float dt) {
+    p->x += p->vx * dt;
+    p->y += p->vy * dt;
+    p->z += p->vz * dt;
+}
