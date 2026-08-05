@@ -227,6 +227,7 @@ static void fill_param_li(CG *c,int pi,LInfo *li){
 static const char *emit_load_t(CG *c, LInfo *li, const char *addr, ValKind *k){
     if(li->tk==T_STRUCT){
         StructDef *sd=find_struct(c->prog,li->sname);
+        if(!sd) die(0,"unknown struct %s",li->sname);
         int sal; struct_layout(sd,&sal);
         char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",li->sname);
         char sp[64]; snprintf(sp,sizeof sp,"%%struct.%s*",li->sname);
@@ -970,7 +971,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             if(!c->rstruct||strcmp(c->rstruct,li.sname)) die(0,"struct type mismatch in assignment");
             char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",li.sname);
             char sp[64]; snprintf(sp,sizeof sp,"%%struct.%s*",li.sname);
-            int sal; StructDef *sd=find_struct(c->prog,li.sname); struct_layout(sd,&sal);
+            int sal; StructDef *sd=find_struct(c->prog,li.sname);
+            if(!sd) die(0,"unknown struct %s",li.sname);
+            struct_layout(sd,&sal);
             emit(c,"  store %s %s, %s %s, align %d\n",sn,rhs,sp,addr,sal);
             *k=VK_I32; c->rvw=0; c->rstruct=li.sname; return rhs;
         }

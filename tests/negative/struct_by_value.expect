@@ -1,1 +1,1 @@
-struct-by-value parameter only in fragment functions (stage-in)
+kernel struct-by-value parameters not supported
