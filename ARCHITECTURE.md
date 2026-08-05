@@ -28,11 +28,11 @@ The compiler is a bootstrap C11 program. It has no external parser library and d
 | File | Responsibility |
 |---|---|
 | `binc/src/binc.h` | Token kinds, types, AST structures, public compiler entry points |
-| `binc/src/lexer.c` | C-like tokenizer, comments, literals, keywords, compiler errors |
-| `binc/src/parser.c` | Recursive-descent parser for structs, functions, expressions, and statements |
-| `binc/src/codegen.c` | Type-directed AIR emission, control flow, metadata, built-ins |
-| `binc/src/main.c` | File loading, compiler driver, `metal`/`metallib`, generated host header |
-| `binc/harness.m` | Generic spec parser, Metal dispatch, result comparison |
+| `binc/src/lexer.c` | C-like tokenizer with line/column tracking, comments, literals, keywords |
+| `binc/src/parser.c` | Recursive-descent parser (structs, functions, expressions, statements), per-construct error recovery, `constant` globals, `const` locals, texture/sampler/matrix types |
+| `binc/src/codegen.c` | Type-directed AIR emission (~2,100 lines): values, memory, control flow, uniformity, built-ins, composite math, matrices, texture intrinsics, structured metadata builder |
+| `binc/src/main.c` | File loading, CLI, compiler driver, `xcrun`-based `metal`/`metallib`, generated host header |
+| `binc/harness.m` | Generic spec parser (buffers, textures, samplers), Metal dispatch, result comparison, texture readback |
 | `binc/binc_runtime.h/.m` | Thin host runtime used by generated headers |
 
 The implementation intentionally uses short-lived process memory. AST nodes and strings are allocated with `malloc`/`realloc` and are reclaimed by process exit.
@@ -155,12 +155,12 @@ The Pong host uses the runtime for its compute update and then uses the exposed 
 `make verify`:
 
 1. builds `binc` and the Objective-C harness
-2. compiles every `examples/*.binc`
+2. compiles every `examples/*.binc` (28 examples: compute, bitwise, casts, ternary, control flow, swizzles, vector select, matrices, textures)
 3. dispatches every matching `.spec` on the GPU
-4. compares integer words exactly and float words with tolerance
+4. compares integer words exactly and float words with tolerance; textures declared with `tex <idx> <w> <h>` are filled deterministically and kernel writes verified by host readback (`expecttex`)
 5. reports `ALL EXAMPLES VERIFIED ON GPU`
 
-The Pong spec checks a safe GPU update dispatch with the complete state and vertex-buffer sizes. The playable host is additionally built by `make pong` and smoke-launched with `nohup` during development.
+Additional gates: `make test-negative` (compile-error suite), `make test-fuzz` (mutation fuzzer; has caught two real bugs — a layout-sensitive varargs crash and a NULL struct-metadata deref), and `.github/workflows/ci.yml` (GPU-free: build + negative + fuzz + compile every example to `.metallib`). The Pong spec checks a safe GPU update dispatch with the complete state and vertex-buffer sizes. The playable host is additionally built by `make pong` and smoke-launched with `nohup` during development.
 
 ---
 
@@ -169,4 +169,4 @@ The Pong spec checks a safe GPU update dispatch with the complete state and vert
 - AIR metadata and target versions follow the installed Xcode beta.
 - The compiler is a bootstrap compiler, not a production optimizer.
 - The current type checker does not implement every planned address-space/race guarantee.
-- Texture, sampler, general stage-I/O, mesh, class, generic, and facade support remains future work even when reference AIR probes exist for those concepts.
+- General stage-I/O, mesh, class, generic, and facade support remains future work even when reference AIR probes exist for those concepts.

@@ -28,11 +28,13 @@ threadgroup float tile[16][16];
 ## What the current compiler enforces
 
 - Device, constant, thread, and threadgroup pointer types lower to their proper AIR address spaces.
-- Pointers passed to user functions must belong to the caller's own buffer parameters and match type/address space.
+- Pointers passed to user functions must belong to the caller's own buffer parameters and match type, address space, struct identity, and matrix width.
 - Threadgroup arrays become address-space-3 module globals.
 - Atomic buffers use a dedicated atomic wrapper and cannot be treated as ordinary scalar memory.
+- `const` locals reject every write (assignment, compound assignment, swizzle stores).
 - Whole structs cannot be used as scalar rvalues.
 - Pointer arithmetic and indexing are type-directed.
+- Texture and sampler parameters are valid only as kernel arguments and method receivers (`read`/`write`/`sample`); matrix-by-value parameters and returns are rejected.
 
 ---
 
@@ -89,9 +91,8 @@ The barrier legality check is implemented. Full read-after-write dominance and b
 
 These are design targets, not current promises:
 
-- Complete nominal address-space conversion checking
 - Dominance-based proof that a threadgroup read follows a barrier
-- Interprocedural uniformity inference
+- Interprocedural uniformity inference beyond varying argument propagation
 - Better diagnostics for coalescing and scattered accesses
-- Texture/sampler/resource types
+- Sampler state objects in BinC source (the harness binds a default nearest/clamp sampler)
 - Borrow/lifetime checking for shared-memory references

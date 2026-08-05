@@ -12,7 +12,7 @@ The project now includes a complete playable 3-D Pong example. The game simulati
 
 **Working and GPU-verified on this machine:**
 
-- Scalar, integer, unsigned, half, vector, and struct values
+- Scalar, integer, unsigned, half, vector, struct, and matrix (`mat2`/`mat3`/`mat4`) values
 - Device, constant, thread, and threadgroup address spaces
 - Implicit 1-D element-wise kernels
 - Explicit `coord1D`, `coord2D`, and `coord3D` domains
@@ -20,12 +20,18 @@ The project now includes a complete playable 3-D Pong example. The game simulati
 - Threadgroup shared-memory arrays and `sync()` barriers
 - Atomic add operations
 - Divergence warnings and compile-time rejection of barriers in divergent control flow
+- `texture2d<float|half|int|uint>` and `sampler` kernel parameters with `read()`/`write()`/`sample()` methods
+- Bitwise operators, shifts, hex literals, explicit casts, and lossy-conversion warnings
+- Ternary expressions, `do-while` loops, `switch` statements, module `constant` globals
+- Vector swizzle reads (`v.wzyx`) and writes (`v.xy = ...`), vector comparisons, and `select`
+- Full vectorized math library (`dot`, `cross`, `length`, `normalize`, `clamp`, `mix`, `step`, `smoothstep`, `fract`, `mod`, `atan2`, `rsqrt`, `sign`, ...)
+- `const` locals with write rejection, pointer-argument type/address-space checks
 - Pointer arithmetic, indexing, field chains, locals, loops, calls, and built-ins
 - AIR vertex and fragment entry points with position/render-target metadata
 - Generated host binding headers and a small Metal runtime shim
 - A playable 3-D Pong game with audio and keyboard input
 
-`make verify` compiles and dispatches every example on the GPU. The Pong smoke spec is included in that suite.
+`make verify` compiles and dispatches every example on the GPU (compute, textures, and Pong smoke spec included). `make test-negative` runs the compile-error suite; `make test-fuzz` runs the mutation fuzzer; `.github/workflows/ci.yml` runs the GPU-free pipeline (build + negative tests + fuzz + compile-every-example) on push.
 
 ---
 
@@ -136,11 +142,31 @@ kernel void paint(device float* out, coord2D c) {
 ### Expressions and control flow
 
 - Arithmetic, comparisons, logical operators, assignment, and compound assignment
+- Bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`) with compound forms and hex literals
+- Explicit casts `(float)x`, `(uint)(-1)`, including scalar-to-vector splats
+- Ternary `cond ? a : b`, `do-while` loops, and `switch` with fallthrough
+- `const` locals (writes are compile errors)
 - Pointer indexing and arithmetic
 - `if`, `for`, `while`, `break`, `continue`, and returns
 - User functions without recursion
-- Built-ins including `sqrt`, `sin`, `cos`, `pow`, `fmin`, `fmax`, `imin`, `imax`, and `sync()`
-- Vector constructors, arithmetic, and component access
+- Built-ins including `sqrt`, `sin`, `cos`, `pow`, `atan2`, `rsqrt`, `sign`, `fmin`, `fmax`, `imin`, `imax`, and `sync()`
+- Vector constructors, arithmetic, component access, and swizzle reads/writes
+- Vector comparisons producing mask vectors, plus `select(a, b, mask)`
+- Vector math: `dot`, `cross`, `length`, `distance`, `normalize`, `reflect`, `clamp`, `mix`, `step`, `smoothstep`, `fract`, `mod`, `radians`, `degrees`
+- `mat2`/`mat3`/`mat4`: column-major constructors, `m[col][row]` indexing, `mat*vec`, `mat*mat`, scalar arithmetic
+- Module-level `constant` globals
+
+### Textures
+
+```c
+kernel void k(device float* out, texture2d<float> tex, sampler smp, coord2D c) {
+    float4 t = tex.read(int2(c.global.x, c.global.y));
+    float4 s = tex.sample(smp, float2(0.5f, 0.5f));
+    tex.write(float4(1.0f), int2(c.global.x, c.global.y));
+}
+```
+
+`texture2d` element types are `float`, `half`, `int`, and `uint` (read-write access). Reads/samples return a `float4` (half promotes); `write` takes a `float4` and an `int2` coordinate.
 
 ### Render stages
 
@@ -207,6 +233,6 @@ Audio assets:
 
 ## Honest limitations
 
-BinC is a working bootstrap compiler, not a finished production language. The current implementation does not yet provide a general texture type, arbitrary stage I/O structs, classes, generics, exceptions, dynamic allocation, or the C++/C#/Objective-C facades described as future design work. Those ideas are documented separately as plans, not current features.
+BinC is a working bootstrap compiler, not a finished production language. The current implementation does not yet provide arbitrary stage-I/O structs, arrays of device buffers, generics, exceptions, dynamic allocation, or the C++/C#/Objective-C facades described as future design work. Those ideas are documented separately as plans, not current features.
 
 The compiler targets the installed Apple AIR contract. AIR is versioned, so changing Xcode versions may require updating the target triple, metadata, or probes in `reference/`.
