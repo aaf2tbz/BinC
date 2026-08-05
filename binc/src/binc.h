@@ -61,7 +61,7 @@ struct Stmt {
     StmtKind kind;
     int line, col;
     Expr *expr;
-    /* S_DECL */ Type ty; char *name; Expr *init;
+    /* S_DECL */ Type ty; char *name; Expr *init; int is_const;
     /* S_IF / S_WHILE / S_DOWHILE / S_SWITCH */ Expr *cond;
     /* bodies: S_IF.then_b/else_b, S_WHILE.then_b, S_DOWHILE.then_b, S_FOR.then_b, S_BLOCK.then_b */
     Block then_b, else_b;

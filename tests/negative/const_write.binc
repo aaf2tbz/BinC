@@ -1,0 +1,4 @@
+kernel void k(device float* p, coord1D i) {
+    const float scale = 2.0f;
+    scale = 3.0f;
+}

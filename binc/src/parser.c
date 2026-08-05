@@ -271,10 +271,17 @@ static Stmt parse_stmt(TokStream *ts){
         Token *nm=peek(ts); expect(ts,TK_IDENT,"name"); expect(ts,TK_SEMI,";");
         Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); return st;
     }
+    /* optional `const` qualifier on a local declaration */
+    if(peek(ts)->kind==TK_KW_CONSTANT && ts->i+1<ts->n){
+        TokKind nk=ts->toks[ts->i+1].kind;
+        if(nk==TK_KW_FLOAT||nk==TK_KW_HALF||nk==TK_KW_INT||nk==TK_KW_UINT||nk==TK_KW_BOOL||nk==TK_KW_MAT)
+            advance(ts); /* consume 'const', the type follows */
+    }
     if(starts_scalar_type(ts)){
         Type ty=parse_type(ts); Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
         Expr *init=NULL; if(accept(ts,TK_EQ))init=parse_expr(ts); expect(ts,TK_SEMI,";");
-        Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init; return st;
+        Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init;
+        st.is_const = (kt->kind==TK_KW_CONSTANT); return st;
     }
     Expr *e=parse_expr(ts); expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_EXPR; st.line=e->line; st.col=e->col; st.expr=e; return st;
 }

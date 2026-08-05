@@ -60,7 +60,7 @@ static int struct_layout(StructDef *s, int *al){
     *al=m; return (off+m-1)&~(m-1);
 }
 
-typedef struct { char *name; char *slot; TypeKind kind; char *sname; int vecn; int matn; } Loc;
+typedef struct { char *name; char *slot; TypeKind kind; char *sname; int vecn; int matn; int is_const; } Loc;
 typedef struct {
     SB *pre,*body; const Program *prog; Function *fn;
     int tmp; char *idx; int explicit_domain; int coord_param; int grid_extent_param;
@@ -1078,8 +1078,10 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     if(a->kind!=E_IDENT||resolve(c,a->name,&pi)!=R_PTR)
                         die(0,"%s: pointer argument %d must be one of the caller's buffer parameters",e->name,(int)i+1);
                     Param *cp=&c->fn->params[pi];
-                    if(cp->ty.kind!=p->ty.kind||cp->ty.as!=p->ty.as||cp->ty.vecn!=p->ty.vecn)
+                    if(cp->ty.kind!=p->ty.kind||cp->ty.as!=p->ty.as||cp->ty.vecn!=p->ty.vecn||cp->ty.matn!=p->ty.matn)
                         die(0,"%s: pointer argument %d type/address-space mismatch",e->name,(int)i+1);
+                    if(p->ty.kind==T_STRUCT && strcmp(cp->ty.struct_name,p->ty.struct_name))
+                        die(0,"%s: pointer argument %d struct type mismatch",e->name,(int)i+1);
                     char elt[64]; if(p->ty.kind==T_STRUCT)snprintf(elt,sizeof elt,"%%struct.%s",p->ty.struct_name);
                         else ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn);
                     o+=snprintf(args+o,sizeof args-o,"%s addrspace(%d)* %%_%s",elt,p->ty.as,cp->name);
@@ -1149,7 +1151,9 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
     if(e->kind==E_IDENT){
         int idx; RKind r=resolve(c,e->name,&idx);
         if(r==R_LOCAL){ li->tk=c->locs[idx].kind; li->sname=c->locs[idx].sname; li->as=0; li->pi=-1;
-            li->is_local=1; li->vecn=c->locs[idx].vecn; li->matn=c->locs[idx].matn; return c->locs[idx].slot; }
+            li->is_local=1; li->vecn=c->locs[idx].vecn; li->matn=c->locs[idx].matn;
+            if(mark && c->locs[idx].is_const) die(0,"cannot write to const local %s",e->name);
+            return c->locs[idx].slot; }
         die(0,"%s is not a mutable local",e->name);
     }
     if(e->kind==E_DEREF){ const char *ix; int pi=eval_ptr(c,e->operand,&ix);
@@ -1276,13 +1280,13 @@ static void gen_stmt(CG *c, Stmt *s){
             int sal; struct_layout(sd,&sal);
             char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %%struct.%s, align %d\n",slot,s->ty.struct_name,sal);
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,s->ty.struct_name,0,0};
+            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,s->ty.struct_name,0,0,0};
             break; }
         if(s->ty.matn){
             char mty[32]; mll_of(mty,sizeof mty,s->ty.matn);
             char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,mty,mat_align(s->ty.matn));
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,0,s->ty.matn};
+            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,0,s->ty.matn,s->is_const};
             if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
                 if(c->rmat!=s->ty.matn) die(0,"matrix width mismatch in initializer");
                 emit(c,"  store %s %s, %s* %s, align %d\n",mty,v,mty,slot,mat_align(s->ty.matn)); }
@@ -1290,7 +1294,7 @@ static void gen_stmt(CG *c, Stmt *s){
         char ll[32]; ll_of(ll,sizeof ll,kk,s->ty.vecn);
         char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,ll,type_align(kk,s->ty.vecn));
         c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-        c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,s->ty.vecn,0};
+        c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,s->ty.vecn,0,s->is_const};
         if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
             warn_implicit(c,s->init,k,kk,s->ty.vecn);
             const char *sv=to_storage(c,v,k,c->rvw,kk,s->ty.vecn);
