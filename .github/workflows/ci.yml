@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # GitHub macOS runners have no Metal GPU, so this pipeline is GPU-free:
+  # build, negative tests, fuzz, and compiling every example to a .metallib
+  # (which validates AIR emission and the metal/metallib invocation).
+  # GPU dispatch remains the local `make verify` gate.
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build compiler
+        run: make binc
+        working-directory: binc
+
+      - name: Negative compile-error suite
+        run: make test-negative
+        working-directory: binc
+
+      - name: Mutation fuzz smoke
+        run: make test-fuzz
+        working-directory: binc
+
+      - name: Compile all examples to .metallib (validates AIR emission)
+        run: make examples
+        working-directory: binc
