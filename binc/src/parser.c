@@ -27,6 +27,7 @@ static Type parse_type(TokStream *ts){
     } else if(accept(ts,TK_KW_FLOAT)){t.kind=T_FLOAT;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_HALF))t.kind=T_HALF;
     else if(accept(ts,TK_KW_INT)){t.kind=T_INT32;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_UINT)){t.kind=T_UINT32;t.vecn=(int)pt->ival;}
     else if(accept(ts,TK_KW_BOOL))t.kind=T_BOOL; else if(accept(ts,TK_KW_VOID))t.kind=T_VOID;
+    else if(accept(ts,TK_KW_MAT)){ t.kind=T_FLOAT; t.matn=(int)pt->ival; }
     else if(peek(ts)->kind==TK_IDENT){ t.kind=T_STRUCT; t.struct_name=strdup(advance(ts)->text); }
     else die(peek(ts)->line,"expected a type");
     if(accept(ts,TK_STAR)){ t.is_ptr=1; if(t.as==0)t.as=AS_DEVICE; }
@@ -34,7 +35,7 @@ static Type parse_type(TokStream *ts){
 }
 static int starts_scalar_type(TokStream *ts){ TokKind k=peek(ts)->kind;
     return k==TK_KW_FLOAT||k==TK_KW_HALF||k==TK_KW_INT||k==TK_KW_UINT||k==TK_KW_BOOL||
-           k==TK_KW_COORD||k==TK_KW_GRID_EXTENT; }
+           k==TK_KW_COORD||k==TK_KW_GRID_EXTENT||k==TK_KW_MAT; }
 
 static Expr *E(ExprKind k,int line,int col){ Expr *e=calloc(1,sizeof(Expr)); e->kind=k; e->line=line; e->col=col; return e; }
 static Expr *parse_expr(TokStream *ts);
@@ -49,6 +50,10 @@ static Expr *parse_primary(TokStream *ts){
     if(t->kind==TK_ICONST){ advance(ts); Expr *e=E(E_ICONST,t->line,t->col); e->ival=t->ival; return e; }
     if(t->kind==TK_KW_TRUE){ advance(ts); Expr *e=E(E_BOOL,t->line,t->col); e->bval=1; return e; }
     if(t->kind==TK_KW_FALSE){ advance(ts); Expr *e=E(E_BOOL,t->line,t->col); e->bval=0; return e; }
+    if(t->kind==TK_KW_MAT){
+        advance(ts); Expr *e=E(E_IDENT,t->line,t->col); char nm[16];
+        snprintf(nm,sizeof nm,"mat%d",(int)t->ival);
+        e->name=strdup(nm); return e; }
     if((t->kind==TK_KW_FLOAT||t->kind==TK_KW_INT||t->kind==TK_KW_UINT)&&t->ival>1){
         /* vector constructor: float4(...) etc. — synthesize the type name as the callee */
         advance(ts); Expr *e=E(E_IDENT,t->line,t->col); char nm[16];
@@ -225,7 +230,7 @@ static Stmt parse_stmt(TokStream *ts){
         Block *cur=NULL;
         while(peek(ts)->kind!=TK_RBRACE&&peek(ts)->kind!=TK_EOF){
             if(peek(ts)->kind==TK_KW_CASE){
-                Token *ct=peek(ts); advance(ts);
+                advance(ts); /* 'case' */
                 Expr *val=parse_expr(ts); expect(ts,TK_COLON,":");
                 if(nc==cap){cap=cap?cap*2:4;cs=realloc(cs,cap*sizeof(SCase));}
                 cs[nc].val=val; cs[nc].body=(Block){NULL,0}; cur=&cs[nc].body; nc++;
@@ -281,6 +286,7 @@ static void parse_function(TokStream *ts, Program *prog){
     if(stage!=ST_NONE&&is_kernel) die(peek(ts)->line,"render stages cannot also be kernels");
     if(is_kernel&&ret.kind!=T_VOID) die(peek(ts)->line,"kernel functions must return void");
     if(ret.kind==T_STRUCT) die(peek(ts)->line,"struct-by-value return not supported");
+    if(ret.matn) die(peek(ts)->line,"matrix-by-value return not supported");
     Token *nm=peek(ts); expect(ts,TK_IDENT,"function name"); expect(ts,TK_LPAREN,"(");
     Param *params=NULL; size_t np=0,cap=0;
     while(peek(ts)->kind!=TK_RPAREN){
@@ -292,6 +298,7 @@ static void parse_function(TokStream *ts, Program *prog){
             if(ty.as!=AS_THREADGROUP) die(pn->line,"only threadgroup parameters may be arrays");
         }
         if(ty.kind==T_STRUCT&&!ty.is_ptr) die(pn->line,"struct-by-value parameter not supported");
+        if(ty.matn&&!ty.is_ptr) die(pn->line,"matrix-by-value parameter not supported");
         if(ty.kind==T_COORD&&ty.is_ptr) die(pn->line,"coordinates cannot be pointers");
         if(np==cap){cap=cap?cap*2:4;params=realloc(params,cap*sizeof(Param));}
         params[np++]=(Param){strdup(pn->text),ty,un};

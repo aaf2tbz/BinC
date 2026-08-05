@@ -98,6 +98,7 @@ void lex(const char *src, Token **out, size_t *out_n){
             KW("device",TK_KW_DEVICE) KW("constant",TK_KW_CONSTANT) KW("threadgroup",TK_KW_THREADGROUP)
             KW("thread",TK_KW_THREAD) KW("uniform",TK_KW_UNIFORM) KW("varying",TK_KW_VARYING)
             VW("coord1D",TK_KW_COORD,1) VW("coord2D",TK_KW_COORD,2) VW("coord3D",TK_KW_COORD,3)
+            VW("mat2",TK_KW_MAT,2) VW("mat3",TK_KW_MAT,3) VW("mat4",TK_KW_MAT,4)
             KW("grid_extent",TK_KW_GRID_EXTENT) KW("atomic",TK_KW_ATOMIC)
             KW("vertex",TK_KW_VERTEX) KW("fragment",TK_KW_FRAGMENT) KW("vertex_id",TK_KW_VERTEX_ID)
             #undef KW

@@ -1,0 +1,58 @@
+kernel void k(device float* out, coord1D i) {
+    /* build a 2D rotation matrix (column-major constructor from scalars) */
+    float a = 0.6f;    /* cos(53.13deg) */
+    float b = 0.8f;    /* sin(53.13deg) */
+    mat2 rot = mat2(a, b,   /* column 0 */
+                    -b, a); /* column 1 */
+    /* column-major: col0 = (0.6, 0.8), col1 = (-0.8, 0.6) */
+    out[0] = rot[0][0];  /* 0.6 */
+    out[1] = rot[1][0];  /* -0.8 */
+    out[2] = rot[0][1];  /* 0.8 */
+    out[3] = rot[1][1];  /* 0.6 */
+
+    /* rotate the point (1, 0): (0.6, 0.8) */
+    float2 p = float2(1.0f, 0.0f);
+    float2 q = rot * p;
+    out[4] = q.x;  /* 0.6 */
+    out[5] = q.y;  /* 0.8 */
+
+    /* rotate (0, 1): (-0.8, 0.6) */
+    float2 r = rot * float2(0.0f, 1.0f);
+    out[6] = r.x;  /* -0.8 */
+    out[7] = r.y;  /* 0.6 */
+
+    /* row vector * matrix */
+    float2 s = float2(1.0f, 0.0f) * rot;
+    out[8] = s.x;  /* 0.6 */
+    out[9] = s.y;  /* 0.8 */
+
+    /* matrix * matrix composition: rot*rot = rotation by 2*53.13deg */
+    mat2 t = rot * rot;
+    /* cos(106.26) = -0.28, sin(106.26) = 0.96 */
+    out[10] = t[0][0];  /* -0.28 */
+    out[11] = t[1][0];  /* -0.96 */
+    out[12] = t[0][1];  /* 0.96 */
+    out[13] = t[1][1];  /* -0.28 */
+
+    /* diagonal constructor + scalar multiply */
+    mat3 id = mat3(2.0f);
+    out[14] = id[0][0];  /* 2 */
+    out[15] = id[1][1];  /* 2 */
+    out[16] = id[0][1];  /* 0 */
+
+    /* column-vector constructor */
+    mat2 m2 = mat2(float2(1.0f, 2.0f), float2(3.0f, 4.0f));
+    out[17] = m2[0][0];  /* 1 */
+    out[18] = m2[1][1];  /* 4 */
+
+    /* matrix + matrix, matrix + scalar */
+    mat2 sum = rot + rot;
+    out[19] = sum[0][0];  /* 1.2 */
+    mat2 off = rot + 1.0f;
+    out[20] = off[1][1];  /* 1.6 */
+
+    /* matrix * float3 vector */
+    mat3 sc = mat3(2.0f);
+    float3 v3 = sc * float3(1.0f, 2.0f, 3.0f);
+    out[21] = v3.x + v3.y + v3.z;  /* 12 */
+}
