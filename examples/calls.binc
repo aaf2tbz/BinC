@@ -1,0 +1,14 @@
+// calls.binc — user function calls: helpers defined AFTER the kernel (forward
+// references work — codegen resolves callees over the whole program), helper
+// calling helper, int and float returns, multiple args, pointer pass-through.
+kernel void ck(device float* a, device float* out, float s) {
+    *out = scaled(*a, 2) * s + second(a);
+}
+
+int triple(int n) { return n * 3; }
+
+float avg2(float a, float b) { return (a + b) * 0.5; }
+
+float scaled(float x, int k) { return avg2(x, x * 2) + triple(k); }
+
+float second(device float* p) { return p[1]; }

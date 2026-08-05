@@ -1,0 +1,11 @@
+// slocal.binc — struct locals: copy fields from a device struct into a local,
+// transform, write back swapped.
+struct P { float x; float y; };
+
+kernel void sl(device P* ps, device P* out) {
+    P q;
+    q.x = ps->x + 1.0;
+    q.y = ps->y * 2.0;
+    out->x = q.y;
+    out->y = q.x;
+}

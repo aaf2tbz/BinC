@@ -1,0 +1,7 @@
+// sync.binc — threadgroup barrier builtin. sync() emits air.wg.barrier;
+// real shared-memory use comes in a later phase — this just proves the
+// barrier emits, links, and runs between ordinary buffer math.
+kernel void sy(device float* a, device float* out) {
+    sync();
+    *out = *a * 2.0;
+}

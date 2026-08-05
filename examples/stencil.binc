@@ -1,0 +1,6 @@
+// stencil.binc — 1D 3-point stencil via pointer arithmetic.
+// `*in` is in[id]; `*(in + k)` is in[id + k]; `*(out + 1) = ...` writes out[id + 1].
+// Grid covers the N-2 interior outputs; out[0] and out[N-1] stay zero.
+kernel void stencil(device float* in, device float* out) {
+    *(out + 1) = *in * 0.25 + *(in + 1) * 0.5 + *(in + 2) * 0.25;
+}

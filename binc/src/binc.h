@@ -16,16 +16,17 @@ typedef struct {
     char    *struct_name;
     int      is_ptr;
     AddrSpace as;
+    int      vecn; /* 0/1 = scalar; 2/3/4 = vector width */
 } Type;
 
 /* runtime value classification for type-directed codegen */
-typedef enum { VK_F32, VK_I32, VK_I1, VK_PTR } ValKind;
+typedef enum { VK_F32, VK_I32, VK_U32, VK_I1, VK_PTR } ValKind;
 
 /* ---- AST ---- */
 typedef struct Expr Expr;
 typedef enum {
-    E_FCONST, E_ICONST, E_BOOL, E_IDENT, E_DEREF, E_FIELD,
-    E_BIN, E_CMP, E_LOG, E_NOT, E_NEG, E_ASSIGN
+    E_FCONST, E_ICONST, E_BOOL, E_IDENT, E_DEREF, E_FIELD, E_INDEX,
+    E_BIN, E_CMP, E_LOG, E_NOT, E_NEG, E_ASSIGN, E_CALL
 } ExprKind;
 
 typedef enum { B_ADD, B_SUB, B_MUL, B_DIV, B_MOD } BinOp;
@@ -39,11 +40,12 @@ struct Expr {
     char    *name, *field;
     BinOp    bop; CmpOp cmp; LogOp log; AssignOp aop;
     Expr    *operand, *lhs, *rhs;
+    Expr   **args; size_t nargs; /* E_CALL */
 };
 
 typedef struct Stmt Stmt;
 typedef struct { Stmt *stmts; size_t n; } Block;
-typedef enum { S_EXPR, S_DECL, S_RETURN, S_IF, S_FOR, S_WHILE, S_BLOCK } StmtKind;
+typedef enum { S_EXPR, S_DECL, S_RETURN, S_IF, S_FOR, S_WHILE, S_BLOCK, S_BREAK, S_CONTINUE } StmtKind;
 struct Stmt {
     StmtKind kind;
     Expr *expr;
@@ -55,7 +57,7 @@ struct Stmt {
 };
 
 typedef struct { char *name; Type ty; Uniformity un; } Param;
-typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; } Function;
+typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Type ret; } Function;
 typedef struct { char *name; Type ty; } Field;
 typedef struct { char *tag; Field *fields; size_t nfields; } StructDef;
 typedef struct { StructDef *structs; size_t nstructs; Function *funcs; size_t nfuncs; } Program;
@@ -70,6 +72,7 @@ typedef enum {
     TK_PLUSEQ, TK_MINUSEQ, TK_STAREQ, TK_SLASHEQ, TK_MODEQ,
     TK_KW_STRUCT, TK_KW_KERNEL, TK_KW_VOID, TK_KW_FLOAT, TK_KW_HALF, TK_KW_INT, TK_KW_UINT, TK_KW_BOOL,
     TK_KW_RETURN, TK_KW_IF, TK_KW_ELSE, TK_KW_FOR, TK_KW_WHILE, TK_KW_TRUE, TK_KW_FALSE,
+    TK_KW_BREAK, TK_KW_CONTINUE,
     TK_KW_DEVICE, TK_KW_CONSTANT, TK_KW_THREADGROUP, TK_KW_THREAD, TK_KW_UNIFORM, TK_KW_VARYING
 } TokKind;
 typedef struct { TokKind kind; char *text; double fval; long ival; int line; } Token;

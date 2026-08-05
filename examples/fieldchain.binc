@@ -1,0 +1,13 @@
+// fieldchain.binc — struct buffers with explicit subscript + dot chains.
+// vs[0].x, vs[i].y, vs[i+1].x: constant, computed, and expression indices.
+// Also: early `return;` in a kernel, and a non-void non-kernel helper
+// (emitted as a plain internal AIR function; calls land in the next phase).
+struct Vec { float x; float y; };
+
+float sq(float x) { return x * x; }
+
+kernel void chains(device Vec* vs, device float* out) {
+    if (*out < 0) { return; }   // out is zero-init: never taken, exercises early return
+    int i = 1;
+    *out = vs[0].x + vs[i].y * 2 + vs[i + 1].x;
+}

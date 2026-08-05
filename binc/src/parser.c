@@ -12,8 +12,9 @@ static Type parse_type(TokStream *ts){
     Type t={0};
     if(accept(ts,TK_KW_DEVICE))t.as=AS_DEVICE; else if(accept(ts,TK_KW_CONSTANT))t.as=AS_CONSTANT;
     else if(accept(ts,TK_KW_THREADGROUP))t.as=AS_THREADGROUP; else if(accept(ts,TK_KW_THREAD))t.as=AS_THREAD;
-    if(accept(ts,TK_KW_FLOAT))t.kind=T_FLOAT; else if(accept(ts,TK_KW_HALF))t.kind=T_HALF;
-    else if(accept(ts,TK_KW_INT))t.kind=T_INT32; else if(accept(ts,TK_KW_UINT))t.kind=T_UINT32;
+    Token *pt=peek(ts);
+    if(accept(ts,TK_KW_FLOAT)){t.kind=T_FLOAT;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_HALF))t.kind=T_HALF;
+    else if(accept(ts,TK_KW_INT)){t.kind=T_INT32;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_UINT)){t.kind=T_UINT32;t.vecn=(int)pt->ival;}
     else if(accept(ts,TK_KW_BOOL))t.kind=T_BOOL; else if(accept(ts,TK_KW_VOID))t.kind=T_VOID;
     else if(peek(ts)->kind==TK_IDENT){ t.kind=T_STRUCT; t.struct_name=strdup(advance(ts)->text); }
     else die(peek(ts)->line,"expected a type");
@@ -26,20 +27,47 @@ static int starts_scalar_type(TokStream *ts){ TokKind k=peek(ts)->kind;
 static Expr *E(ExprKind k){ Expr *e=calloc(1,sizeof(Expr)); e->kind=k; return e; }
 static Expr *parse_expr(TokStream *ts);
 
+/* known struct tags, for disambiguating `Dog d;` local declarations */
+static char **stags=NULL; static size_t nstags=0;
+static int is_stag(const char *s){ for(size_t i=0;i<nstags;i++) if(!strcmp(stags[i],s)) return 1; return 0; }
+
 static Expr *parse_primary(TokStream *ts){
     Token *t=peek(ts);
     if(t->kind==TK_FCONST){ advance(ts); Expr *e=E(E_FCONST); e->fval=t->fval; return e; }
     if(t->kind==TK_ICONST){ advance(ts); Expr *e=E(E_ICONST); e->ival=t->ival; return e; }
     if(t->kind==TK_KW_TRUE){ advance(ts); Expr *e=E(E_BOOL); e->bval=1; return e; }
     if(t->kind==TK_KW_FALSE){ advance(ts); Expr *e=E(E_BOOL); e->bval=0; return e; }
+    if((t->kind==TK_KW_FLOAT||t->kind==TK_KW_INT||t->kind==TK_KW_UINT)&&t->ival>1){
+        /* vector constructor: float4(...) etc. — synthesize the type name as the callee */
+        advance(ts); Expr *e=E(E_IDENT); char nm[16];
+        snprintf(nm,sizeof nm,"%s%d",t->kind==TK_KW_FLOAT?"float":t->kind==TK_KW_INT?"int":"uint",(int)t->ival);
+        e->name=strdup(nm); return e; }
     if(t->kind==TK_IDENT){ advance(ts); Expr *e=E(E_IDENT); e->name=strdup(t->text); return e; }
     if(accept(ts,TK_LPAREN)){ Expr *e=parse_expr(ts); expect(ts,TK_RPAREN,")"); return e; }
     die(t->line,"expected an expression");
 }
 static Expr *parse_postfix(TokStream *ts){
     Expr *e=parse_primary(ts);
-    while(peek(ts)->kind==TK_ARROW){ advance(ts); Token *f=peek(ts); expect(ts,TK_IDENT,"field after ->");
-        Expr *n=E(E_FIELD); n->operand=e; n->field=strdup(f->text); e=n; }
+    for(;;){
+        if(peek(ts)->kind==TK_LPAREN){ /* call: callee is always a bare identifier */
+            if(e->kind!=E_IDENT) die(peek(ts)->line,"callee must be a function name");
+            advance(ts); Expr *n=E(E_CALL); n->name=e->name;
+            Expr **args=NULL; size_t na=0,cap=0;
+            while(peek(ts)->kind!=TK_RPAREN){
+                if(na==cap){cap=cap?cap*2:4;args=realloc(args,cap*sizeof(Expr*));}
+                args[na++]=parse_expr(ts);
+                if(!accept(ts,TK_COMMA))break; }
+            expect(ts,TK_RPAREN,")");
+            n->args=args; n->nargs=na; e=n; }
+        else if(accept(ts,TK_LBRACK)){ Expr *i=parse_expr(ts); expect(ts,TK_RBRACK,"]");
+            Expr *n=E(E_INDEX); n->operand=e; n->rhs=i; e=n; }
+        else if(accept(ts,TK_DOT)){ Token *f=peek(ts); expect(ts,TK_IDENT,"field after .");
+            Expr *n=E(E_FIELD); n->operand=e; n->field=strdup(f->text); e=n; }
+        else if(accept(ts,TK_ARROW)){ Token *f=peek(ts); expect(ts,TK_IDENT,"field after ->");
+            Expr *d=E(E_DEREF); d->operand=e; /* p->f == (*p).f == p[id].f */
+            Expr *n=E(E_FIELD); n->operand=d; n->field=strdup(f->text); e=n; }
+        else break;
+    }
     return e;
 }
 static Expr *parse_unary(TokStream *ts){
@@ -105,7 +133,11 @@ static Block parse_block_or_stmt(TokStream *ts){
     Stmt *s=malloc(sizeof(Stmt)); s[0]=parse_stmt(ts); return (Block){s,1};
 }
 static Stmt parse_stmt(TokStream *ts){
-    if(accept(ts,TK_KW_RETURN)){ expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_RETURN; return st; }
+    if(accept(ts,TK_KW_RETURN)){ Stmt st={0}; st.kind=S_RETURN;
+        if(peek(ts)->kind!=TK_SEMI) st.expr=parse_expr(ts);
+        expect(ts,TK_SEMI,";"); return st; }
+    if(accept(ts,TK_KW_BREAK)){ expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_BREAK; return st; }
+    if(accept(ts,TK_KW_CONTINUE)){ expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_CONTINUE; return st; }
     if(peek(ts)->kind==TK_KW_IF){
         advance(ts); expect(ts,TK_LPAREN,"("); Expr *cond=parse_expr(ts); expect(ts,TK_RPAREN,")");
         Stmt st={0}; st.kind=S_IF; st.cond=cond; st.then_b=parse_block_or_stmt(ts);
@@ -134,6 +166,12 @@ static Stmt parse_stmt(TokStream *ts){
         st.then_b=parse_block_or_stmt(ts); return st;
     }
     if(peek(ts)->kind==TK_LBRACE){ advance(ts); Block b=parse_braced(ts); Stmt st={0}; st.kind=S_BLOCK; st.then_b=b; return st; }
+    if(peek(ts)->kind==TK_IDENT&&is_stag(peek(ts)->text)&&ts->toks[ts->i+1].kind==TK_IDENT){
+        /* struct local: `Dog d;` */
+        Type ty={0}; ty.kind=T_STRUCT; ty.struct_name=strdup(advance(ts)->text);
+        Token *nm=peek(ts); expect(ts,TK_IDENT,"name"); expect(ts,TK_SEMI,";");
+        Stmt st={0}; st.kind=S_DECL; st.ty=ty; st.name=strdup(nm->text); return st;
+    }
     if(starts_scalar_type(ts)){
         Type ty=parse_type(ts); Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
         Expr *init=NULL; if(accept(ts,TK_EQ))init=parse_expr(ts); expect(ts,TK_SEMI,";");
@@ -144,19 +182,22 @@ static Stmt parse_stmt(TokStream *ts){
 
 static void parse_function(TokStream *ts, Program *prog){
     int is_kernel=accept(ts,TK_KW_KERNEL);
-    parse_type(ts); /* return type (void) */
+    Type ret=parse_type(ts);
+    if(is_kernel&&ret.kind!=T_VOID) die(peek(ts)->line,"kernel functions must return void");
+    if(ret.kind==T_STRUCT) die(peek(ts)->line,"struct-by-value return not supported");
     Token *nm=peek(ts); expect(ts,TK_IDENT,"function name"); expect(ts,TK_LPAREN,"(");
     Param *params=NULL; size_t np=0,cap=0;
     while(peek(ts)->kind!=TK_RPAREN){
         Uniformity un=UN_UNIFORM; if(accept(ts,TK_KW_VARYING))un=UN_VARYING; else accept(ts,TK_KW_UNIFORM);
         Type ty=parse_type(ts); Token *pn=peek(ts); expect(ts,TK_IDENT,"param name");
+        if(ty.kind==T_STRUCT&&!ty.is_ptr) die(pn->line,"struct-by-value parameter not supported");
         if(np==cap){cap=cap?cap*2:4;params=realloc(params,cap*sizeof(Param));}
         params[np++]=(Param){strdup(pn->text),ty,un};
         if(!accept(ts,TK_COMMA))break;
     }
     expect(ts,TK_RPAREN,")"); expect(ts,TK_LBRACE,"{"); Block body=parse_braced(ts);
     prog->funcs=realloc(prog->funcs,(prog->nfuncs+1)*sizeof(Function));
-    prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel};
+    prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,ret};
 }
 static void parse_struct(TokStream *ts, Program *prog){
     Token *tag=peek(ts); expect(ts,TK_IDENT,"struct tag"); expect(ts,TK_LBRACE,"{");
@@ -170,6 +211,7 @@ static void parse_struct(TokStream *ts, Program *prog){
     expect(ts,TK_RBRACE,"}"); expect(ts,TK_SEMI,";");
     prog->structs=realloc(prog->structs,(prog->nstructs+1)*sizeof(StructDef));
     prog->structs[prog->nstructs++]=(StructDef){strdup(tag->text),f,n};
+    stags=realloc(stags,(nstags+1)*sizeof(char*)); stags[nstags++]=prog->structs[prog->nstructs-1].tag;
 }
 Program parse_program(TokStream *ts){
     Program prog={0};

@@ -1,0 +1,10 @@
+// uints.binc — unsigned arithmetic that signed ops would get wrong.
+// 4000000000 / 3 = 1333333333 (sdiv on the same bits gives -98322432)
+// 4000000000 % 7 = 3          (srem gives -2)
+// 4000000000 < 3000000000 is false unsigned (slt says true)
+kernel void u(device uint* a, device uint* quo, device uint* rem, device uint* lt) {
+    uint x = *a;
+    *quo = x / 3;
+    *rem = x % 7;
+    if (x < 3000000000) { *lt = 1; } else { *lt = 0; }
+}

@@ -3,53 +3,91 @@
 > **Works as C. Acts as Metal.**
 > BinC is C, re-grounded on the Metal machine model — a genuinely new kind of language for the Apple GPU.
 
+## What BinC is
+
+Not a compiler for existing C, not CUDA, not a shading DSL. BinC is a language **defined on the GPU machine
+model**, wearing C's syntax. A pointer *is* a device buffer; a function over a buffer *is* a parallel grid; the
+element index is implicit in the semantics. You write C; it *is* Metal.
+
+```c
+struct Particle { float x, y, z; float vx, vy, vz; };
+
+kernel void step(device Particle* p, float dt) {   // the entire program — a Metal compute grid
+    p->x += p->vx * dt;
+    p->y += p->vy * dt;
+    p->z += p->vz * dt;
+}
+```
+
+C was designed as a portable layer over the PDP-11's machine model — "high-level assembly for the CPU."
+**BinC is high-level assembly for the GPU.** It keeps C's syntax and mental model (low-friction, close to the
+machine, you can read it like C), but the *machine* it abstracts is Apple Silicon's GPU via Metal. Its
+primitives — SIMT execution, address spaces, the memory hierarchy — are defined on that model, not annotated
+onto a CPU language.
+
+## How it operates
+
+BinC has its own compiler, written from scratch in C (~1000 lines). It does not use Clang, and BinC source
+never becomes `.metal`/MSL. The compiler emits **AIR** (Apple's GPU LLVM IR) directly, as text:
+
+```
+.binc ──▶ binc ──▶ AIR (.ll) ──▶ metal ──▶ .air ──▶ metallib ──▶ .metallib ──▶ GPU
+          your compiler          (Apple's AIR assembler/linker — the shared backend every Metal language uses)
+```
+
+The language's semantics are implemented in the compiler, not borrowed from a frontend:
+
+| You write | It *means* (and lowers to) |
+|---|---|
+| `device Particle* p` | a Metal device buffer — `%struct.Particle addrspace(1)*` + `!air.buffer` metadata |
+| `kernel void step(...)` | a Metal compute grid — one thread per element, entry in `!air.kernel` |
+| `p->x` / `*p` | `p[id].x` / `p[id]` — a coalesced device access at the implicit `air.thread_position_in_grid` |
+| `float dt` (scalar param) | a constant buffer — `float addrspace(2)* dereferenceable(4)`, auto-dereferenced on use |
+| `device` / `constant` / `threadgroup` / `thread` | **types**, not attributes — AIR address spaces 1 / 2 / 3 / 0 |
+| `float4`, `struct` | native AIR vectors and laid-out struct types (MSL layout rules) |
+| `sqrt`, `fmin`, `sync()`, … | AIR intrinsics — `air.fast_sqrt.f32`, `air.fast_fmin.f32`, `air.wg.barrier`, … |
+
+Address spaces and divergence live in the **type system**, so the compiler proves GPU properties statically:
+data-dependent branches and loop bounds are flagged at compile time (live today), and the design
+(`TYPES.md`) extends this to barrier-in-divergent-flow and shared-memory race prevention as hard errors.
+
+The full function-by-function map of the compiler, every BinC→AIR mapping, and the metadata contract:
+**[`ARCHITECTURE.md`](ARCHITECTURE.md)**.
+
 ## Status: ✅ WORKING — compiles & runs on the GPU
 
-A bootstrap compiler (in C) turns `.binc` source into real Metal binaries that execute correctly on Apple GPUs:
-
-```
-.binc  →  binc (compiler)  →  AIR (LLVM IR)  →  metal  →  .metallib  →  GPU dispatch  →  verified correct
-```
-
-Both example kernels run on the GPU with correct results (`proof/*.metallib`):
-- `blend` — `out = a*0.5 + b*0.5`  ✅ all elements correct
-- `step`  — struct fields + scalar param (`p->x += p->vx*dt`)  ✅ positions correct
-
-## End goal: a BinC game of Pong
-
-The destination is a **complete Pong game written in BinC** — where the C game of Pong is *actually Metal as well*: the **game logic** (ball, paddles, collision, score) runs on the GPU as compute kernels, and **the rendering** (vertex/fragment, or Metal 4 mesh shaders) draws the same scene on the GPU. The host is a thin layer — a window, a command queue, a dispatch. The whole game speaks Metal.
-
-This is the fullest expression of *"works as C, acts as Metal"*: a real application whose **every line of game code is both familiar C and GPU-native**.
-
-### Path to Pong
-1. ✅ Substrate, paradigm, imperative core, divergence warning *(working now)*
-2. ⏳ **Graphics stages** — vertex, fragment, mesh shaders *(AIR contract mapped in `RENDER.md`; compiler doesn't emit them yet)*
-3. ⏳ Window + command loop in the host — thin Obj-C harness
-4. ⏳ **Pong source** — ball + paddles + collision as a BinC compute kernel; the scene rendered by a BinC vertex/fragment kernel
+Every example in `examples/` compiles to a real `.metallib` and is **verified executing correctly on the GPU**
+by a data-driven harness (`make verify` — 15 kernels covering scalar/vector/struct buffers, control flow,
+calls, builtins, half/uint precision, and more).
 
 ## Quick start
 ```bash
-cd binc && make verify      # build compiler + harness, compile all examples, run on GPU, verify
+cd binc && make verify      # build compiler + harness, compile all examples, run each on the GPU, verify
 ```
 Or manually:
 ```bash
-./binc ../examples/control.binc -o /tmp/control.metallib
-./harness /tmp/control.metallib sc
+./binc ../examples/control.binc -o /tmp/control.metallib      # compile
+./harness /tmp/control.metallib ../examples/control.spec      # dispatch on GPU + check results
 ```
-Requires Xcode (provides `metal`/`metallib`); wrappers in `~/.local/bin`.
+Requires Xcode (provides `metal`/`metallib`); wrappers in `~/.local/bin`. Spec format is documented at the
+top of `binc/harness.m`.
 
 ## Language features (working now)
-- **Types:** `float`, `half`, `int`, `uint`, `bool`, and `struct`s of scalars
-- **Pointers:** address-space-qualified — `device`, `constant`, `threadgroup`, `thread` (bare `T*` = `device`)
+- **Types:** `float`, `half` (real 16-bit f16, auto-promoted in expressions), `int`, `uint` (true unsigned ops/predicates), `bool`, and `struct`s of mixed scalar/vector fields
+- **Vectors:** `float2/3/4`, `int2/3/4`, `uint2/3/4` — constructors `float4(...)` (incl. single-scalar splat), element-wise arithmetic with vector/scalar operands, `.x/.y/.z/.w` (+`.r/.g/.b/.a`) component read/write, vector buffer elements and struct fields
+- **Pointers:** address-space-qualified — `device`, `constant`, `threadgroup`, `thread` (bare `T*` = `device`); subscript `p[i]`, pointer arithmetic `*(p + k)`, field chains `p->f` / `p[i].f` / `s.f`
 - **Scalar params** auto-lower to constant buffers (write plain `float dt`)
-- **Locals:** `float x = ...;`, `int i = ...;` (alloca-backed, mutable across control flow)
-- **Control flow:** `if` / `else if` / `else`, `for`, `while`, `return`
+- **Locals:** scalar, vector, and struct locals (alloca-backed, mutable across control flow)
+- **Control flow:** `if` / `else if` / `else`, `for`, `while`, `break`, `continue`, `return` (with a value in non-kernel functions)
+- **Functions:** `kernel void` entry points plus plain internal functions with real return types — callable from kernels and each other (no recursion; kernels are not callable)
+- **Builtins:** `sqrt fabs floor ceil sin cos exp log fmin fmax pow` (float), `imin imax` (int), `sync()` (threadgroup barrier)
 - **Operators:** `+ - * / %`, comparisons `== != < <= > >=`, logical `&& || !`, unary `-`, assignment `= += -= *= /= %=`
-- **Implicit coercion:** int ↔ float on assignment
+- **Implicit coercion:** int ↔ uint ↔ float on assignment
 - **Implicit element-wise parallelism:** a function over a `device` buffer runs as a Metal grid (one thread per element)
 - **Divergence awareness:** the compiler warns on data-dependent branches/loop bounds (the `TYPES.md` feature, live)
 
 ## The project
+- **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — how the compiler works: every function, mapping, and metadata node.
 - **[`LANGUAGE.md`](LANGUAGE.md)** — the paradigm. *What BinC is.* (Read this first.)
 - **[`PARALLELISM.md`](PARALLELISM.md)** — pillar 1: the unified implicit+explicit grid model.
 - **[`TYPES.md`](TYPES.md)** — pillar 2: address spaces & divergence as types (the differentiator).
@@ -62,18 +100,5 @@ Requires Xcode (provides `metal`/`metallib`); wrappers in `~/.local/bin`.
 
 ## What's proven
 A from-scratch language emitting LLVM IR (no `.metal`, no Clang) links to a real Metal executable
-(`.metallib`). The substrate is real; the language design is unblocked.
-
-## What BinC is (one paragraph)
-Not a compiler for existing C, not CUDA, not a shading DSL. BinC is a language **defined on the GPU machine
-model**, wearing C's syntax. A pointer *is* a device buffer; a function over a buffer *is* a parallel grid; the
-element index is implicit in the semantics. You write C; it *is* Metal.
-
-```c
-struct Particle { float x, y, z; float vx, vy, vz; };
-void step(struct Particle* p, float dt) {        // the entire program — a Metal compute grid
-    p->x += p->vx * dt;
-    p->y += p->vy * dt;
-    p->z += p->vz * dt;
-}
-```
+(`.metallib`) and runs correctly on the GPU. The substrate is real, and the compute core of the language —
+types, vectors, structs, control flow, functions, builtins — is implemented and GPU-verified.

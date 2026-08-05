@@ -1,0 +1,12 @@
+// brk.binc — break/continue inside a for loop.
+// acc accumulates a[id] on odd iterations only; break once acc exceeds 4.5.
+// a=1.0 -> acc hits 5.0 at i=9 (break); a=2.0 -> acc hits 6.0 at i=5 (break).
+kernel void bk(device float* a, device float* out) {
+    float acc = 0;
+    for (int i = 1; i < 10; i = i + 1) {
+        if (i % 2 == 0) { continue; }
+        acc = acc + *a;
+        if (acc > 4.5) { break; }
+    }
+    *out = acc;
+}

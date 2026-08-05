@@ -1,0 +1,6 @@
+// halfs.binc — real 16-bit half buffers. Loads fpext half->float, math in float,
+// stores fptrunc back to half. The harness sees 32-bit words = 2 packed halfs.
+// out = a * scale + 0.5; all inputs/outputs exactly representable in half.
+kernel void h(device half* a, device half* out, half scale) {
+    *out = *a * scale + 0.5;
+}

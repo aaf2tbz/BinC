@@ -1,0 +1,7 @@
+// math.binc — builtin math functions, lowered to AIR fast-math intrinsics.
+kernel void m(device float* a, device float* out, device float* t) {
+    float x = *a;
+    *out = sqrt(x) + fabs(x) + floor(x) + ceil(x) + fmin(x, 3.0) + fmax(x, -10.0)
+         + pow(x, 2.0) + imin(7, 3) + imax(2, 9);
+    *t = sin(x) + cos(x) + exp(x) + log(x);
+}

@@ -57,9 +57,14 @@ void lex(const char *src, Token **out, size_t *out_n){
             const char *s=l.p; while(*l.p&&(isalnum((unsigned char)*l.p)||*l.p=='_'))l.p++;
             size_t len=(size_t)(l.p-s);
             #define KW(w,k) if(strlen(w)==len&&!memcmp(w,s,len)){PUSH(tk(k,ln));goto done;}
+            #define VW(w,k,n) if(strlen(w)==len&&!memcmp(w,s,len)){Token x=tk(k,ln);x.ival=n;PUSH(x);goto done;}
+            VW("float2",TK_KW_FLOAT,2) VW("float3",TK_KW_FLOAT,3) VW("float4",TK_KW_FLOAT,4)
+            VW("int2",TK_KW_INT,2) VW("int3",TK_KW_INT,3) VW("int4",TK_KW_INT,4)
+            VW("uint2",TK_KW_UINT,2) VW("uint3",TK_KW_UINT,3) VW("uint4",TK_KW_UINT,4)
             KW("struct",TK_KW_STRUCT) KW("kernel",TK_KW_KERNEL) KW("void",TK_KW_VOID)
             KW("float",TK_KW_FLOAT) KW("half",TK_KW_HALF) KW("int",TK_KW_INT) KW("uint",TK_KW_UINT) KW("bool",TK_KW_BOOL)
             KW("return",TK_KW_RETURN) KW("if",TK_KW_IF) KW("else",TK_KW_ELSE) KW("for",TK_KW_FOR) KW("while",TK_KW_WHILE)
+            KW("break",TK_KW_BREAK) KW("continue",TK_KW_CONTINUE)
             KW("true",TK_KW_TRUE) KW("false",TK_KW_FALSE)
             KW("device",TK_KW_DEVICE) KW("constant",TK_KW_CONSTANT) KW("threadgroup",TK_KW_THREADGROUP)
             KW("thread",TK_KW_THREAD) KW("uniform",TK_KW_UNIFORM) KW("varying",TK_KW_VARYING)
@@ -71,4 +76,5 @@ void lex(const char *src, Token **out, size_t *out_n){
     }
     *out=t; *out_n=n;
     #undef PUSH
+    #undef VW
 }

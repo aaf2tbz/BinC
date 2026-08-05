@@ -1,74 +1,142 @@
-// harness.m — dispatch BinC-compiled metallibs on the GPU and verify correctness.
+// harness.m — generic GPU dispatch/verify for BinC-compiled metallibs.
+//
+// usage: harness <lib.metallib> <specfile>
+//
+// Spec format (whitespace-separated, '#' comments, one directive per line):
+//   kernel <name>                 entry point in the metallib
+//   grid <N>                      dispatch N threads (single threadgroup)
+//   buf <idx> <v0> <v1> ...       buffer bound at <idx>, initialized with words
+//   bufh <idx> <bb bb ...>        buffer bound at <idx>, initialized with raw bytes
+//                                 (space-separated 2-hex-digit bytes) — for mixed-layout structs
+//   out <idx> <nwords>            zero-initialized output buffer at <idx>
+//   expect <idx> <v0> <v1> ...    post-run comparison of buffer <idx>
+//   expecth <idx> <bb bb ...>     byte-exact post-run comparison of buffer <idx>
+//
+// A word is a 32-bit value: tokens containing '.', 'e', or 'E' are stored as
+// float bits, anything else as int32 bits. `expect` compares int tokens
+// exactly and float tokens with a tolerance — so both int and float buffers
+// (and structs of either) verify correctly.
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 
 static void die(NSString *m){ fprintf(stderr,"harness: %s\n",[m UTF8String]); exit(1); }
 
-typedef struct { float x,y,z, vx,vy,vz; } Particle;
+typedef struct { uint32_t bits; int is_float; } Word;
+
+static Word parse_word(NSString *tok){
+    Word w;
+    const char *s=[tok UTF8String];
+    w.is_float = strchr(s,'.')||strchr(s,'e')||strchr(s,'E');
+    if(w.is_float){ float f=(float)strtod(s,NULL); memcpy(&w.bits,&f,4); }
+    else { int32_t v=(int32_t)strtol(s,NULL,0); memcpy(&w.bits,&v,4); }
+    return w;
+}
 
 int main(int argc, char **argv){
-    if(argc<3){ fprintf(stderr,"usage: harness <lib.metallib> <blend|step>\n"); return 2; }
+    if(argc<3){ fprintf(stderr,"usage: harness <lib.metallib> <specfile>\n"); return 2; }
     NSString *libPath=[NSString stringWithUTF8String:argv[1]];
-    NSString *fn=[NSString stringWithUTF8String:argv[2]];
+    NSString *spec=[NSString stringWithContentsOfFile:[NSString stringWithUTF8String:argv[2]]
+                                             encoding:NSUTF8StringEncoding error:nil];
+    if(!spec) die(@"cannot read spec file");
+
+    NSString *kernel=nil;
+    long grid=-1;
+    id<MTLBuffer> bufs[31]; memset(bufs,0,sizeof bufs);
+    NSMutableDictionary<NSNumber*,NSArray<NSString*>*> *bufSpec=[NSMutableDictionary dictionary];
+    NSMutableArray<NSNumber*> *expectIdx=[NSMutableArray array];
+    NSMutableArray<NSArray<NSString*>*> *expectVals=[NSMutableArray array];
+    NSMutableArray<NSNumber*> *expectHex=[NSMutableArray array];
+
+    NSCharacterSet *ws=[NSCharacterSet whitespaceAndNewlineCharacterSet];
+    for(NSString *line in [spec componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]){
+        NSMutableArray<NSString*> *toks=[NSMutableArray array];
+        for(NSString *t in [line componentsSeparatedByCharactersInSet:ws])
+            if(t.length && ![t hasPrefix:@"#"]) [toks addObject:t]; else if([t hasPrefix:@"#"]) break;
+        if(!toks.count) continue;
+        NSString *d=toks[0];
+        if([d isEqualToString:@"kernel"]){ kernel=toks[1]; }
+        else if([d isEqualToString:@"grid"]){ grid=toks[1].integerValue; }
+        else if([d isEqualToString:@"buf"]||[d isEqualToString:@"bufh"]||[d isEqualToString:@"out"]){
+            int idx=toks[1].intValue;
+            if(idx<0||idx>30) die(@"buffer index out of range");
+            bufSpec[@(idx)]=toks; // contents applied after device creation
+        }
+        else if([d isEqualToString:@"expect"]||[d isEqualToString:@"expecth"]){
+            [expectIdx addObject:@(toks[1].intValue)];
+            [expectVals addObject:[toks subarrayWithRange:NSMakeRange(2,toks.count-2)]];
+            [expectHex addObject:@([d isEqualToString:@"expecth"])]; }
+        else die([NSString stringWithFormat:@"unknown directive '%@'",d]);
+    }
+    if(!kernel||grid<0) die(@"spec needs 'kernel' and 'grid'");
 
     id<MTLDevice> dev=MTLCreateSystemDefaultDevice();
     id<MTLCommandQueue> q=[dev newCommandQueue];
     NSError *err=nil;
     id<MTLLibrary> lib=[dev newLibraryWithURL:[NSURL fileURLWithPath:libPath] error:&err];
     if(!lib) die([err localizedDescription]);
-    id<MTLFunction> f=[lib newFunctionWithName:fn];
-    if(!f) die(([NSString stringWithFormat:@"no function %@",fn]));
+    id<MTLFunction> f=[lib newFunctionWithName:kernel];
+    if(!f) die([NSString stringWithFormat:@"no function %@",kernel]);
     id<MTLComputePipelineState> cps=[dev newComputePipelineStateWithFunction:f error:&err];
     if(!cps) die([err localizedDescription]);
+
+    for(NSNumber *k in bufSpec){
+        NSArray<NSString*> *toks=bufSpec[k]; int idx=k.intValue;
+        if([toks[0] isEqualToString:@"buf"]){
+            NSUInteger nw=toks.count-2; uint32_t *w=malloc(nw*4);
+            for(NSUInteger i=0;i<nw;i++) w[i]=parse_word(toks[i+2]).bits;
+            bufs[idx]=[dev newBufferWithBytes:w length:nw*4 options:MTLResourceStorageModeShared];
+            free(w);
+        } else if([toks[0] isEqualToString:@"bufh"]){
+            NSUInteger nb=toks.count-2; uint8_t *b=malloc(nb?nb:1);
+            for(NSUInteger i=0;i<nb;i++) b[i]=(uint8_t)strtoul([toks[i+2] UTF8String],NULL,16);
+            bufs[idx]=[dev newBufferWithBytes:b length:nb options:MTLResourceStorageModeShared];
+            free(b);
+        } else {
+            NSUInteger nw=toks[2].integerValue;
+            bufs[idx]=[dev newBufferWithLength:nw*4 options:MTLResourceStorageModeShared];
+        }
+        if(!bufs[idx]) die(@"buffer allocation failed");
+    }
 
     id<MTLCommandBuffer> cb=[q commandBuffer];
     id<MTLComputeCommandEncoder> enc=[cb computeCommandEncoder];
     [enc setComputePipelineState:cps];
+    for(int i=0;i<31;i++) if(bufs[i]) [enc setBuffer:bufs[i] offset:0 atIndex:i];
+    [enc dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(grid,1,1)];
+    [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    if(cb.status!=MTLCommandBufferStatusCompleted) die(@"GPU command buffer failed");
 
-    if([fn isEqualToString:@"blend"]){
-        const int N=4; float a[4]={1,2,3,4},b[4]={10,20,30,40};
-        id<MTLBuffer> ba=[dev newBufferWithBytes:a length:N*4 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bb=[dev newBufferWithBytes:b length:N*4 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bo=[dev newBufferWithLength:N*4 options:MTLResourceStorageModeShared];
-        [enc setBuffer:ba offset:0 atIndex:0]; [enc setBuffer:bb offset:0 atIndex:1]; [enc setBuffer:bo offset:0 atIndex:2];
-        [enc dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(N,1,1)];
-        [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        float *r=(float*)[bo contents]; int ok=1;
-        for(int i=0;i<N;i++){ float e=(a[i]+b[i])*0.5f; printf("  out[%d]=%.3f exp %.3f %s\n",i,r[i],e,r[i]==e?"OK":"X"); if(r[i]!=e)ok=0; }
-        printf(ok?"\n✅ blend correct on GPU\n":"\n❌ blend mismatch\n"); return ok?0:1;
-    } else if([fn isEqualToString:@"step"]){
-        const int N=2;
-        Particle p[2]={ {0,0,0, 1,2,3}, {10,10,10, 0.5f,0.5f,0.5f} };
-        float dt=2.0f;
-        id<MTLBuffer> bp=[dev newBufferWithBytes:p length:N*sizeof(Particle) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bdt=[dev newBufferWithBytes:&dt length:4 options:MTLResourceStorageModeShared];
-        [enc setBuffer:bp offset:0 atIndex:0]; [enc setBuffer:bdt offset:0 atIndex:1];
-        [enc dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(N,1,1)];
-        [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        Particle *r=(Particle*)[bp contents]; int ok=1;
-        Particle exp[2]={ {2,4,6, 1,2,3}, {11,11,11, 0.5f,0.5f,0.5f} };
-        for(int i=0;i<N;i++){ Particle e=exp[i];
-            printf("  p%d pos=(%.1f,%.1f,%.1f) exp (%.1f,%.1f,%.1f) %s\n",i,r[i].x,r[i].y,r[i].z,e.x,e.y,e.z,
-                (r[i].x==e.x&&r[i].y==e.y&&r[i].z==e.z)?"OK":"X");
-            if(r[i].x!=e.x||r[i].y!=e.y||r[i].z!=e.z)ok=0; }
-        printf(ok?"\n✅ step correct on GPU (struct fields + scalar param lowering verified)\n":"\n❌ step mismatch\n");
-        return ok?0:1;
-    } else if([fn isEqualToString:@"sc"]){
-        const int N=4; float a[4]={1,5,10,20};
-        float k=2,lo=3,hi=15;
-        id<MTLBuffer> ba=[dev newBufferWithBytes:a length:N*4 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bo=[dev newBufferWithLength:N*4 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bk=[dev newBufferWithBytes:&k length:4 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bl=[dev newBufferWithBytes:&lo length:4 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bh=[dev newBufferWithBytes:&hi length:4 options:MTLResourceStorageModeShared];
-        [enc setBuffer:ba offset:0 atIndex:0]; [enc setBuffer:bo offset:0 atIndex:1];
-        [enc setBuffer:bk offset:0 atIndex:2]; [enc setBuffer:bl offset:0 atIndex:3]; [enc setBuffer:bh offset:0 atIndex:4];
-        [enc dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(N,1,1)];
-        [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        float *r=(float*)[bo contents]; int ok=1; float exp[4]={3,10,15,15};
-        for(int i=0;i<N;i++){ printf("  sc[%d]=%.3f exp %.3f %s\n",i,r[i],exp[i],r[i]==exp[i]?"OK":"X"); if(r[i]!=exp[i])ok=0; }
-        printf(ok?"\n✅ sc correct on GPU (locals + for + if/else + integers)\n":"\n❌ sc mismatch\n");
-        return ok?0:1;
+    int ok=1;
+    for(NSUInteger e=0;e<expectIdx.count;e++){
+        int idx=expectIdx[e].intValue; NSArray<NSString*> *vals=expectVals[e];
+        if(!bufs[idx]) die([NSString stringWithFormat:@"expect on unbound buffer %d",idx]);
+        if(expectHex[e].boolValue){
+            const uint8_t *b=(const uint8_t*)[bufs[idx] contents];
+            for(NSUInteger i=0;i<vals.count;i++){
+                unsigned expb=(unsigned)strtoul([vals[i] UTF8String],NULL,16);
+                int pass=b[i]==expb;
+                printf("  buf%d[%lu]=0x%02x exp 0x%02x %s\n",idx,(unsigned long)i,b[i],expb,pass?"OK":"X");
+                if(!pass)ok=0;
+            }
+            continue;
+        }
+        const uint32_t *w=(const uint32_t*)[bufs[idx] contents];
+        for(NSUInteger i=0;i<vals.count;i++){
+            Word exp=parse_word(vals[i]);
+            float gotf, expf; int32_t goti, expi;
+            memcpy(&gotf,&w[i],4); memcpy(&expf,&exp.bits,4);
+            memcpy(&goti,&w[i],4); memcpy(&expi,&exp.bits,4);
+            int pass;
+            if(exp.is_float){
+                float tol=1e-4f*(fabsf(expf)+1.0f); pass=fabsf(gotf-expf)<=tol;
+                printf("  buf%d[%lu]=%g exp %s %s\n",idx,(unsigned long)i,(double)gotf,[vals[i] UTF8String],pass?"OK":"X");
+            } else {
+                pass=(goti==expi);
+                printf("  buf%d[%lu]=%d exp %s %s\n",idx,(unsigned long)i,goti,[vals[i] UTF8String],pass?"OK":"X");
+            }
+            if(!pass)ok=0;
+        }
     }
-    fprintf(stderr,"harness: unknown function %s\n",argv[2]); return 2;
+    printf(ok?"\n✅ %s correct on GPU\n":"\n❌ %s mismatch\n",[kernel UTF8String]);
+    return ok?0:1;
 }

@@ -1,0 +1,13 @@
+// mixed.binc — a struct with mixed field types in a device buffer.
+// Layout (MSL/AIR): f@0(4) i@4(4) h@8(2) b@10(1) pad@11 u@12(4) v@16(8) -> size 24, align 8.
+// The spec uses bufh/expecth (byte-exact) so layout and per-field signedness are checked.
+struct Mix { float f; int i; half h; bool b; uint u; float2 v; };
+
+kernel void mx(device Mix* m) {
+    m->f = m->f + 1.0;          // float field
+    m->i = m->i + 1;            // signed int field
+    m->h = m->h * 2.0;          // half field (fpext/fptrunc)
+    m->b = !m->b;               // i1 field
+    m->u = m->u + 4000000000;   // uint field wraps mod 2^32
+    m->v = m->v * 2.0;          // float2 field, vector * scalar
+}

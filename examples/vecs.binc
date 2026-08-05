@@ -1,0 +1,11 @@
+// vecs.binc — first-class vectors: constructor + splat, vector*scalar and
+// vector+vector arithmetic, component read (extract) and write (bitcast+gep),
+// float4 buffer elements, int2/float3 locals, .r/.g aliases.
+kernel void vc(device float4* px, device float* out) {
+    float4 v = *px * 2.0 + float4(1.0);
+    v.y = v.y + 10.0;
+    *px = v;
+    int2 ii = int2(3, 4);
+    float3 w = float3(1.0, 2.0, 3.0);
+    *out = v.r + v.g + v.z + v.w + ii.x * ii.y + w.z;
+}
