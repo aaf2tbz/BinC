@@ -54,6 +54,7 @@ typedef struct {
     int uses_local_coord, uses_group_coord; int *read,*written; char **scalar_load;
     Loc *locs; size_t nlocs;
     int term; /* current block terminated */
+    int blk_empty; /* current block has no instructions yet (AIR rejects empty blocks) */
     int lblc; /* label counter (separate from tmp) */
     int brk_l[32], cont_l[32], nloops; /* break/continue label stack */
     int uses_sync; /* body contains a barrier -> function must be convergent, not nosync */
@@ -62,8 +63,11 @@ typedef struct {
 } CG;
 static char *newtmp(CG *c){ char *s=malloc(16); snprintf(s,16,"%%t%d",c->tmp++); return s; }
 static int newlbl(CG *c){ return c->lblc++; }
-static void emit(CG *c,const char *fmt,...){ va_list a; va_start(a,fmt); char b[1024]; vsnprintf(b,sizeof b,fmt,a); va_end(a); sb_put(c->body,b); }
-static void lbl(CG *c,int n){ char b[32]; snprintf(b,sizeof b,"bb%d:\n",n); sb_put(c->body,b); c->term=0; }
+static void emit(CG *c,const char *fmt,...){ va_list a; va_start(a,fmt); char b[1024]; vsnprintf(b,sizeof b,fmt,a); va_end(a); sb_put(c->body,b); c->blk_empty=0; }
+static void lbl(CG *c,int n){
+    if(c->blk_empty) emit(c,"  br label %%bb%d\n",n); /* AIR rejects empty blocks: jump from the empty predecessor */
+    char b[32]; snprintf(b,sizeof b,"bb%d:\n",n); sb_put(c->body,b); c->term=0; c->blk_empty=1;
+}
 /* materialize a float constant as a register. AIR rejects floating-point
  * literals as instruction operands, so every FP constant is carried as
  * bitcast(i32) — same bits, always a valid SSA operand. */
@@ -693,6 +697,51 @@ static void gen_stmt(CG *c, Stmt *s){
         lbl(c,cond);
         const char *cv=gen_cond(c,s->cond); emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",cv,body,en);
         lbl(c,en); break; }
+    case S_SWITCH:{
+        ValKind ck; const char *cv=gen_rval(c,s->sw_cond,&ck);
+        if(c->rvw) die(0,"cannot switch on a vector");
+        if(ck==VK_F32) die(0,"switch expression must be an integer");
+        int div=is_varying(c,s->sw_cond);
+        if(div) fprintf(stderr,"binc: note (line %d): switch expression is data-dependent — divergent dispatch\n",s->sw_cond->line);
+        int n=(int)s->ncases;
+        int *cl=malloc((n?n:1)*sizeof(int)); for(int i=0;i<n;i++) cl[i]=newlbl(c);
+        int dfl=newlbl(c), end=newlbl(c);
+        int els=s->has_default?dfl:end;
+        if(n==0){
+            if(!s->has_default) die(0,"switch with no cases");
+            emit(c,"  br label %%bb%d\n",dfl);
+        } else {
+            int *cb=malloc((size_t)n*sizeof(int)); for(int i=0;i<n;i++) cb[i]=newlbl(c);
+            emit(c,"  br label %%bb%d\n",cb[0]);
+            for(int i=0;i<n;i++){
+                lbl(c,cb[i]);
+                ValKind vk; const char *vv=gen_rval(c,s->cases[i].val,&vk);
+                if(c->rvw) die(0,"case value must be a scalar");
+                if(vk==VK_F32) die(0,"case values must be integers");
+                const char *cmp=newtmp(c);
+                emit(c,"  %s = icmp eq i32 %s, %s\n",cmp,cv,vv);
+                emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",cmp,cl[i],i+1<n?cb[i+1]:els);
+            }
+            free(cb);
+        }
+        /* case bodies are emitted in order; a body that does not terminate
+         * branches explicitly into the next case (C fallthrough semantics) */
+        c->brk_l[c->nloops]=end; c->nloops++;
+        for(int i=0;i<n;i++){
+            lbl(c,cl[i]);
+            if(div)c->divergent++; gen_block(c,&s->cases[i].body); if(div)c->divergent--;
+            if(!c->term){
+                int nx = i+1<n ? cl[i+1] : (s->has_default ? dfl : end);
+                emit(c,"  br label %%bb%d\n",nx);
+            }
+        }
+        if(s->has_default){
+            lbl(c,dfl);
+            if(div)c->divergent++; gen_block(c,&s->def_body); if(div)c->divergent--;
+            if(!c->term) emit(c,"  br label %%bb%d\n",end);
+        }
+        c->nloops--;
+        lbl(c,end); break; }
     case S_FOR:{
         if(s->for_init) gen_stmt(c,s->for_init);
         int div=s->for_cond&&is_varying(c,s->for_cond);

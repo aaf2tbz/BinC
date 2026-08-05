@@ -180,6 +180,9 @@ static Expr *parse_assign(TokStream *ts){
 static Expr *parse_expr(TokStream *ts){ return parse_assign(ts); }
 
 static Stmt parse_stmt(TokStream *ts);
+static void blk_push(Block *b, Stmt s){
+    b->stmts=realloc(b->stmts,(b->n+1)*sizeof(Stmt)); b->stmts[b->n++]=s;
+}
 static Block parse_braced(TokStream *ts){ /* assumes '{' consumed */
     Stmt *s=NULL; size_t n=0,cap=0;
     while(peek(ts)->kind!=TK_RBRACE&&peek(ts)->kind!=TK_EOF){
@@ -213,6 +216,30 @@ static Stmt parse_stmt(TokStream *ts){
         st.then_b=parse_block_or_stmt(ts);
         expect(ts,TK_KW_WHILE,"while"); expect(ts,TK_LPAREN,"(");
         st.cond=parse_expr(ts); expect(ts,TK_RPAREN,")"); expect(ts,TK_SEMI,";");
+        return st;
+    }
+    if(kt->kind==TK_KW_SWITCH){
+        advance(ts); expect(ts,TK_LPAREN,"("); Stmt st={0}; st.kind=S_SWITCH; st.line=kt->line; st.col=kt->col;
+        st.sw_cond=parse_expr(ts); expect(ts,TK_RPAREN,")"); expect(ts,TK_LBRACE,"{");
+        SCase *cs=NULL; size_t nc=0,cap=0;
+        Block *cur=NULL;
+        while(peek(ts)->kind!=TK_RBRACE&&peek(ts)->kind!=TK_EOF){
+            if(peek(ts)->kind==TK_KW_CASE){
+                Token *ct=peek(ts); advance(ts);
+                Expr *val=parse_expr(ts); expect(ts,TK_COLON,":");
+                if(nc==cap){cap=cap?cap*2:4;cs=realloc(cs,cap*sizeof(SCase));}
+                cs[nc].val=val; cs[nc].body=(Block){NULL,0}; cur=&cs[nc].body; nc++;
+            } else if(peek(ts)->kind==TK_KW_DEFAULT){
+                Token *dt=peek(ts); advance(ts); expect(ts,TK_COLON,":");
+                if(st.has_default) die(dt->line,"duplicate default in switch");
+                st.has_default=1; st.def_body=(Block){NULL,0}; cur=&st.def_body;
+            } else {
+                if(!cur) die(peek(ts)->line,"statement before the first case in switch");
+                blk_push(cur,parse_stmt(ts));
+            }
+        }
+        expect(ts,TK_RBRACE,"}");
+        st.cases=cs; st.ncases=nc;
         return st;
     }
     if(kt->kind==TK_KW_FOR){
@@ -297,7 +324,8 @@ static void parse_struct(TokStream *ts, Program *prog){
 static int stmt_start(Token *t){
     switch(t->kind){
     case TK_KW_STRUCT: case TK_KW_RETURN: case TK_KW_BREAK: case TK_KW_CONTINUE:
-    case TK_KW_IF: case TK_KW_WHILE: case TK_KW_FOR: case TK_KW_DO:
+    case TK_KW_IF: case TK_KW_WHILE: case TK_KW_FOR: case TK_KW_DO: case TK_KW_SWITCH:
+    case TK_KW_CASE: case TK_KW_DEFAULT:
     case TK_KW_VERTEX: case TK_KW_FRAGMENT: case TK_KW_KERNEL:
     case TK_LBRACE: case TK_SEMI: case TK_KW_DEVICE: case TK_KW_CONSTANT:
     case TK_KW_THREADGROUP: case TK_KW_THREAD: case TK_KW_UNIFORM: case TK_KW_VARYING:

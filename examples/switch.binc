@@ -1,0 +1,16 @@
+kernel void k(device int* out, coord1D i) {
+    int r = i % 3;
+    int v = 0;
+    switch (r) {
+        case 0: v = 10; break;
+        case 1: v = 20; break;
+        default: v = 30; break;
+    }
+    out[i] = v;                     /* 10, 20, 30 repeating */
+    switch (i % 4) {
+        case 0:                     /* empty case falls through */
+        case 1: out[i + 8] = 100; break;
+        case 2: out[i + 8] = 200; break;
+        default: out[i + 8] = 300;  /* falls off the end of the switch */
+    }
+}

@@ -54,16 +54,18 @@ struct Expr {
 
 typedef struct Stmt Stmt;
 typedef struct { Stmt *stmts; size_t n; } Block;
-typedef enum { S_EXPR, S_DECL, S_RETURN, S_IF, S_FOR, S_WHILE, S_DOWHILE, S_BLOCK, S_BREAK, S_CONTINUE } StmtKind;
+typedef struct { Expr *val; Block body; } SCase;
+typedef enum { S_EXPR, S_DECL, S_RETURN, S_IF, S_FOR, S_WHILE, S_DOWHILE, S_SWITCH, S_BLOCK, S_BREAK, S_CONTINUE } StmtKind;
 struct Stmt {
     StmtKind kind;
     int line, col;
     Expr *expr;
     /* S_DECL */ Type ty; char *name; Expr *init;
-    /* S_IF / S_WHILE */ Expr *cond;
-    /* bodies: S_IF.then_b/else_b, S_WHILE.then_b, S_FOR.then_b, S_BLOCK.then_b */
+    /* S_IF / S_WHILE / S_DOWHILE / S_SWITCH */ Expr *cond;
+    /* bodies: S_IF.then_b/else_b, S_WHILE.then_b, S_DOWHILE.then_b, S_FOR.then_b, S_BLOCK.then_b */
     Block then_b, else_b;
     /* S_FOR */ Stmt *for_init; Expr *for_cond, *for_incr;
+    /* S_SWITCH */ Expr *sw_cond; SCase *cases; size_t ncases; int has_default; Block def_body;
 };
 
 typedef struct { char *name; Type ty; Uniformity un; } Param;
@@ -86,7 +88,7 @@ typedef enum {
     TK_AMPEQ, TK_PIPEEQ, TK_CARETEQ, TK_SHLEQ, TK_SHREQ,
     TK_KW_STRUCT, TK_KW_KERNEL, TK_KW_VOID, TK_KW_FLOAT, TK_KW_HALF, TK_KW_INT, TK_KW_UINT, TK_KW_BOOL,
     TK_KW_RETURN, TK_KW_IF, TK_KW_ELSE, TK_KW_FOR, TK_KW_WHILE, TK_KW_DO, TK_KW_TRUE, TK_KW_FALSE,
-    TK_KW_BREAK, TK_KW_CONTINUE,
+    TK_KW_BREAK, TK_KW_CONTINUE, TK_KW_SWITCH, TK_KW_CASE, TK_KW_DEFAULT,
     TK_KW_DEVICE, TK_KW_CONSTANT, TK_KW_THREADGROUP, TK_KW_THREAD, TK_KW_UNIFORM, TK_KW_VARYING,
     TK_KW_COORD, TK_KW_GRID_EXTENT, TK_KW_ATOMIC, TK_KW_VERTEX, TK_KW_FRAGMENT, TK_KW_VERTEX_ID
 } TokKind;
