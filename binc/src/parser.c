@@ -410,6 +410,7 @@ static void parse_function(TokStream *ts, Program *prog){
     int coords=0; for(size_t i=0;i<np;i++) if(params[i].ty.kind==T_COORD) coords++;
     if(coords>1) die(peek(ts)->line,"a kernel may have only one coordinate domain parameter");
     if(coords) is_kernel=1;
+    if(is_kernel&&ret.kind!=T_VOID) die(nm->line,"kernel functions must return void"); /* also covers coordN-implicit kernels */
     g_tvar=NULL; /* template type parameter ends with the function body */
     prog->funcs=realloc(prog->funcs,(prog->nfuncs+1)*sizeof(Function));
     prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,stage,ret,nm->line,tvar!=NULL,tvar?strdup(tvar):NULL,{0}};
@@ -436,7 +437,8 @@ static void parse_struct(TokStream *ts, Program *prog){
                 if(at->kind!=TK_IDENT) die(at->line,"expected an attribute name");
                 if(!strcmp(at->text,"position")){ attr=1; }
                 else if(!strcmp(at->text,"flat")){ attr=2; }
-                else if(!strcmp(at->text,"depth")){ attr=4; expect(ts,TK_LPAREN,"("); Token *dq=peek(ts); (void)dq; advance(ts); expect(ts,TK_RPAREN,")"); }
+                else if(!strcmp(at->text,"depth")){ attr=4; expect(ts,TK_LPAREN,"("); Token *dq=peek(ts); advance(ts);
+                    if(dq->kind!=TK_IDENT||strcmp(dq->text,"any")) die(dq->line,"[[depth(...)]] takes the value \"any\""); expect(ts,TK_RPAREN,")"); }
                 else if(!strcmp(at->text,"color")||!strcmp(at->text,"user")){
                     attr = !strcmp(at->text,"color")?3:5; expect(ts,TK_LPAREN,"(");
                     Token *ix=peek(ts); if(ix->kind!=TK_ICONST) die(ix->line,"attribute index must be a constant");

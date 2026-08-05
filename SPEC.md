@@ -28,9 +28,13 @@ coord       default     device      do          else        false
 float       for         fragment    grid_extent half        if
 int         kernel      mat         return      sampler     struct
 switch      template    texture2d   thread      threadgroup true
-typedef     uint        uniform     varying     vertex      vertex_id
-void        while       typename
-```
+uint        uniform     varying     vertex      vertex_id   void
+while       typename    atomic
+
+The vector/matrix/coord spellings `float2`–`float4`, `int2`–`int4`,
+`uint2`–`uint4`, `mat2`–`mat4`, `coord1D`–`coord3D` are also keywords.
+Note: `const` and `constant` are the same keyword; `typedef` is not a
+keyword (it lexes as an identifier).
 
 - Punctuation: `( ) { } [ ] [[ ]] * , ; -> . + - / % ! = == != < <= > >=
   && || & | ^ ~ << >> ? : ++ -- += -= *= /= %= &= |= ^= <<= >>=`
@@ -140,40 +144,55 @@ casts. Kernels cannot be templates; the binding type is inferred from the first
 ## 3. Program structure
 
 ```
-program        := { struct_def | const_def | function_def }
+program        := { struct_def | const_def | function_def | include_stmt | once_stmt }
 struct_def     := [ template_head ] "struct" ident "{" { field } "}" ";"
 template_head  := "template" "<" "typename" ident ">"
-field          := type ident { "[" ic "]" } [ "[" "[" attr "]" "]" ] { "," ident { "[" ic "]" } } ";"
+field          := type ident { [ "[" "[" attr "]" "]" ] { "[" ic "]" } }
+                 { "," ident { [ "[" "[" attr "]" "]" ] { "[" ic "]" } } } ";"
 const_def      := "constant" scalar_type ident "=" literal ";"
-function_def   := [ template_head ] [ "vertex" | "fragment" | "kernel" ] type ident "(" [ param { "," param } ] ")" block
-param          := [ "uniform" | "varying" ] type ident { "[" ic "]" }
+function_def   := [ "vertex" | "fragment" ] [ "kernel" ] [ template_head ] type ident "(" [ param { "," param } ] ")" block
+param          := [ "uniform" | "varying" ] type ident { "[" ic "]" }   (* arrays only for threadgroup *)
+include_stmt   := "include" string ";"
+once_stmt      := "once" ";"
 ```
 
 - A function with a `coordN` parameter is a kernel (the `kernel` keyword is
-  optional). Render stages may not be kernels.
-- Only scalar numeric constants may be module-level `constant` globals.
+  optional). Render stages may not be kernels; kernels must return `void`;
+  a kernel may have at most one coordinate parameter; coordinates cannot be
+  pointers; vertex-stage struct parameters must be pointers. Templates are
+  rejected for kernels and matrix-by-value parameters/returns are rejected.
+- Only scalar numeric constants may be module-level `constant` globals. Note
+  `const` and `constant` are the same keyword (both spellings are accepted in
+  both positions).
 - Functions are visible across the whole module regardless of definition order;
   recursion is rejected.
-- Struct tags must be declared before use.
+- Struct tags are required for template-struct instantiation and struct locals;
+  other uses record the tag without an existence check at parse time.
 
 ---
 
 ## 4. Types grammar
 
 ```
-type           := [ addrspace ] base_type { "*" }
+type           := [ addrspace ] base_type { "*" }     (* at most one "*" *)
 addrspace      := "device" | "constant" | "threadgroup" | "thread"
 base_type      := "void" | "bool" | "float" | "half" | "int" | "uint"
-               | "float" d | "int" d | "uint" d        (* d in 2..4 *)
-               | "mat" d                               (* d in 2..4 *)
-               | "coord" d                             (* d in 1..3 *)
+               | "float" d | "int" d | "uint" d        (* d in 2..4, glued spellings *)
+               | "mat" d                               (* d in 2..4, glued *)
+               | "coord" d "D"                         (* d in 1..3, glued: coord1D *)
                | "grid_extent"
+               | "vertex_id"
                | "atomic" "<" ("float"|"int"|"uint") ">"
                | "texture2d" "<" ("float"|"half"|"int"|"uint") ">"
                | "sampler"
                | ident [ "<" type ">" ]                (* struct / generic struct *)
                | type_parameter                        (* inside template bodies *)
 ```
+
+The vector/matrix/coord spellings (`float2`, `mat3`, `coord2D`) are single
+lexer tokens, not keyword+digit sequences. `vertex_id` is a full parameter
+type (`vertex_id vid`), not an attribute. `thread`-space pointers are not
+expressible: a `thread`-prefixed pointer type is rewritten to `device`.
 
 ---
 
@@ -191,14 +210,18 @@ statement      := "{" { statement } "}"
                | "switch" "(" expression ")" "{" { switch_case } [ "default" ":" { statement } ] "}"
                | "break" ";"
                | "continue" ";"
-declaration    := [ "const" ] type ident { "[" ic "]" } [ "=" expression ] ";"
+declaration    := [ "const" ] scalar_or_array_type ident { "[" ic "]" } [ "=" expression ] ";"
 init           := declaration | expression
 ```
 
 - `switch` cases fall through; the condition must be an integer scalar.
-- `const` locals are compile-time immutable (writes are errors).
+- `const` locals are compile-time immutable (writes are errors) and apply only
+  to scalar/vector/matrix declarations (`const Dog d;` is a parse error).
 - Local fixed-size arrays (`float local[8]`, `float g[4][4]`) are allocated per
-  thread; array elements are not values (no whole-array assignment).
+  thread; at most two dimensions; struct locals cannot be arrays; array
+  elements are not values (no whole-array assignment).
+- For-loop init declarations must be scalar/vector/matrix types (no struct
+  locals, no `const`).
 - `break`/`continue` must be inside a loop or `switch`.
 
 ---
@@ -207,26 +230,31 @@ init           := declaration | expression
 
 ```
 expression     := assignment
-assignment     := unary ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ) assignment
+assignment     := ternary ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ) assignment
                | ternary
 ternary        := binary [ "?" expression ":" expression ]     (* lower precedence *)
 binary         := unary { ( "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" ) unary }
                | unary { ( "<" | "<=" | ">" | ">=" | "==" | "!=" ) unary }
                | unary { ( "&&" | "||" ) unary }
 unary          := "!" unary | "-" unary | "~" unary | "*" unary
-               | "(" type ")" unary                            (* cast *)
+               | "(" cast_target ")" unary              (* cast *)
                | postfix
 postfix        := primary { "(" [ expression { "," expression } ] ")"
                            | "[" expression "]"
                            | "." ident
                            | "->" ident
                            | "++" | "--" }
+cast_target    := scalar/vector numeric type | template parameter   (* (float)x, (T)x only *)
 primary        := int_literal | float_literal | "true" | "false" | ident
                | "(" expression ")"
 ```
 
 - The ternary condition must be a scalar `bool`; the branches must agree in type
   (ints coerce to float).
+- Precedence (tightest first): postfix → unary/cast → `* / % << >>` →
+  `+ -` → `< <= > >=` → `== !=` → `&` → `^` → `|` → `&&` → `||` →
+  ternary → assignment. Note shifts bind tighter than addition (C binds them
+  looser).
 - Comparison on scalars yields `bool`; on vectors yields a mask vector of
   `bool` lanes (usable with `select`).
 - Logical `&&`/`||` are short-circuit, scalar `bool` only.
@@ -242,11 +270,10 @@ primary        := int_literal | float_literal | "true" | "false" | ident
 ## 7. Built-ins
 
 Scalar math (vector overloads where noted): `sqrt`, `rsqrt`, `sin`, `cos`,
-`tan`, `asin`, `acos`, `atan`, `atan2`, `pow`, `exp`, `log`, `exp2`, `log2`,
-`abs` (and `fabs`), `fmin`, `fmax`, `imin`, `imax`, `floor`, `ceil`, `fract`,
-`mod`, `sign`, `radians`, `degrees`, `mix`, `clamp`, `step`, `smoothstep`,
-`dot`, `cross`, `length`, `distance`, `normalize`, `reflect`, `select`,
-`sync`.
+`fabs`/`abs`, `floor`, `ceil`, `fmin`, `fmax`, `imin`, `imax`, `exp`, `log`,
+`pow`, `atan2`, `fract`, `mod`, `sign`, `radians`, `degrees`, `mix`, `clamp`,
+`step`, `smoothstep`, `dot`, `cross`, `length`, `distance`, `normalize`,
+`reflect`, `select`, `sync`.
 
 The prelude (`prelude.binc`) additionally defines `PI`, `TAU`, `E`, `min`,
 `max`, `lerp`, `saturate`, `pack_rgba`/`unpack_rgba` (0–255 uint packing), and
@@ -258,16 +285,20 @@ The prelude (`prelude.binc`) additionally defines `PI`, `TAU`, `E`, `min`,
 
 ```c
 struct VOut { float4 pos [[position]]; float3 uv [[user(locn0)]]; };
-vertex VOut vs(device float4* verts, uint vid [[vertex_id]], coord1D i) { ... }
-fragment FOut fs(VIn in) { ... }          // stage-in struct by value
+vertex VOut vs(device float4* verts, uint vid, coord1D i) { ... }  // vid: vertex_id type
+fragment FOut fs(FIn in) { ... }          // stage-in struct by value
 ```
 
 - Stage-out structs return the position (`[[position]]`), interpolants
-  (`[[user(locnN)]]`, `[[color(N)]]`), and `[[depth(any)]]`; stage-in structs
-  receive interpolated values; `[[flat]]` disables perspective interpolation.
-- Stage functions take buffer parameters plus `[[vertex_id]]` and `coordN`.
-- Struct-by-value parameters are legal only in fragment functions (stage-in);
-  struct returns only in vertex/fragment functions (stage-out).
+  (`[[user(locnN)]]`, `[[color(N)]]`), and `[[depth(any)]]` (the argument must
+  be the literal `any`); stage-in structs receive interpolated values;
+  `[[flat]]` disables perspective interpolation.
+- Stage functions take buffer parameters plus `vertex_id vid` parameters and
+  `coordN`.
+- Struct-by-value parameters are legal in fragment functions (stage-in) **and
+  in plain functions**; struct returns are legal in vertex/fragment functions
+  (stage-out) **and plain functions**. Kernels reject struct-by-value
+  parameters; vertex stages require struct parameters to be pointers.
 
 ---
 
@@ -275,7 +306,9 @@ fragment FOut fs(VIn in) { ... }          // stage-in struct by value
 
 - **Numeric behavior**: `float` operations use `fast` floating-point flags
   (the MSL default); `int` arithmetic is wrapping two's complement; division by
-  zero is not guarded. Integer shifts mask the count to 5 bits.
+  zero is not guarded. Integer shift counts are masked to 5 bits.
+- **Logical operators**: `&&`/`||` are short-circuit, scalar `bool` only
+  (the right operand is not evaluated when the left decides the result).
 - **Uniformity**: a function parameter may be `uniform` (default, same for all
   threads) or `varying`. Built-in uniformity checks reject calling a
   barrier-requiring construct from data-dependent control flow, and

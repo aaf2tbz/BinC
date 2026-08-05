@@ -71,6 +71,7 @@ typedef struct {
     int term; /* current block terminated */
     int blk_empty; /* current block has no instructions yet (AIR rejects empty blocks) */
     int lblc; /* label counter (separate from tmp) */
+    int curbb; /* last emitted label number (phi predecessors) */
     int brk_l[32], cont_l[32], nloops; /* break/continue label stack */
     int uses_sync; /* body contains a barrier -> function must be convergent, not nosync */
     int divergent; /* current control-flow region is varying/divergent */
@@ -83,7 +84,7 @@ static int newlbl(CG *c){ return c->lblc++; }
 static void emit(CG *c,const char *fmt,...){ va_list a; va_start(a,fmt); char b[1024]; vsnprintf(b,sizeof b,fmt,a); va_end(a); sb_put(c->body,b); c->blk_empty=0; }
 static void lbl(CG *c,int n){
     if(c->blk_empty) emit(c,"  br label %%bb%d\n",n); /* AIR rejects empty blocks: jump from the empty predecessor */
-    char b[32]; snprintf(b,sizeof b,"bb%d:\n",n); sb_put(c->body,b); c->term=0; c->blk_empty=1;
+    char b[32]; snprintf(b,sizeof b,"bb%d:\n",n); sb_put(c->body,b); c->term=0; c->blk_empty=1; c->curbb=n;
 }
 /* materialize a float constant as a register. AIR rejects floating-point
  * literals as instruction operands, so every FP constant is carried as
@@ -855,6 +856,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         const char *r=newtmp(c); *k=VK_I1; emit(c,"  %s = xor i1 %s, true\n",r,v); return r; }
     case E_BIN:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw; int lm=c->rmat;
         const char *r=gen_rval(c,e->rhs,&rk); int rw=c->rvw; int rm=c->rmat;
+        /* shift counts mask to 5 bits (C/CPU semantics; LLVM shifts by >=width are poison) */
+        if((e->bop==B_SHL||e->bop==B_SHR)&&!lm&&!rm&&lk!=VK_F32&&rk!=VK_F32&&!lw&&!rw){
+            const char *mc=newtmp(c); emit(c,"  %s = and i32 %s, 31\n",mc,r); r=mc; }
         /* ---- matrix arithmetic ---- */
         if(lm&&rm){
             if(lm!=rm) die(0,"matrix width mismatch");
@@ -1016,9 +1020,22 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         if(isf){ l=coerce(c,l,lk,VK_F32); r=coerce(c,r,rk,VK_F32); }
         const char *v=newtmp(c); *k=VK_I1;
         emit(c,"  %s = %s %s %s %s, %s\n",v,isf?"fcmp":"icmp",cmp_name(e->cmp,isf,uns),isf?"float":"i32",l,r); return v; }
-    case E_LOG:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw;
-        const char *r=gen_rval(c,e->rhs,&rk); if(lw||c->rvw) die(0,"vector operand in logical operator");
-        const char *v=newtmp(c); *k=VK_I1; emit(c,"  %s = %s i1 %s, %s\n",v,e->log==L_AND?"and":"or",l,r); return v; }
+    case E_LOG:{ ValKind lk; const char *l=gen_rval(c,e->lhs,&lk);
+        if(c->rvw) die(0,"vector operand in logical operator");
+        if(lk!=VK_I1) die(0,"logical operands must be bool");
+        /* short-circuit && / || via control flow (C semantics) */
+        int p0=c->curbb, eval=newlbl(c), done=newlbl(c);
+        if(e->log==L_AND) emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",l,eval,done);
+        else emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",l,done,eval);
+        lbl(c,eval);
+        ValKind rk; const char *r=gen_rval(c,e->rhs,&rk);
+        if(c->rvw) die(0,"vector operand in logical operator");
+        if(rk!=VK_I1) die(0,"logical operands must be bool");
+        emit(c,"  br label %%bb%d\n",done);
+        lbl(c,done);
+        const char *v=newtmp(c); *k=VK_I1;
+        emit(c,"  %s = phi i1 [ %s, %%bb%d ], [ %s, %%bb%d ]\n",v,r,eval,e->log==L_AND?"false":"true",p0);
+        return v; }
     case E_INCDEC:{ /* postfix ++/--: load, add/sub 1, store; value = the old value */
         ValKind ck;
         LInfo li; char *addr=gen_lval(c,e->operand,&li,1);
@@ -2033,6 +2050,10 @@ void emit_air(FILE *out, Program *prog){
             so+=snprintf(sig+so,sizeof sig-so,"i32 noundef %%_id"); }
         if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,") local_unnamed_addr");
         else so+=snprintf(sig+so,sizeof sig-so,")");
+        /* name the entry block FIRST (before any prologue instructions), so
+         * short-circuit phis can reference it without splitting the block */
+        { char *entry=malloc(32); snprintf(entry,32,"bb%d:\n",c.lblc);
+            sb_put(c.pre,entry); free(entry); c.curbb=c.lblc; c.lblc++; }
         if(fn->is_kernel && !c.explicit_domain){ c.idx=malloc(16); snprintf(c.idx,16,"%%t%d",c.tmp++);
             sb_printf(c.pre,"  %s = zext i32 %%_id to i64\n",c.idx); }
         else if(c.explicit_domain && c.coord_param>=0 && fn->params[c.coord_param].ty.coordn==1){
