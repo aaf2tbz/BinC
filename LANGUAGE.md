@@ -1,113 +1,200 @@
-# BinC — A New Kind of Language for Metal
+# BinC language guide
 
-> **Tagline:** *Works as C. Acts as Metal.*
-> **One-line definition:** BinC is C, re-grounded on the Metal machine model.
+BinC uses familiar C syntax, but its meaning is defined by the Apple GPU rather than by a CPU process. The central rule is:
 
----
+> A function over device memory is a GPU operation over a grid.
 
-## The Idea
+There are two ways to name that grid:
 
-C was designed as a portable layer over the PDP-11's machine model — "high-level assembly for the CPU."
-**BinC is high-level assembly for the GPU.** It wears C's syntax and philosophy (low-friction, close to the
-machine, you can read it like C), but the *machine* it abstracts is Apple Silicon's GPU via Metal.
-
-It is **not**:
-- a compiler for existing C (that's a bridge, not a language),
-- C with GPU extensions (that's CUDA),
-- a shading DSL (that's MSL/HLSL/GLSL),
-- single-source host+device C++ (that's Sycl/oneAPI).
-
-It **is**: a language whose primitives are *defined* on the GPU machine model — SIMT execution, address
-spaces, the memory hierarchy, vector widths — wearing C's clothes.
-
-> **The naming pun:** *BinC* = binary C — C that becomes a Metal **binary**; C that sits at the **binary**/
-> machine layer of the GPU. And "Metal" — close to the metal.
+1. **Implicit domain**: a device pointer uses the hidden thread position.
+2. **Explicit domain**: a `coord1D`, `coord2D`, or `coord3D` parameter names the coordinate.
 
 ---
 
-## What "works as C" means
-
-- Familiar C syntax: blocks, braces, types, `struct`, pointers, functions, `for`.
-- The mental model a C programmer already carries. You *read* BinC like C.
-- No exotic keywords or ceremony (`[[buffer(0)]]`, `<<<>>>`, `__global__`).
-
-## What "acts as Metal" means
-
-- Execution is **SIMT**. A function over a collection is, by definition, a parallel grid.
-- **Address spaces are types**, not attributes: a pointer *is* `device` / `constant` / `threadgroup` / `thread`.
-- The **memory hierarchy** is first-class (register → threadgroup → device → constant).
-- Divergence, coalescing, and bank conflicts are things the language and type system *know about*.
-- There is no `kernel` keyword, because in BinC **everything is the GPU.** There is no host in the core.
-
----
-
-## The central design move
-
-> **A pointer is a device buffer. A function over a buffer is a parallel map. The element index is implicit
-> in the language's semantics.**
+## A first kernel
 
 ```c
-struct Particle { float x, y, z; float vx, vy, vz; };
+struct Particle { float x, y, vx, vy; };
 
-void step(struct Particle* p, float dt) {     // this is the entire program
+kernel void step(device Particle* p, float dt) {
     p->x += p->vx * dt;
     p->y += p->vy * dt;
-    p->z += p->vz * dt;
 }
 ```
 
-Call `step(particles, dt)` and BinC launches a Metal compute grid — one thread per particle. The `p->`
-dereference is a coalesced device load/store. No annotations, no launch syntax. The C you already know how to
-write *becomes* Metal, because BinC's semantics are *defined* on the GPU.
+The source looks like ordinary C. In BinC, `p->x` means the `x` field of the current element. The compiler lowers it to a GEP using `air.thread_position_in_grid`.
+
+A host dispatch still exists, but it is outside the BinC language. See `HOST.md`.
 
 ---
 
-## Why it's genuinely new (the honest comparison)
+## Types
 
-| | Host/Device split | GPU-ness lives in | Ergonomics |
-|---|---|---|---|
-| **MSL / HLSL** | embedded DSL, GPU-only | attributes (`[[buffer(0)]]`, `thread_position_in_grid`) | ceremony-heavy |
-| **CUDA** | C++ extended (`__global__`, `<<<>>>`) | annotations + launch syntax | C++ with a GPU mode |
-| **Sycl / oneAPI** | single-source C++ | abstractions over host+device | generic C++ |
-| **BinC** | **GPU is the only machine** | **the type system & semantics** | **plain C** |
+```c
+float speed;
+half packed_value;
+uint counter;
+float4 color;
+```
 
-The novelty is twofold:
-1. **No host/device schizophrenia.** BinC is defined *on* the GPU. (A thin runtime/dispatch boundary exists
-   only where a program must talk to the CPU — see "Honest limits" below.)
-2. **GPU reality is typed, not attributed.** Address space, coalescing, and layout are *types*. The compiler
-   can **prove** GPU correctness/performance properties statically — something no current GPU language does.
+Supported vector types are `float2`–`float4`, `int2`–`int4`, and `uint2`–`uint4`. Vectors support constructors, scalar splats, element-wise arithmetic, and single-component access such as `.x`, `.y`, `.z`, `.w`, `.r`, `.g`, `.b`, and `.a`.
 
----
+Structs use C-like declarations:
 
-## Honest limits (the truth about "C on a GPU")
+```c
+struct Body {
+    float3 position;
+    float mass;
+    uint flags;
+};
+```
 
-- **No host in the core** ⇒ BinC programs need a *boundary* to the CPU (launch, I/O, windowing). That boundary
-  is a small, explicit runtime seam — not part of BinC-the-language. (Think: the C `main` is replaced by a
-  `dispatch` declaration; the rest is pure GPU.)
-- **C idioms that don't fit a GPU are out of the core language** (or redefined): unbounded recursion, `malloc`
-  at runtime, `FILE*` I/O, `setjmp`/`longjmp`. BinC offers GPU-native alternatives (iteration over recursion,
-  fixed arenas, no I/O in kernels).
-- **Determinism over magic.** BinC is *not* "auto-parallelize arbitrary C." Its constructs are *defined* as
-  parallel/Metal operations, so behavior is always knowable — the compiler doesn't guess, it guarantees.
+The compiler calculates MSL-compatible field offsets, size, and alignment for AIR metadata.
 
 ---
 
-## Substrate (proven feasible — see `DESIGN.md`)
+## Address spaces
 
-BinC compiles to **LLVM IR conforming to Apple's AIR contract → `.metallib`** Metal executables. The vision is
-already *proven*: a hand-authored IR module (`!llvm.ident = "BinC compiler v0.0.1"`, no `.metal`, no Clang)
-links to a valid `.metallib` on this machine. So the language design is unblocked — the substrate is real.
+Address spaces are part of the type:
+
+```c
+device float* global_values;
+constant float* constants;
+threadgroup float shared_values[256];
+thread float private_value;
+```
+
+A bare pointer such as `float*` is treated as a device pointer. Address spaces lower to AIR address spaces 1, 2, 3, and 0 respectively.
 
 ---
 
-## Open design questions (to develop next)
+## Implicit and explicit coordinates
 
-1. **The element-implicit model.** Is "a function over a buffer = a per-element grid" the *only* parallel form,
-   or do we also allow explicit grids/2D/3D dispatch as typed constructs?
-2. **Address-space typing.** Concrete type syntax for `device`/`constant`/`threadgroup`/`thread` pointers — and
-   how conversion/promotion between them works.
-3. **The host seam.** What does the launch/dispatch boundary look like? A `dispatch` declaration? A separate
-   host language? Or stay pure-GPU and define a wire protocol?
-4. **Divergence & coalescing as types.** How far do we push static GPU-correctness? (This is the moonshot that
-   no GPU language does and the real differentiator.)
-5. **C-family facade depth.** How much of C/C++/C#/Obj-C *syntax* do we honor vs. define our own clean core?
+The simple form uses a hidden 1-D coordinate:
+
+```c
+kernel void add(device float* a, device float* b, device float* out) {
+    *out = *a + *b;
+}
+```
+
+For 2-D work, name the domain:
+
+```c
+kernel void fill(device float* out, coord2D c) {
+    int index = c.global.x + c.global.y * 64;
+    out[index] = 1.0f;
+}
+```
+
+Available coordinate properties:
+
+- `.global`: position in the complete grid
+- `.local`: position inside the threadgroup
+- `.group`: threadgroup position in the grid
+
+`grid_extent` maps to `air.threads_per_grid`:
+
+```c
+kernel void bounded(device float* out, coord1D i, grid_extent n) {
+    if (i < n) out[i] = 1.0f;
+}
+```
+
+---
+
+## Shared memory and atomics
+
+Threadgroup arrays become module-level AIR globals:
+
+```c
+kernel void tile(device float* out, coord2D c,
+                threadgroup float tile[16][16]) {
+    tile[c.local.y][c.local.x] = 1.0f;
+    sync();
+    out[c.global.x] = tile[c.local.y][c.local.x];
+}
+```
+
+Atomic add uses a Metal atomic wrapper and AIR atomic intrinsic:
+
+```c
+kernel void sum(device float* values,
+               device atomic<float>* total,
+               coord1D i,
+               grid_extent n) {
+    if (i < n) total->add(values[i]);
+}
+```
+
+A barrier in a varying branch is a compile error because not every thread is guaranteed to reach it.
+
+---
+
+## Control flow and functions
+
+BinC supports:
+
+```c
+for (int i = 0; i < 10; i += 1) { }
+while (condition) { }
+if (condition) { } else { }
+break;
+continue;
+return;
+```
+
+Plain functions can be called from kernels. Kernels cannot call other kernels, and recursion is rejected.
+
+```c
+void scale(device float* values, float k) {
+    values[0] *= k;
+}
+
+kernel void run(device float* values, float k) {
+    scale(values, k);
+}
+```
+
+A plain function has no implicit thread index, so pointer accesses must be explicitly indexed (`values[0]`, `values[i]`, and so on).
+
+---
+
+## Built-ins
+
+Current scalar built-ins include:
+
+- Math: `sqrt`, `fabs`, `floor`, `ceil`, `sin`, `cos`, `exp`, `log`, `fmin`, `fmax`, `pow`
+- Integer: `imin`, `imax`
+- Synchronization: `sync()`
+
+---
+
+## Render stages
+
+The current render surface is intentionally minimal:
+
+```c
+vertex float4 vs(device float4* vertices, vertex_id vid) {
+    return vertices[vid];
+}
+
+fragment float4 fs(float4 pos) {
+    return float4(1.0f, 1.0f, 1.0f, 1.0f);
+}
+```
+
+Vertex output is position-only. A fragment can receive the rasterized position and return a float4 render target. The Pong example uses this to create depth-based neon color and atmospheric effects.
+
+---
+
+## What is not currently in the language
+
+The following are future work, not silently supported features:
+
+- General textures and samplers
+- Arbitrary vertex-output structs and general `stage_in`
+- Classes, methods, templates, generics, exceptions, and dynamic allocation
+- C++, C#, and Objective-C source facades
+- A complete type checker for every address-space conversion
+- Full interprocedural uniformity and race analysis

@@ -1,125 +1,112 @@
-# BinC Host Seam — How BinC Reaches the CPU
+# BinC host seam
 
-> *Works as C. Acts as Metal.* — Third (final) design pillar.
-> The one pillar that makes BinC a **usable language**, not a kernel-only spec.
+BinC is a GPU language. It does not contain Cocoa, event loops, file I/O, or a CPU `main`. A host program supplies the boundary that loads a metallib, creates resources, dispatches kernels, and presents results.
 
----
-
-## The philosophy: the host is *not* BinC
-
-BinC-the-language is **pure GPU** (no host in the core). So the host seam is **not a host language inside BinC.**
-It is a **reflection-generated contract**: a BinC program *declares* its launchable interface, and the compiler
-emits (1) the `.metallib` and (2) a **host binding library** + thin runtime that drives the Metal 4 API. The
-host stays whatever language the app already is (Swift / Obj-C / C++).
-
-> **The unifying move:** the same `!air.*` argument metadata that *describes a GPU function* also *describes how
-> the host binds to it.* One source of truth — proven metadata, not a parallel schema.
-
-```
-   BinC source (.binc)
-        │ binc compiler
-        ├─▶ program.metallib              (GPU code; entry points + !air.* arg metadata)
-        └─▶ program.{h,swift,mm}          (host binding: typed dispatch + buffer handles)
-                  │ uses
-                  └─▶ binc_runtime        (thin C lib wrapping MTL4: device, queue, arg tables, sync)
-```
+The current project provides a small generated binding layer and a C/Objective-C runtime.
 
 ---
 
-## Host seam v1 (implemented)
+## Generated binding headers
 
-`binc` now emits a sibling `<output>.h` binding header whenever it produces a metallib. The header contains a
-small typed inline wrapper for every launchable BinC kernel. Pointer parameters become `BincBuffer *` handles,
-scalar parameters retain their C scalar type, and coordinate/grid built-ins are supplied by the dispatch domain
-rather than exposed as fake host arguments.
+When compiling a metallib:
 
-`binc_runtime.h` and `binc_runtime.m` provide the deliberately thin implementation: open a metallib, allocate
-shared buffers, bind buffer/constant arguments at their reflected locations, dispatch, wait for completion, and
-expose shared contents. The runtime is compiled with `make runtime` and intentionally does not invent a second
-binding schema; generated wrappers use the same parameter order and locations as the AIR metadata. The Pong host
-adds only Cocoa window/input, AVFoundation looping music, drawable/depth setup, and render-command encoding;
-arrow-up/W move up and arrow-down/D move down.
+```bash
+./binc ../examples/control.binc -o build/control.metallib
+```
 
-## The dispatch declaration
+`binc` also writes:
 
-A BinC program declares its **launchable surface** explicitly. The functions are still BinC (domain-typed); the
-`entry` block fixes their dispatch contract:
+```text
+build/control.h
+```
+
+The header contains one inline wrapper for each compute kernel. Device pointers become `BincBuffer*`; scalar kernel arguments remain C scalar values. Coordinate and grid extent parameters are generated as dispatch-owned built-ins and are not exposed as fake host arguments.
+
+A generated wrapper is conceptually:
 
 ```c
-struct Particle { float x,y,z; float vx,vy,vz; };
-void step(device Particle* p, uniform float dt) {       // a BinC kernel (implicit 1D grid)
-    p->x += p->vx * dt;  p->y += p->vy * dt;  p->z += p->vz * dt;
-}
-
-program Sim {                                            // the host seam — a declaration, not host code
-    device buffer<Particle> particles;                   // host-provided, app-lifetime
-    uniform float dt;
-
-    entry step(particles, dt) grid = particles.length;   // domain + binding
-    // graphics stages add: render_target, depth, drawables — same declaration form
+static inline int binc_update(BincRuntime* rt,
+                              size_t grid,
+                              BincBuffer* state,
+                              BincBuffer* vertices,
+                              float dt,
+                              float input) {
+    BincDispatchArg args[5];
+    int n = 0;
+    args[n++] = binc_arg_buffer(0, state);
+    args[n++] = binc_arg_buffer(1, vertices);
+    args[n++] = binc_arg_bytes(2, &dt, sizeof dt);
+    args[n++] = binc_arg_bytes(3, &input, sizeof input);
+    return binc_runtime_dispatch(rt, "update", grid, args, n);
 }
 ```
 
-The compiler turns `entry step(...) grid = particles.length` into:
-- a Metal 4 **compute dispatch** (grid = N threads, N = buffer extent),
-- a host function `Sim.step(buffer, dt)` that builds the `MTL4ArgumentTable`, encodes, and `commit:count:`.
+The actual header is generated from the parsed BinC function list, so it follows the same parameter order as AIR metadata.
 
 ---
 
-## Buffer lifecycle — typed ownership
+## Runtime API
 
-| BinC declaration | Metal 4 backing | Who owns | Sync |
-|---|---|---|---|
-| `device buffer<T>` | shared/managed `MTLBuffer` | host allocates, both read/write | fence on handoff |
-| `device private buffer<T>` | private `MTLBuffer` (GPU-only) | BinC allocates, GPU-only | none (faster) |
-| `constant buffer<T>` | read-only, broadcast | host, immutable per dispatch | none |
-| `texture2d<T>` | `MTLTexture` | host (drawable) or BinC | fence / drawable |
+`binc/binc_runtime.h/.m` provides:
 
-Ownership is **typed**, so the host seam never leaks a GPU-only buffer to the CPU or vice-versa — it's a type
-error, consistent with `TYPES.md`.
+- `binc_runtime_open()` and `binc_runtime_close()`
+- shared buffer allocation and upload
+- shared buffer contents access
+- native Metal object access for custom render hosts
+- buffer/scalar dispatch argument construction
+- compute dispatch with completion waiting
 
----
+Build the runtime object:
 
-## CPU↔GPU synchronization as part of the contract
-
-Metal 4 uses **untracked resources + explicit barriers** (verified). BinC extends its compile-time sync story
-(`TYPES.md`'s `sync()`-dominance check) **across the boundary**: a dispatch's completion is an explicit
-`fence`/`event` in the declaration, so the host knows *exactly* when results are valid — no implicit guarantees
-to get wrong.
-
-```c
-entry step(particles, dt) grid = particles.length
-    outputs { particles }                              // host may read after this fence
-    fence = cpu_readable;                              // explicit handoff
+```bash
+cd binc
+make runtime
 ```
 
----
-
-## Why this design is coherent with the rest of BinC
-
-1. **One source of truth.** `entry` bindings mirror the `!air.*` arg metadata exactly (verified for buffers,
-   textures, render targets, structs). Generating the host binding is reading BinC's own emitted metadata.
-2. **Types flow through.** A `device buffer<T>` on the BinC side is a typed `MTLBuffer*` handle on the host side;
-   the host can't mis-bind it (wrong type / wrong stage) — it's checked at the seam.
-3. **Multi-threaded by construction.** Metal 4's `MTL4CommandAllocator` enables parallel command encoding; BinC
-   dispatches are independent entries, so the runtime can encode many `Sim.step(...)` across threads for free.
-4. **No host language invented.** BinC stays pure-GPU; the host is the app's existing language. BinC just makes
-   itself **drivable** with zero boilerplate.
+The runtime is intentionally thin. It does not replace the host language, introduce a second resource schema, or hide the Metal pipeline from applications that need custom rendering.
 
 ---
 
-## Honesty: limits & open questions
+## Pong host
 
-- **The host is still required.** BinC does not eliminate the CPU; it minimizes the seam to a typed, generated
-  contract. A real app still has a `main`/event loop — just not in BinC.
-- **Windowing/drawables.** Render/mesh stages need a host-provided `CAMetalLayer` drawable; BinC declares the
-  `render_target` binding, the host supplies the surface.
-- **Open questions to sharpen:**
-  1. Is `program { entry ... }` the only seam spelling, or do we allow per-kernel `export` annotations too?
-  2. Async/streaming dispatch: first-class `stream` types for pipelined host↔GPU, or explicit queues?
-  3. Reflection API: does BinC ship a runtime *reflection* lib (so a host can bind dynamically), or only
-     compile-time generated bindings?
+`examples/pong_host.m` is the reference host seam. It does the platform work that should not be in BinC:
 
-**Net:** with the host seam, BinC is a complete language — pure-GPU core, typed parallelism, compile-time GPU
-correctness, and a reflection-generated, type-checked bridge to any host. Every piece is grounded in verified
-Metal/Metal-4 fact.
+1. Create an `NSWindow` and `CAMetalLayer`.
+2. Load the generated `build/pong.metallib`.
+3. Create shared state and vertex buffers through `BincRuntime`.
+4. Read Arrow/W/D key state.
+5. Dispatch the BinC `update` kernel.
+6. Encode the BinC vertex/fragment pipeline.
+7. Present the drawable and depth buffer.
+8. Play the full soundtrack and event sound effects.
+9. Display game-over text and invoke the restart button.
+
+The game state, physics, geometry, HUD, particle generation, and shaders remain in `examples/pong.binc`.
+
+---
+
+## Building and running Pong
+
+```bash
+cd ~/binc/binc
+make pong
+./pong_host
+```
+
+For background testing:
+
+```bash
+nohup ./pong_host >pong_host.log 2>&1 < /dev/null &
+```
+
+Controls:
+
+- Up Arrow / `W`: up
+- Down Arrow / `D`: down
+- Escape: quit
+
+---
+
+## Honest limits
+
+The generated API currently targets compute kernels. Render hosts can use the runtime's native Metal handles, as Pong does. A future release can generate typed render-pipeline wrappers and drawable/resource declarations, but that is not required for the current verified game.

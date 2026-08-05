@@ -1,131 +1,126 @@
-# BinC Parallelism Model
+# BinC parallelism
 
-> *Works as C. Acts as Metal.* — First design pillar.
-> Grounded in **verified** AIR metadata (see `reference/air_*.ll`). Every construct below has a real lowering.
-
----
-
-## One rule, two spellings
-
-> **Every BinC function executes over a *domain* — a set of coordinates. The domain is part of the function's
-> type. It is either inferred (implicit) or named (explicit).**
-
-- **Implicit:** no coordinate parameter → the domain is *element-wise over the device buffer(s)* (1 thread per
-  element, 1D). The `step` example. The index is elided.
-- **Explicit:** a `coord<N>` / `grid` parameter *names* the domain → full control: 2D/3D, threadgroups, shared
-  memory, reductions, stencils.
-
-These are **not two modes**. They are one model — a domain-typed function — at two levels of spelling. Implicit
-is sugar that infers the domain; explicit is naming it. You upgrade by adding a coordinate parameter.
+BinC has one execution model: every launchable function runs over a domain. The domain may be inferred or explicitly named.
 
 ---
 
-## The vocabulary (BinC type → verified AIR lowering)
+## Implicit domains
 
-| BinC | AIR / Metal | Verified |
+A compute kernel with a device pointer can use the current element without spelling an index:
+
+```c
+kernel void add(device float* a, device float* b, device float* out) {
+    *out = *a + *b;
+}
+```
+
+The compiler supplies the hidden `air.thread_position_in_grid` value. `a`, `b`, and `out` are indexed by that value.
+
+---
+
+## Explicit domains
+
+Use a coordinate parameter when the kernel needs 2-D/3-D coordinates, local positions, group positions, or explicit indexing:
+
+```c
+kernel void fill(device float* out, coord2D c) {
+    int index = c.global.x + c.global.y * 64;
+    out[index] = 1.0f;
+}
+```
+
+Coordinate types lower as follows:
+
+| BinC | AIR value | Built-in |
 |---|---|---|
-| `device T*` | `T addrspace(1)*` + `"air-buffer-no-alias"` | ✅ |
-| `threadgroup T` (shared mem) | module global in `addrspace(3)` | ✅ |
-| `thread T` (private/register) | `addrspace(0)` | ✅ |
-| `constant T*` (read-only) | `addrspace(2)` | ✅ (sampler path) |
-| `atomic<T>` | struct `metal::_atomic { T }` + `air.atomic.global.*` | ✅ |
-| `texture2d<T,access>` | `%struct._texture_2d_t addrspace(1)*` + `!air.texture` | ✅ |
-| `coord<N>` | `<N x i16>` (ushort2/3) | ✅ |
-| `.global` / `.local` / `.group` | `air.thread_position_in_grid` / `..._in_threadgroup` / `air.threadgroup_position_in_grid` | ✅ |
-| `sync()` | `threadgroup_barrier(mem_threadgroup)` | ✅ |
-| `grid_extent` | `air.threads_per_grid` | ✅ |
+| `coord1D` | `i32` | `air.thread_position_in_grid` |
+| `coord2D` | `<2 x i16>` | `air.thread_position_in_grid` |
+| `coord3D` | `<3 x i16>` | `air.thread_position_in_grid` |
+| `.local` | matching coordinate value | `air.thread_position_in_threadgroup` |
+| `.group` | matching coordinate value | `air.threadgroup_position_in_grid` |
+| `grid_extent` | `i32` | `air.threads_per_grid` |
 
-**Address-space map (verified):** `0`=thread, `1`=device, `2`=constant/sampler, `3`=threadgroup.
+A kernel has one coordinate domain parameter. A coordinate parameter makes the function a compute entry point even if `kernel` is omitted.
 
 ---
 
-## The spectrum (BinC source → what it lowers to)
+## Threadgroup memory
 
-### 1. Implicit element-wise (the `step` example)
+A threadgroup array is shared by the threads in a group:
+
 ```c
-struct Particle { float x,y,z; float vx,vy,vz; };
-void step(device Particle* p, float dt) {       // domain INFERRED: 1 thread per particle
-    p->x += p->vx * dt;
+kernel void tile(device float* out, coord2D c,
+                threadgroup float shared[16][16]) {
+    shared[c.local.y][c.local.x] = 1.0f;
+    sync();
+    out[c.global.x] = shared[c.local.y][c.local.x];
 }
 ```
-→ domain = 1D over `p`; implicit index `i` from `air.thread_position_in_grid` (i32); `p->x` = `p[i].x`.
 
-### 2. Stencil (explicit 1D — needs neighbors)
-```c
-void smooth(device const float* in, device float* out, coord1D i) {
-    out[i] = 0.25f*in[i-1] + 0.5f*in[i] + 0.25f*in[i+1];   // neighbor access needs the index
-}
-```
-→ same 1D grid as #1, but `i` is now a named `coord1D`; bounds handled by the domain (BinC guarantees `i` is
-in-range; neighbor access is the programmer's responsibility or a typed boundary mode).
-
-### 3. Tiled 2D with shared memory + barrier
-```c
-void tileblur(texture2d<float4> src, texture2d<float4, write> dst,
-              coord2D c, threadgroup float4 smem[16][16]) {
-    smem[c.local] = src[c.global];        // cooperative load into addrspace(3)
-    sync();                               // threadgroup_barrier
-    dst[c.global] = smem[c.local];
-}
-```
-→ `c` is `<2 x i16>`; `c.global`/`c.local` map to the two built-ins; `smem` is an `addrspace(3)` module global;
-`sync()` is `threadgroup_barrier`. Threadgroup size (16×16) is a dispatch attribute.
-
-### 4. Reduction (atomic accumulator)
-```c
-void sum(device const float* in, device atomic<float>* acc, coord1D i, grid_extent n) {
-    if (i < n) acc->add(in[i]);           // -> air.atomic.global.add.f32
-}
-```
-→ `acc` is a `metal::_atomic` struct buffer; `.add()` lowers to `air.atomic.global.add.f32`; `n` is
-`air.threads_per_grid`.
+The current compiler lowers these arrays to module-level `addrspace(3)` globals. The harness can dispatch 2-D grids with `grid2` and choose group dimensions with `group2`.
 
 ---
 
-## Reconciliation: why implicit and explicit are the same thing
+## Atomics
 
-A BinC function's **domain** is computed by a single rule:
+Atomic buffers use Metal's atomic wrapper representation:
 
-1. If the signature contains a `coord<N>` or `grid` parameter → **that is the domain** (explicit).
-2. Else, if it has a `device T*` parameter → **element-wise domain over that buffer** (implicit): BinC synthesizes
-   a hidden 1D `coord` named `i`, and rewrites `p->f` / `p[i]` into `p[i].f` / `p[i]`.
-3. Else → not a kernel (compile error: no parallelism domain).
+```c
+kernel void sum(device float* values,
+               device atomic<float>* total,
+               coord1D i,
+               grid_extent n) {
+    if (i < n) total->add(values[i]);
+}
+```
 
-So `step` is exactly `smooth`/`sum` with the coordinate elided. There is **one** model; implicit is the ergonomic
-90%-case, explicit is the escape hatch for the hard 10%. Both are first-class BinC, both lower to real AIR.
-
----
-
-## Implemented in the bootstrap compiler
-
-The current compiler implements the explicit compute spectrum used by the examples:
-
-- `coord1D`, `coord2D`, and `coord3D` parameters are kernel-domain parameters. Their `.global` values are
-  backed by `air.thread_position_in_grid`; `.local` and `.group` append the corresponding AIR built-ins.
-- `grid_extent` lowers to an `air.threads_per_grid` argument.
-- `threadgroup T name[N]` and `name[N][M]` become module globals in address space 3 and are indexed with typed GEPs.
-- `atomic<float>` and `atomic<int>` buffers support `acc->add(value)` via the verified global atomic intrinsics.
-- `sync()` is convergent only when reached from uniform control flow. A varying `if`/loop region containing a
-  barrier is rejected rather than emitted as potentially undefined Metal.
-- The harness accepts `grid`, `grid2`, `grid3`, and matching `group` directives for GPU verification.
-
-## Proven vs. to-derive
-
-**Proven (compiled to `.ll`, contract captured in `reference/`):** 1D/2D/3D grids, device/threadgroup/thread/
-constant address spaces, textures (read/write), threadgroup shared memory + barriers, atomics/reductions,
-`threads_per_grid`. → The entire **compute parallelism** surface is mapped.
-
-**To-derive next (compile MSL probes → read `.ll`):** threadgroup size attributes, vertex/fragment render path,
-Metal 4 mesh shaders & machine-learning command encoder, ray tracing, indirect command buffers. Same method;
-mechanical.
+`atomic<float>::add` lowers to `air.atomic.global.add.f32`; integer add uses the integer intrinsic. Atomic buffers are marked read/write in AIR metadata.
 
 ---
 
-## Open sub-questions (to sharpen next)
+## Synchronization and divergence
 
-1. **Threadgroup size:** declared in the type (`grid2D<tile<16,16>>`) or set at launch? Likely *both* — a default
-   in the type, overridable at dispatch.
-2. **Boundary handling for stencils:** typed boundary modes (`edge`, `clamp`, `zero`) vs. programmer-managed?
-3. **Reduction ergonomics:** is `sum` the spelled-out form, or does BinC offer a higher-level `reduce(+, buf)`?
-4. **Nested parallelism:** grids of grids (a kernel launching subgrids) — does Metal 4's compute encoder support
-   this cleanly?
+The compiler performs a small local uniformity analysis:
+
+- coordinates are varying
+- device-buffer data is varying
+- parameters marked `varying` are varying
+- constant/scalar parameters are uniform unless marked otherwise
+
+A varying branch or loop bound gets a diagnostic. A `sync()` inside a varying region is rejected because a Metal barrier is undefined if some lanes skip it.
+
+```c
+kernel void unsafe(device float* p, coord1D i) {
+    if (i % 2 == 0) {
+        sync(); // compile error
+    }
+}
+```
+
+The current analysis is a safety gate, not a complete optimizer or full race checker.
+
+---
+
+## Harness dispatch
+
+Specs support:
+
+```text
+grid 64
+grid2 16 16
+grid3 8 8 8
+group 64
+group2 8 8
+group3 4 4 4
+```
+
+A one-dimensional `grid N` defaults to one threadgroup of N threads for compatibility with the original examples. Explicit 2-D/3-D specs use `dispatchThreads` with the requested group dimensions.
+
+---
+
+## Current limits
+
+- There is no general texture coordinate type in the parser yet.
+- Threadgroup race checking is not a complete dominance/data-flow system.
+- Uniformity inference is intra-procedural.
+- Nested parallelism and dynamic dispatch are not part of the current language.
