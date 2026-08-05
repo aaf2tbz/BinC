@@ -1,0 +1,13 @@
+/* geom.binc — shared geometry helpers, included by include_main.binc */
+once;
+
+constant float DEG2RAD = 0.0174532925f;
+
+float deg2rad(float d) { return d * DEG2RAD; }
+
+float2 rot2(float2 v, float a) {
+    float c = cos(a);
+    float s = sin(a);
+    return float2(c * v.x - s * v.y,
+                  s * v.x + c * v.y);
+}

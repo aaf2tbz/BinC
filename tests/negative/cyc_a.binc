@@ -1,0 +1,2 @@
+include "cyc_b.binc";
+kernel void k(device float* p, coord1D i) { p[i] = 0.0f; }

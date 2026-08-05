@@ -1,0 +1,24 @@
+/* include_main.binc — uses geom.binc via `include`; the prelude is auto-included */
+include "include/geom.binc";
+
+kernel void k(device float* out, coord1D i) {
+    /* prelude: PI, min, lerp, saturate */
+    float a = min(2.0f, 3.0f);            /* 2 */
+    float b = lerp(0.0f, 10.0f, 0.5f);    /* 5 */
+    float c = saturate(-1.0f);            /* 0 */
+    /* included file: deg2rad, rot2 */
+    float2 p = rot2(float2(1.0f, 0.0f), deg2rad(90.0f));
+    float d = p.x;                        /* ~0 (cos 90deg) */
+    float e = p.y;                        /* ~1 (sin 90deg) */
+    /* prelude: pack_rgba / unpack_rgba round-trip */
+    uint packed = pack_rgba(float4(1.0f, 0.5f, 0.25f, 1.0f));
+    float4 back = unpack_rgba(packed);
+    out[i]     = a;                       /* 2 */
+    out[i + 8] = b;                       /* 5 */
+    out[i + 16] = c;                      /* 0 */
+    out[i + 24] = d;                      /* 0 */
+    out[i + 32] = e;                      /* 1 */
+    out[i + 40] = back.r;                 /* 1 */
+    out[i + 48] = back.g;                 /* 0.5 */
+    out[i + 56] = back.b;                 /* 0.25 */
+}

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #define BINC_VERSION "0.1.0"
 
@@ -13,6 +14,8 @@ static const char *usage_text =
     "  --emit-ll            stop after emitting AIR .ll (no metal/metallib)\n"
     "  -h, --help           show this help and exit\n"
     "  --version            show the compiler version and exit\n"
+    "  -I <dir>             add an include search path\n"
+    "  -no-prelude          disable the automatic prelude include\n"
     "environment: METAL / METALLIB override the AIR tool invocations\n"
     "             (defaults: \"xcrun metal\" / \"xcrun metallib\")\n";
 
@@ -21,6 +24,86 @@ static const char *usage_text =
 static const char *tool(const char *env, const char *def){
     const char *v = getenv(env);
     return v && *v ? v : def;
+}
+
+/* ---- textual include preprocessor ----
+ * `include "path";` splices another .binc file (resolved relative to the
+ * including file, then -I dirs, then cwd); `once;` marks a file as included
+ * at most once per compilation; include cycles are located errors. */
+static char *inc_dirs[32]; static size_t ninc_dirs;
+static void add_inc_dir(const char *d){ if(ninc_dirs<32) inc_dirs[ninc_dirs++]=strdup(d); }
+static char *inc_stack[32]; static int ninc_stack;
+static char *once_files[64]; static size_t n_once;
+
+static char *dirname_of(const char *path){
+    const char *slash = strrchr(path, '/');
+    if(!slash) return strdup(".");
+    char *d = malloc((size_t)(slash-path)+1);
+    memcpy(d, path, (size_t)(slash-path)); d[slash-path]='\0';
+    return d;
+}
+static char *resolve_include(const char *curdir, const char *want){
+    if(curdir){ char p[1024]; snprintf(p,sizeof p,"%s/%s",curdir,want);
+        if(!access(p,R_OK)) return strdup(p); }
+    for(size_t i=0;i<ninc_dirs;i++){ char p[1024]; snprintf(p,sizeof p,"%s/%s",inc_dirs[i],want);
+        if(!access(p,R_OK)) return strdup(p); }
+    if(!access(want,R_OK)) return strdup(want);
+    return NULL;
+}
+static int is_once(const char *path){ for(size_t i=0;i<n_once;i++) if(!strcmp(once_files[i],path)) return 1; return 0; }
+static void mark_once(const char *path){ if(n_once<64) once_files[n_once++]=strdup(path); }
+
+typedef struct { char *p; size_t n, cap; } Buf;
+static void bput(Buf *b, const char *s, size_t n){ if(b->n+n+1>b->cap){ b->cap=(b->cap?b->cap*2:8192); while(b->cap<b->n+n+1)b->cap*=2; b->p=realloc(b->p,b->cap); } memcpy(b->p+b->n,s,n); b->n+=n; b->p[b->n]='\0'; }
+
+/* returns the spliced text of one file, or NULL after reporting an error */
+static char *splice_file(const char *path){
+    for(int i=0;i<ninc_stack-1;i++) if(!strcmp(inc_stack[i],path)){
+        fprintf(stderr,"binc: error: include cycle: %s -> %s\n",inc_stack[ninc_stack-1],path);
+        return NULL; }
+    FILE *f=fopen(path,"rb"); if(!f){ fprintf(stderr,"binc: error: cannot open include file %s\n",path); return NULL; }
+    fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
+    char *text=malloc(n+1); if(n)fread(text,1,n,f); text[n]='\0'; fclose(f);
+    char *dir=dirname_of(path);
+    Buf out={0}; long line=0; char *save=NULL;
+    for(char *ln=strtok_r(text,"\n",&save); ln; ln=strtok_r(NULL,"\n",&save)){
+        line++;
+        char *t=ln; while(*t==' '||*t=='\t')t++;
+        if(!strncmp(t,"once;",5)){ mark_once(path); continue; }
+        if(!strncmp(t,"include ",8)){
+            char *q=t+8; while(*q==' '||*q=='\t')q++;
+            if(*q!='"'){ fprintf(stderr,"binc: error (%s line %ld): include needs \"path\";\n",path,line); free(out.p); return NULL; }
+            q++; char *end=strchr(q,'"'); if(!end){ fprintf(stderr,"binc: error (%s line %ld): unterminated include path\n",path,line); free(out.p); return NULL; }
+            *end='\0'; char *want=q; char *semi=end+1; while(*semi==' '||*semi=='\t')semi++;
+            if(*semi!=';'){ fprintf(stderr,"binc: error (%s line %ld): include needs a trailing ;\n",path,line); free(out.p); return NULL; }
+            char *res=resolve_include(dir,want);
+            if(!res){ fprintf(stderr,"binc: error (%s line %ld): cannot find include file \"%s\"\n",path,line,want); free(out.p); return NULL; }
+            if(!is_once(res)){
+                inc_stack[ninc_stack++]=res;
+                char *sub=splice_file(res);
+                ninc_stack--;
+                if(!sub){ free(res); free(out.p); return NULL; }
+                bput(&out,sub,strlen(sub)); free(sub);
+            }
+            free(res); continue;
+        }
+        bput(&out,ln,strlen(ln)); bput(&out,"\n",1);
+    }
+    free(text); free(dir);
+    return out.p;
+}
+
+/* prelude auto-include: search argv[0] dir, -I dirs, then cwd */
+static char *find_prelude(const char *argv0){
+    const char *slash=strrchr(argv0,'/');
+    if(slash){ char d[512]; size_t l=(size_t)(slash-argv0); if(l>sizeof d-1)l=sizeof d-1;
+        memcpy(d,argv0,l); d[l]='\0';
+        char p[600]; snprintf(p,sizeof p,"%s/prelude.binc",d);
+        if(!access(p,R_OK)) return strdup(p); }
+    for(size_t i=0;i<ninc_dirs;i++){ char p[600]; snprintf(p,sizeof p,"%s/prelude.binc",inc_dirs[i]);
+        if(!access(p,R_OK)) return strdup(p); }
+    if(!access("prelude.binc",R_OK)) return strdup("prelude.binc");
+    return NULL;
 }
 
 static char *read_file(const char *path, size_t *out_n) {
@@ -72,10 +155,12 @@ int main(int argc, char **argv) {
         char triple[64]; snprintf(triple,sizeof triple,"air64_v%d-apple-macosx%d.0.0",sdk+2,sdk);
         binc_set_air(triple,sdk,sdk-18);
     }
-    const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0;
+    const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0; int no_prelude = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i+1 < argc) outfile = argv[++i];
+        else if (!strcmp(argv[i], "-I") && i+1 < argc) add_inc_dir(argv[++i]);
         else if (!strcmp(argv[i], "--emit-ll")) emit_ll_only = 1;
+        else if (!strcmp(argv[i], "-no-prelude")) no_prelude = 1;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { fputs(usage_text, stdout); return 0; }
         else if (!strcmp(argv[i], "--version")) { printf("binc %s\n", BINC_VERSION); return 0; }
         else if (argv[i][0] != '-') infile = argv[i];
@@ -83,7 +168,21 @@ int main(int argc, char **argv) {
     }
     if (!infile) { fputs(usage_text, stderr); return 2; }
 
-    size_t srclen; char *src = read_file(infile, &srclen);
+    /* preprocess: optional prelude, then the user file, splicing includes */
+    char *src;
+    {
+        Buf all={0};
+        if(!no_prelude){
+            char *pre=find_prelude(argv[0]);
+            if(pre){ char *spl=splice_file(pre);
+                if(!spl){ fprintf(stderr,"binc: error: prelude %s failed to load\n",pre); return 1; }
+                bput(&all,spl,strlen(spl)); bput(&all,"\n",1); free(spl); free(pre); }
+        }
+        char *main_spl=splice_file(infile);
+        if(!main_spl) return 1;
+        bput(&all,main_spl,strlen(main_spl)); free(main_spl);
+        src=all.p;
+    }
 
     Token *toks; size_t ntoks;
     lex(src, &toks, &ntoks);

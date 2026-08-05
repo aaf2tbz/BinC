@@ -71,10 +71,12 @@ void lex(const char *src, Token **out, size_t *out_n){
             const char *s=l.p; int isint=1;
             if(l.p[0]=='0'&&(l.p[1]=='x'||l.p[1]=='X')){
                 l.p+=2; while(*l.p&&isxdigit((unsigned char)*l.p))l.p++;
+                if(*l.p=='u'||*l.p=='U')l.p++;
                 char *num=dup_n(s,(size_t)(l.p-s));
                 Token x=tk(TK_ICONST,ln,col); x.ival=(long)strtoul(num+2,NULL,16); free(num); PUSH(x); continue;
             }
             while(*l.p&&(isdigit((unsigned char)*l.p)||*l.p=='.')){ if(*l.p=='.')isint=0; l.p++; }
+            if(*l.p=='u'||*l.p=='U'){ isint=1; l.p++; }
             char *num=dup_n(s,(size_t)(l.p-s));
             if(*l.p=='f'||*l.p=='F'){ isint=0; l.p++; }
             Token x=tk(isint?TK_ICONST:TK_FCONST,ln,col);

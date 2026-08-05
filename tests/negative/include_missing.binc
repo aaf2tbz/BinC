@@ -1,0 +1,2 @@
+include "no_such_file_anywhere.binc";
+kernel void k(device float* p, coord1D i) { p[i] = 0.0f; }

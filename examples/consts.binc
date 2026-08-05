@@ -1,10 +1,10 @@
-constant float PI = 3.14159265f;
+constant float MY_PI = 3.14159265f;
 constant int MAX_ITERS = 4;
 constant uint MASK = 0xFF;
 constant bool ENABLED = true;
 
 kernel void k(device float* out, device int* iout, coord1D i) {
-    out[i] = PI * (float)i;
+    out[i] = MY_PI * (float)i;
     iout[i] = MAX_ITERS + (ENABLED ? 1 : 0);
     out[i + 8] = (float)(MASK & 0x0F);
 }
