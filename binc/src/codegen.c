@@ -682,6 +682,17 @@ static void gen_stmt(CG *c, Stmt *s){
         c->brk_l[c->nloops]=en; c->cont_l[c->nloops]=cond; c->nloops++;
         if(div)c->divergent++; gen_block(c,&s->then_b); if(div)c->divergent--; c->nloops--;
         if(!c->term) emit(c,"  br label %%bb%d\n",cond); lbl(c,en); break; }
+    case S_DOWHILE:{
+        int div=s->cond&&is_varying(c,s->cond);
+        if(div) fprintf(stderr,"binc: note (line %d): 'do-while' condition is data-dependent — divergent\n",s->cond->line);
+        int body=newlbl(c), cond=newlbl(c), en=newlbl(c);
+        emit(c,"  br label %%bb%d\n",body); lbl(c,body);
+        c->brk_l[c->nloops]=en; c->cont_l[c->nloops]=cond; c->nloops++;
+        if(div)c->divergent++; gen_block(c,&s->then_b); if(div)c->divergent--; c->nloops--;
+        if(!c->term) emit(c,"  br label %%bb%d\n",cond);
+        lbl(c,cond);
+        const char *cv=gen_cond(c,s->cond); emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",cv,body,en);
+        lbl(c,en); break; }
     case S_FOR:{
         if(s->for_init) gen_stmt(c,s->for_init);
         int div=s->for_cond&&is_varying(c,s->for_cond);

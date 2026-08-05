@@ -208,6 +208,13 @@ static Stmt parse_stmt(TokStream *ts){
         advance(ts); expect(ts,TK_LPAREN,"("); Expr *cond=parse_expr(ts); expect(ts,TK_RPAREN,")");
         Stmt st={0}; st.kind=S_WHILE; st.line=kt->line; st.col=kt->col; st.cond=cond; st.then_b=parse_block_or_stmt(ts); return st;
     }
+    if(kt->kind==TK_KW_DO){
+        advance(ts); Stmt st={0}; st.kind=S_DOWHILE; st.line=kt->line; st.col=kt->col;
+        st.then_b=parse_block_or_stmt(ts);
+        expect(ts,TK_KW_WHILE,"while"); expect(ts,TK_LPAREN,"(");
+        st.cond=parse_expr(ts); expect(ts,TK_RPAREN,")"); expect(ts,TK_SEMI,";");
+        return st;
+    }
     if(kt->kind==TK_KW_FOR){
         advance(ts); expect(ts,TK_LPAREN,"("); Stmt st={0}; st.kind=S_FOR; st.line=kt->line; st.col=kt->col;
         if(peek(ts)->kind!=TK_SEMI){
@@ -290,7 +297,7 @@ static void parse_struct(TokStream *ts, Program *prog){
 static int stmt_start(Token *t){
     switch(t->kind){
     case TK_KW_STRUCT: case TK_KW_RETURN: case TK_KW_BREAK: case TK_KW_CONTINUE:
-    case TK_KW_IF: case TK_KW_WHILE: case TK_KW_FOR:
+    case TK_KW_IF: case TK_KW_WHILE: case TK_KW_FOR: case TK_KW_DO:
     case TK_KW_VERTEX: case TK_KW_FRAGMENT: case TK_KW_KERNEL:
     case TK_LBRACE: case TK_SEMI: case TK_KW_DEVICE: case TK_KW_CONSTANT:
     case TK_KW_THREADGROUP: case TK_KW_THREAD: case TK_KW_UNIFORM: case TK_KW_VARYING:
