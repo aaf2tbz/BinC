@@ -43,6 +43,10 @@ Matrix types `mat2`, `mat3`, and `mat4` are column-major, with the same buffer l
 
 Module-level constants are declared `constant float PI = 3.14159f;` — one per line, scalar numeric types only. The initializer must be a literal.
 
+## Modules and the prelude
+
+`include "path.binc";` textually splices another BinC file (resolved relative to the including file, then `-I <dir>` search paths, then the current directory). A file containing `once;` is included at most once per compilation; include cycles are located errors. `binc/prelude.binc` is automatically spliced before every compilation (disable with `-no-prelude`) and provides `PI`, `TAU`, `E`, `min`, `max`, `lerp`, `saturate`, `pack_rgba`/`unpack_rgba` (0-255 uint color packing), and a deterministic `hash12` — all written in BinC.
+
 Structs use C-like declarations:
 
 ```c

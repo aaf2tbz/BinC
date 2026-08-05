@@ -125,8 +125,10 @@ kernel void paint(device float* out, coord2D c) {
 
 - `float`, `half`, `int`, `uint`, `bool`
 - `float2`–`float4`, `int2`–`int4`, `uint2`–`uint4`
-- C-like structs with mixed scalar/vector fields
-- Struct locals and field assignment
+- `mat2`/`mat3`/`mat4` column-major matrices
+- C-like structs with mixed scalar/vector/matrix fields and fixed-size array fields (`float v[4]`)
+- Struct locals with assignment, by-value parameters and returns in plain functions, and field access on struct-returning calls
+- Local fixed-size arrays (`float local[8]`, `float grid[4][4]`)
 - MSL-compatible vector and struct layout metadata
 
 ### Memory and parallelism
@@ -142,7 +144,8 @@ kernel void paint(device float* out, coord2D c) {
 ### Expressions and control flow
 
 - Arithmetic, comparisons, logical operators, assignment, and compound assignment
-- Bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`) with compound forms and hex literals
+- Postfix `i++` / `i--`
+- Bitwise operators (`&`, `|`, `^`, `~`, `<<`, `>>`) with compound forms and hex literals (`0xFFu`)
 - Explicit casts `(float)x`, `(uint)(-1)`, including scalar-to-vector splats
 - Ternary `cond ? a : b`, `do-while` loops, and `switch` with fallthrough
 - `const` locals (writes are compile errors)
@@ -150,11 +153,13 @@ kernel void paint(device float* out, coord2D c) {
 - `if`, `for`, `while`, `break`, `continue`, and returns
 - User functions without recursion
 - Built-ins including `sqrt`, `sin`, `cos`, `pow`, `atan2`, `rsqrt`, `sign`, `fmin`, `fmax`, `imin`, `imax`, and `sync()`
-- Vector constructors, arithmetic, component access, and swizzle reads/writes
+- Vector constructors (including mixed forms like `float3(v2, s)`), arithmetic, component access, and swizzle reads/writes
 - Vector comparisons producing mask vectors, plus `select(a, b, mask)`
 - Vector math: `dot`, `cross`, `length`, `distance`, `normalize`, `reflect`, `clamp`, `mix`, `step`, `smoothstep`, `fract`, `mod`, `radians`, `degrees`
 - `mat2`/`mat3`/`mat4`: column-major constructors, `m[col][row]` indexing, `mat*vec`, `mat*mat`, scalar arithmetic
 - Module-level `constant` globals
+- `include "file.binc";` with `-I <dir>` search paths, `once;` guards, and cycle detection
+- A standard prelude (auto-included, `-no-prelude` to disable): `PI`, `TAU`, `E`, `min`, `max`, `lerp`, `saturate`, `pack_rgba`/`unpack_rgba`, `hash12`
 
 ### Textures
 
