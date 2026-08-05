@@ -1,0 +1,8 @@
+/* uints.binc — interpreter port: unsigned math, bitwise ops */
+kernel void k(device uint* out, coord1D i) {
+    uint u = 5u + (uint)i;                 /* 5..8 */
+    out[i]     = u * 2u;                   /* 10..16 */
+    out[i + 4] = u & 6u;                   /* 4,6,4,6 */
+    out[i + 8] = (u << 1) | 1u;            /* 11,13,15,17 */
+    out[i + 12] = 0xFFu >> 4;              /* 15 */
+}

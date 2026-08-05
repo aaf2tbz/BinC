@@ -1,7 +1,7 @@
 # BinC bootstrap compiler (in C). Self-hosting target.
 CC      ?= clang
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
-SRC     := src/main.c src/lexer.c src/parser.c src/codegen.c
+SRC     := src/main.c src/lexer.c src/parser.c src/codegen.c src/interp.c
 DEV     ?= /Users/averyfelts/Downloads/Xcode-beta.app/Contents/Developer
 
 binc: $(SRC) src/binc.h
@@ -38,8 +38,15 @@ test-negative: binc
 test-fuzz: binc
 	python3 fuzz.py
 
-# GPU-free CI pipeline: build, negative tests, fuzz, compile all examples
-ci: binc test-negative test-fuzz examples
+# CPU reference interpreter: run each tests/interp/*.binc and compare buffer 0
+test-interp: binc
+	@fail=0; for t in ../tests/interp/*.binc; do \
+		out="$$(./binc -i "$$t")"; want="$$(cat "$${t%.binc}.expected")"; \
+		if [ "$$out" = "$$want" ]; then echo "PASS: $$t"; else echo "FAIL: $$t"; echo "  got: $$out"; echo "  want: $$want"; fail=1; fi; done; \
+	if [ $$fail -eq 0 ]; then echo "ALL INTERP TESTS PASS"; else exit 1; fi
+
+# GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
+ci: binc test-negative test-fuzz test-interp examples
 	@echo "CI OK"
 
 clean:

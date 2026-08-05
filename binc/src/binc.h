@@ -110,4 +110,5 @@ extern jmp_buf *g_recover;
 Program parse_program(TokStream *ts);
 void emit_air(FILE *out, Program *prog);
 void binc_set_air(const char *triple, int sdk, int minor);
+void interp_run(const Program *prog);
 #endif

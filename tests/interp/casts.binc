@@ -1,0 +1,8 @@
+/* casts.binc — interpreter port: explicit casts between numeric kinds */
+kernel void k(device float* out, coord1D i) {
+    int x = (int)i;
+    out[i]     = (float)x;                 /* 0..3 */
+    out[i + 4] = (float)((uint)(-1) >> 24);/* 255 */
+    out[i + 8] = (float)((int)2.9f);       /* 2 */
+    out[i + 12] = (float)((uint)65536.5f); /* 65536 */
+}

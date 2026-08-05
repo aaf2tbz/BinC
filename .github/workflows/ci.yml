@@ -26,6 +26,10 @@ jobs:
         run: make test-fuzz
         working-directory: binc
 
+      - name: CPU reference interpreter (GPU-free execution of the scalar/vector subset)
+        run: make test-interp
+        working-directory: binc
+
       - name: Compile all examples to .metallib (validates AIR emission)
         run: make examples
         working-directory: binc

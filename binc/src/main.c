@@ -16,6 +16,7 @@ static const char *usage_text =
     "  --version            show the compiler version and exit\n"
     "  -I <dir>             add an include search path\n"
     "  -no-prelude          disable the automatic prelude include\n"
+    "  -i                   interpret on the CPU (scalar/vector subset, no GPU)\n"
     "environment: METAL / METALLIB override the AIR tool invocations\n"
     "             (defaults: \"xcrun metal\" / \"xcrun metallib\")\n";
 
@@ -155,12 +156,13 @@ int main(int argc, char **argv) {
         char triple[64]; snprintf(triple,sizeof triple,"air64_v%d-apple-macosx%d.0.0",sdk+2,sdk);
         binc_set_air(triple,sdk,sdk-18);
     }
-    const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0; int no_prelude = 0;
+    const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0; int no_prelude = 0; int interpret = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i+1 < argc) outfile = argv[++i];
         else if (!strcmp(argv[i], "-I") && i+1 < argc) add_inc_dir(argv[++i]);
         else if (!strcmp(argv[i], "--emit-ll")) emit_ll_only = 1;
         else if (!strcmp(argv[i], "-no-prelude")) no_prelude = 1;
+        else if (!strcmp(argv[i], "-i")) interpret = 1;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { fputs(usage_text, stdout); return 0; }
         else if (!strcmp(argv[i], "--version")) { printf("binc %s\n", BINC_VERSION); return 0; }
         else if (argv[i][0] != '-') infile = argv[i];
@@ -189,6 +191,7 @@ int main(int argc, char **argv) {
     TokStream ts = { toks, ntoks, 0 };
     Program prog = parse_program(&ts);
     if (had_errors()) return 1;
+    if (interpret) { interp_run(&prog); return 0; }
 
     char base[512]; base_name(infile, base, sizeof base);
     char ll[600], air[600], lib[700];

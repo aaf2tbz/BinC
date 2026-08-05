@@ -1,0 +1,8 @@
+/* math.binc — interpreter port: scalar math builtins over the grid */
+kernel void k(device float* out, coord1D i) {
+    float f = (float)i;
+    out[i]     = sqrt(f * f);              /* i */
+    out[i + 4] = sin(0.0f);                /* 0 */
+    out[i + 8] = fmin(f, 2.0f);            /* min(i,2) */
+    out[i + 12] = clamp(f, 1.0f, 3.0f);    /* 1..3 */
+}

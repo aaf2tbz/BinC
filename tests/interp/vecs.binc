@@ -1,0 +1,9 @@
+/* vecs.binc — interpreter port: vector constructors, components, dot/length */
+kernel void k(device float* out, coord1D i) {
+    float2 a = float2(1.0f, 2.0f);
+    float3 b = float3(a, 3.0f);            /* mixed constructor */
+    out[i]     = b.z;                      /* 3 */
+    out[i + 4] = dot(a, a);                /* 5 */
+    out[i + 8] = length(b);                /* sqrt(14) */
+    out[i + 12] = a.x + a.y;               /* 3 */
+}
