@@ -37,7 +37,11 @@ uint counter;
 float4 color;
 ```
 
-Supported vector types are `float2`–`float4`, `int2`–`int4`, and `uint2`–`uint4`. Vectors support constructors, scalar splats, element-wise arithmetic, and single-component access such as `.x`, `.y`, `.z`, `.w`, `.r`, `.g`, `.b`, and `.a`.
+Supported vector types are `float2`–`float4`, `int2`–`int4`, and `uint2`–`uint4`. Vectors support constructors, scalar splats, element-wise arithmetic, swizzle reads (`v.xy`, `v.wzyx`, `v.rg`) and swizzle writes (`v.xy = float2(...)`), plus single-component access such as `.x`, `.y`, `.z`, `.w`, `.r`, `.g`, `.b`, and `.a`.
+
+Matrix types `mat2`, `mat3`, and `mat4` are column-major, with the same buffer layout as MSL matrices. Constructors take 1 scalar (diagonal), *N* column vectors, or *N*×*N* scalars in column-major order. Elements are addressed `m[col][row]`; `mat * vec`, `vec * mat`, `mat * mat`, `mat ± mat`, and `mat * scalar` are supported. Matrices can be locals, struct fields, and device/threadgroup pointers (matrix-by-value parameters and returns are not supported).
+
+Module-level constants are declared `constant float PI = 3.14159f;` — one per line, scalar numeric types only. The initializer must be a literal.
 
 Structs use C-like declarations:
 
@@ -160,13 +164,21 @@ A plain function has no implicit thread index, so pointer accesses must be expli
 
 ---
 
+## Operators
+
+Integer types support the full bitwise set: `&`, `|`, `^`, `~`, `<<`, `>>` and their compound assignments, with `>>` arithmetic on `int` and logical on `uint`. Hex literals (`0xFF00`) are accepted. Explicit casts use C syntax: `(float)x`, `(uint)(-1)`, `(bool)x`, including scalar-to-vector splats (`(float4)1.0f`) and vector conversions. Casting a vector to a scalar is an error. Implicit conversions that can lose precision (float→int, and int→float except small constants) emit a compiler note — cast explicitly to silence.
+
 ## Built-ins
 
-Current scalar built-ins include:
+Scalar and vector (per-element) built-ins include:
 
-- Math: `sqrt`, `fabs`, `floor`, `ceil`, `sin`, `cos`, `exp`, `log`, `fmin`, `fmax`, `pow`
+- Math: `sqrt`, `fabs`, `floor`, `ceil`, `sin`, `cos`, `exp`, `log`, `fmin`, `fmax`, `pow`, `atan2`, `rsqrt`, `sign`
 - Integer: `imin`, `imax`
+- Vector math (scalars and vectors): `dot`, `cross` (float3), `length`, `distance`, `normalize`, `reflect`, `clamp`, `mix`, `step`, `smoothstep`, `fract`, `mod`, `radians`, `degrees`
+- Selection: `select(a, b, mask)` picks per element (`mask ? a : b`) for scalar and vector operands
 - Synchronization: `sync()`
+
+Vector comparisons (`v1 < v2`, `==`, etc.) produce bool-vector masks for use with `select`.
 
 ---
 
