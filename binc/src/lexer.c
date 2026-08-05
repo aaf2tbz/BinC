@@ -95,7 +95,7 @@ void lex(const char *src, Token **out, size_t *out_n){
             KW("break",TK_KW_BREAK) KW("continue",TK_KW_CONTINUE)
             KW("switch",TK_KW_SWITCH) KW("case",TK_KW_CASE) KW("default",TK_KW_DEFAULT)
             KW("true",TK_KW_TRUE) KW("false",TK_KW_FALSE)
-            KW("device",TK_KW_DEVICE) KW("constant",TK_KW_CONSTANT) KW("threadgroup",TK_KW_THREADGROUP)
+            KW("device",TK_KW_DEVICE) KW("constant",TK_KW_CONSTANT) KW("const",TK_KW_CONSTANT) KW("threadgroup",TK_KW_THREADGROUP)
             KW("thread",TK_KW_THREAD) KW("uniform",TK_KW_UNIFORM) KW("varying",TK_KW_VARYING)
             VW("coord1D",TK_KW_COORD,1) VW("coord2D",TK_KW_COORD,2) VW("coord3D",TK_KW_COORD,3)
             VW("mat2",TK_KW_MAT,2) VW("mat3",TK_KW_MAT,3) VW("mat4",TK_KW_MAT,4)
