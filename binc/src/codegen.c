@@ -451,8 +451,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         const char *r=newtmp(c); *k=ok; c->rvw=vw;
         if(vw){ if(!aw) av=splat(c,av,elt,vw); if(!bw) bv=splat(c,bv,elt,vw);
             const char *mask=splat(c,cv,"i1",vw);
-            char ty[32]; ll_of(ty,sizeof ty,ok==VK_F32?T_FLOAT:T_INT32,vw);
-            emit(c,"  %s = select %s %s, %s %s, %s %s\n",r,ty,mask,ty,av,ty,bv); }
+            char ty[32], mty[32]; ll_of(ty,sizeof ty,ok==VK_F32?T_FLOAT:T_INT32,vw);
+            snprintf(mty,sizeof mty,"<%d x i1>",vw);
+            emit(c,"  %s = select %s %s, %s %s, %s %s\n",r,mty,mask,ty,av,ty,bv); }
         else emit(c,"  %s = select i1 %s, %s %s, %s %s\n",r,cv,elt,av,elt,bv);
         return r; }
     case E_CALL:{
