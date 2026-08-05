@@ -26,6 +26,18 @@ host stays whatever language the app already is (Swift / Obj-C / C++).
 
 ---
 
+## Host seam v1 (implemented)
+
+`binc` now emits a sibling `<output>.h` binding header whenever it produces a metallib. The header contains a
+small typed inline wrapper for every launchable BinC kernel. Pointer parameters become `BincBuffer *` handles,
+scalar parameters retain their C scalar type, and coordinate/grid built-ins are supplied by the dispatch domain
+rather than exposed as fake host arguments.
+
+`binc_runtime.h` and `binc_runtime.m` provide the deliberately thin implementation: open a metallib, allocate
+shared buffers, bind buffer/constant arguments at their reflected locations, dispatch, wait for completion, and
+expose shared contents. The runtime is compiled with `make runtime` and intentionally does not invent a second
+binding schema; generated wrappers use the same parameter order and locations as the AIR metadata.
+
 ## The dispatch declaration
 
 A BinC program declares its **launchable surface** explicitly. The functions are still BinC (domain-typed); the

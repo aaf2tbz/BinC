@@ -96,6 +96,19 @@ So `step` is exactly `smooth`/`sum` with the coordinate elided. There is **one**
 
 ---
 
+## Implemented in the bootstrap compiler
+
+The current compiler implements the explicit compute spectrum used by the examples:
+
+- `coord1D`, `coord2D`, and `coord3D` parameters are kernel-domain parameters. Their `.global` values are
+  backed by `air.thread_position_in_grid`; `.local` and `.group` append the corresponding AIR built-ins.
+- `grid_extent` lowers to an `air.threads_per_grid` argument.
+- `threadgroup T name[N]` and `name[N][M]` become module globals in address space 3 and are indexed with typed GEPs.
+- `atomic<float>` and `atomic<int>` buffers support `acc->add(value)` via the verified global atomic intrinsics.
+- `sync()` is convergent only when reached from uniform control flow. A varying `if`/loop region containing a
+  barrier is rejected rather than emitted as potentially undefined Metal.
+- The harness accepts `grid`, `grid2`, `grid3`, and matching `group` directives for GPU verification.
+
 ## Proven vs. to-derive
 
 **Proven (compiled to `.ll`, contract captured in `reference/`):** 1D/2D/3D grids, device/threadgroup/thread/

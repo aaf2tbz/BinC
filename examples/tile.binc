@@ -1,0 +1,5 @@
+kernel void tile(device float* out, coord2D c, threadgroup float smem[2][2]) {
+    smem[c.local.y][c.local.x] = 3.0f;
+    sync();
+    out[c.global.x + c.global.y * 2] = smem[c.local.y][c.local.x];
+}

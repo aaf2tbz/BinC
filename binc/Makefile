@@ -11,6 +11,9 @@ binc: $(SRC) src/binc.h
 harness: harness.m
 	DEVELOPER_DIR=$(DEV) xcrun clang -fobjc-arc -framework Metal -framework Foundation harness.m -o harness
 
+runtime: binc_runtime.m binc_runtime.h
+	DEVELOPER_DIR=$(DEV) xcrun clang -fobjc-arc -c binc_runtime.m -o binc_runtime.o
+
 # Compile every example to a .metallib in build/
 EXAMPLES := $(basename $(notdir $(wildcard ../examples/*.binc)))
 examples: binc
@@ -23,6 +26,6 @@ verify: binc harness examples
 	@echo "ALL EXAMPLES VERIFIED ON GPU"
 
 clean:
-	rm -f binc harness build/*.metallib *.ll *.air
+	rm -f binc harness binc_runtime.o build/*.metallib build/*.h *.ll *.air
 
 .PHONY: binc harness examples verify clean

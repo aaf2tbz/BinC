@@ -1,0 +1,4 @@
+kernel void fill(device float* out, coord2D c) {
+    int i = c.global.x + c.global.y * 2;
+    out[i] = 7.0f;
+}

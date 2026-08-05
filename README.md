@@ -57,8 +57,8 @@ The full function-by-function map of the compiler, every BinC→AIR mapping, and
 ## Status: ✅ WORKING — compiles & runs on the GPU
 
 Every example in `examples/` compiles to a real `.metallib` and is **verified executing correctly on the GPU**
-by a data-driven harness (`make verify` — 15 kernels covering scalar/vector/struct buffers, control flow,
-calls, builtins, half/uint precision, and more).
+by a data-driven harness (`make verify` — the suite covers scalar/vector/struct buffers, explicit 1D/2D
+coordinates, threadgroup memory, barriers, atomic reduction, control flow, calls, builtins, and half/uint precision).
 
 ## Quick start
 ```bash
@@ -76,6 +76,9 @@ top of `binc/harness.m`.
 - **Types:** `float`, `half` (real 16-bit f16, auto-promoted in expressions), `int`, `uint` (true unsigned ops/predicates), `bool`, and `struct`s of mixed scalar/vector fields
 - **Vectors:** `float2/3/4`, `int2/3/4`, `uint2/3/4` — constructors `float4(...)` (incl. single-scalar splat), element-wise arithmetic with vector/scalar operands, `.x/.y/.z/.w` (+`.r/.g/.b/.a`) component read/write, vector buffer elements and struct fields
 - **Pointers:** address-space-qualified — `device`, `constant`, `threadgroup`, `thread` (bare `T*` = `device`); subscript `p[i]`, pointer arithmetic `*(p + k)`, field chains `p->f` / `p[i].f` / `s.f`
+- **Explicit domains:** `coord1D/2D/3D` parameters map to AIR thread-position built-ins; `.global`, `.local`, and `.group` expose grid coordinates; `grid_extent` maps to `air.threads_per_grid`
+- **Parallel memory:** `threadgroup T name[N][M]` lowers to an addrspace(3) module global; `atomic<float>`/`atomic<int>` buffers support `.add()` through AIR atomics
+- **Uniformity gate:** coordinate and varying data make control flow divergent; `sync()` in divergent control flow is a compile error
 - **Scalar params** auto-lower to constant buffers (write plain `float dt`)
 - **Locals:** scalar, vector, and struct locals (alloca-backed, mutable across control flow)
 - **Control flow:** `if` / `else if` / `else`, `for`, `while`, `break`, `continue`, `return` (with a value in non-kernel functions)
@@ -84,7 +87,8 @@ top of `binc/harness.m`.
 - **Operators:** `+ - * / %`, comparisons `== != < <= > >=`, logical `&& || !`, unary `-`, assignment `= += -= *= /= %=`
 - **Implicit coercion:** int ↔ uint ↔ float on assignment
 - **Implicit element-wise parallelism:** a function over a `device` buffer runs as a Metal grid (one thread per element)
-- **Divergence awareness:** the compiler warns on data-dependent branches/loop bounds (the `TYPES.md` feature, live)
+- **Divergence awareness:** the compiler warns on data-dependent branches/loop bounds and rejects barriers in divergent control flow
+- **Host seam v1:** every compiled metallib gets a sibling generated binding header; `binc_runtime.h/.m` provides device, buffer, dispatch, and completion primitives
 
 ## The project
 - **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — how the compiler works: every function, mapping, and metadata node.

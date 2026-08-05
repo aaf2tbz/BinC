@@ -68,6 +68,8 @@ void lex(const char *src, Token **out, size_t *out_n){
             KW("true",TK_KW_TRUE) KW("false",TK_KW_FALSE)
             KW("device",TK_KW_DEVICE) KW("constant",TK_KW_CONSTANT) KW("threadgroup",TK_KW_THREADGROUP)
             KW("thread",TK_KW_THREAD) KW("uniform",TK_KW_UNIFORM) KW("varying",TK_KW_VARYING)
+            VW("coord1D",TK_KW_COORD,1) VW("coord2D",TK_KW_COORD,2) VW("coord3D",TK_KW_COORD,3)
+            KW("grid_extent",TK_KW_GRID_EXTENT) KW("atomic",TK_KW_ATOMIC)
             #undef KW
             Token x=tk(TK_IDENT,ln); x.text=dup_n(s,len); PUSH(x);
             done:; continue;

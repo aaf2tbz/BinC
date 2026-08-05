@@ -5,6 +5,9 @@
 // Spec format (whitespace-separated, '#' comments, one directive per line):
 //   kernel <name>                 entry point in the metallib
 //   grid <N>                      dispatch N threads (single threadgroup)
+//   grid2 <W> <H>                 dispatch a 2D grid
+//   grid3 <W> <H> <D>             dispatch a 3D grid
+//   group <N> / group2/group3     threads per threadgroup (defaults to grid)
 //   buf <idx> <v0> <v1> ...       buffer bound at <idx>, initialized with words
 //   bufh <idx> <bb bb ...>        buffer bound at <idx>, initialized with raw bytes
 //                                 (space-separated 2-hex-digit bytes) — for mixed-layout structs
@@ -40,7 +43,7 @@ int main(int argc, char **argv){
     if(!spec) die(@"cannot read spec file");
 
     NSString *kernel=nil;
-    long grid=-1;
+    long gx=-1, gy=1, gz=1, tx=-1, ty=1, tz=1;
     id<MTLBuffer> bufs[31]; memset(bufs,0,sizeof bufs);
     NSMutableDictionary<NSNumber*,NSArray<NSString*>*> *bufSpec=[NSMutableDictionary dictionary];
     NSMutableArray<NSNumber*> *expectIdx=[NSMutableArray array];
@@ -55,7 +58,12 @@ int main(int argc, char **argv){
         if(!toks.count) continue;
         NSString *d=toks[0];
         if([d isEqualToString:@"kernel"]){ kernel=toks[1]; }
-        else if([d isEqualToString:@"grid"]){ grid=toks[1].integerValue; }
+        else if([d isEqualToString:@"grid"]){ gx=toks[1].integerValue; tx=gx; }
+        else if([d isEqualToString:@"grid2"]){ gx=toks[1].integerValue; gy=toks[2].integerValue; tx=gx; ty=gy; }
+        else if([d isEqualToString:@"grid3"]){ gx=toks[1].integerValue; gy=toks[2].integerValue; gz=toks[3].integerValue; tx=gx; ty=gy; tz=gz; }
+        else if([d isEqualToString:@"group"]){ tx=toks[1].integerValue; }
+        else if([d isEqualToString:@"group2"]){ tx=toks[1].integerValue; ty=toks[2].integerValue; }
+        else if([d isEqualToString:@"group3"]){ tx=toks[1].integerValue; ty=toks[2].integerValue; tz=toks[3].integerValue; }
         else if([d isEqualToString:@"buf"]||[d isEqualToString:@"bufh"]||[d isEqualToString:@"out"]){
             int idx=toks[1].intValue;
             if(idx<0||idx>30) die(@"buffer index out of range");
@@ -67,7 +75,7 @@ int main(int argc, char **argv){
             [expectHex addObject:@([d isEqualToString:@"expecth"])]; }
         else die([NSString stringWithFormat:@"unknown directive '%@'",d]);
     }
-    if(!kernel||grid<0) die(@"spec needs 'kernel' and 'grid'");
+    if(!kernel||gx<0) die(@"spec needs 'kernel' and a grid directive");
 
     id<MTLDevice> dev=MTLCreateSystemDefaultDevice();
     id<MTLCommandQueue> q=[dev newCommandQueue];
@@ -102,7 +110,8 @@ int main(int argc, char **argv){
     id<MTLComputeCommandEncoder> enc=[cb computeCommandEncoder];
     [enc setComputePipelineState:cps];
     for(int i=0;i<31;i++) if(bufs[i]) [enc setBuffer:bufs[i] offset:0 atIndex:i];
-    [enc dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(grid,1,1)];
+    [enc dispatchThreads:MTLSizeMake((NSUInteger)gx,(NSUInteger)gy,(NSUInteger)gz)
+       threadsPerThreadgroup:MTLSizeMake((NSUInteger)tx,(NSUInteger)ty,(NSUInteger)tz)];
     [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
     if(cb.status!=MTLCommandBufferStatusCompleted) die(@"GPU command buffer failed");
 

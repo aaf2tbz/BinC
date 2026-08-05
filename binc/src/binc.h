@@ -9,7 +9,8 @@
 typedef enum { AS_DEVICE=1, AS_CONSTANT=2, AS_THREADGROUP=3, AS_THREAD=0 } AddrSpace;
 typedef enum { UN_UNIFORM=0, UN_VARYING=1 } Uniformity;
 
-typedef enum { T_VOID, T_FLOAT, T_HALF, T_INT32, T_UINT32, T_BOOL, T_STRUCT } TypeKind;
+typedef enum { T_VOID, T_FLOAT, T_HALF, T_INT32, T_UINT32, T_BOOL, T_STRUCT,
+               T_COORD, T_GRID_EXTENT, T_ATOMIC } TypeKind;
 
 typedef struct {
     TypeKind kind;
@@ -17,6 +18,9 @@ typedef struct {
     int      is_ptr;
     AddrSpace as;
     int      vecn; /* 0/1 = scalar; 2/3/4 = vector width */
+    int      coordn; /* T_COORD dimensionality: 1, 2, or 3 */
+    TypeKind atomic_base; /* T_ATOMIC's scalar payload */
+    int      array_n, array_m; /* threadgroup array extents, if declared */
 } Type;
 
 /* runtime value classification for type-directed codegen */
@@ -41,6 +45,7 @@ struct Expr {
     BinOp    bop; CmpOp cmp; LogOp log; AssignOp aop;
     Expr    *operand, *lhs, *rhs;
     Expr   **args; size_t nargs; /* E_CALL */
+    Expr   *callee; /* non-identifier call target, currently atomic methods */
 };
 
 typedef struct Stmt Stmt;
@@ -73,7 +78,8 @@ typedef enum {
     TK_KW_STRUCT, TK_KW_KERNEL, TK_KW_VOID, TK_KW_FLOAT, TK_KW_HALF, TK_KW_INT, TK_KW_UINT, TK_KW_BOOL,
     TK_KW_RETURN, TK_KW_IF, TK_KW_ELSE, TK_KW_FOR, TK_KW_WHILE, TK_KW_TRUE, TK_KW_FALSE,
     TK_KW_BREAK, TK_KW_CONTINUE,
-    TK_KW_DEVICE, TK_KW_CONSTANT, TK_KW_THREADGROUP, TK_KW_THREAD, TK_KW_UNIFORM, TK_KW_VARYING
+    TK_KW_DEVICE, TK_KW_CONSTANT, TK_KW_THREADGROUP, TK_KW_THREAD, TK_KW_UNIFORM, TK_KW_VARYING,
+    TK_KW_COORD, TK_KW_GRID_EXTENT, TK_KW_ATOMIC
 } TokKind;
 typedef struct { TokKind kind; char *text; double fval; long ival; int line; } Token;
 typedef struct { Token *toks; size_t n; size_t i; } TokStream;

@@ -13,7 +13,17 @@ static Type parse_type(TokStream *ts){
     if(accept(ts,TK_KW_DEVICE))t.as=AS_DEVICE; else if(accept(ts,TK_KW_CONSTANT))t.as=AS_CONSTANT;
     else if(accept(ts,TK_KW_THREADGROUP))t.as=AS_THREADGROUP; else if(accept(ts,TK_KW_THREAD))t.as=AS_THREAD;
     Token *pt=peek(ts);
-    if(accept(ts,TK_KW_FLOAT)){t.kind=T_FLOAT;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_HALF))t.kind=T_HALF;
+    if(accept(ts,TK_KW_COORD)){ t.kind=T_COORD; t.coordn=(int)pt->ival; return t; }
+    if(accept(ts,TK_KW_GRID_EXTENT)){ t.kind=T_GRID_EXTENT; return t; }
+    if(accept(ts,TK_KW_ATOMIC)){
+        expect(ts,TK_LT,"<");
+        Token *bt=peek(ts); t.kind=T_ATOMIC;
+        if(accept(ts,TK_KW_FLOAT))t.atomic_base=T_FLOAT;
+        else if(accept(ts,TK_KW_INT))t.atomic_base=T_INT32;
+        else if(accept(ts,TK_KW_UINT))t.atomic_base=T_UINT32;
+        else die(bt->line,"atomic payload must be float, int, or uint");
+        expect(ts,TK_GT,">");
+    } else if(accept(ts,TK_KW_FLOAT)){t.kind=T_FLOAT;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_HALF))t.kind=T_HALF;
     else if(accept(ts,TK_KW_INT)){t.kind=T_INT32;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_UINT)){t.kind=T_UINT32;t.vecn=(int)pt->ival;}
     else if(accept(ts,TK_KW_BOOL))t.kind=T_BOOL; else if(accept(ts,TK_KW_VOID))t.kind=T_VOID;
     else if(peek(ts)->kind==TK_IDENT){ t.kind=T_STRUCT; t.struct_name=strdup(advance(ts)->text); }
@@ -22,7 +32,8 @@ static Type parse_type(TokStream *ts){
     return t;
 }
 static int starts_scalar_type(TokStream *ts){ TokKind k=peek(ts)->kind;
-    return k==TK_KW_FLOAT||k==TK_KW_HALF||k==TK_KW_INT||k==TK_KW_UINT||k==TK_KW_BOOL; }
+    return k==TK_KW_FLOAT||k==TK_KW_HALF||k==TK_KW_INT||k==TK_KW_UINT||k==TK_KW_BOOL||
+           k==TK_KW_COORD||k==TK_KW_GRID_EXTENT; }
 
 static Expr *E(ExprKind k){ Expr *e=calloc(1,sizeof(Expr)); e->kind=k; return e; }
 static Expr *parse_expr(TokStream *ts);
@@ -49,9 +60,9 @@ static Expr *parse_primary(TokStream *ts){
 static Expr *parse_postfix(TokStream *ts){
     Expr *e=parse_primary(ts);
     for(;;){
-        if(peek(ts)->kind==TK_LPAREN){ /* call: callee is always a bare identifier */
-            if(e->kind!=E_IDENT) die(peek(ts)->line,"callee must be a function name");
-            advance(ts); Expr *n=E(E_CALL); n->name=e->name;
+        if(peek(ts)->kind==TK_LPAREN){ /* calls may also target an atomic method (`acc->add`) */
+            if(e->kind!=E_IDENT && !(e->kind==E_FIELD && e->field)) die(peek(ts)->line,"callee must be a function or method name");
+            advance(ts); Expr *n=E(E_CALL); n->name=e->kind==E_IDENT?e->name:e->field; if(e->kind!=E_IDENT)n->callee=e;
             Expr **args=NULL; size_t na=0,cap=0;
             while(peek(ts)->kind!=TK_RPAREN){
                 if(na==cap){cap=cap?cap*2:4;args=realloc(args,cap*sizeof(Expr*));}
@@ -190,12 +201,23 @@ static void parse_function(TokStream *ts, Program *prog){
     while(peek(ts)->kind!=TK_RPAREN){
         Uniformity un=UN_UNIFORM; if(accept(ts,TK_KW_VARYING))un=UN_VARYING; else accept(ts,TK_KW_UNIFORM);
         Type ty=parse_type(ts); Token *pn=peek(ts); expect(ts,TK_IDENT,"param name");
+        if(accept(ts,TK_LBRACK)){
+            Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
+            if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); }
+            if(ty.as!=AS_THREADGROUP) die(pn->line,"only threadgroup parameters may be arrays");
+        }
         if(ty.kind==T_STRUCT&&!ty.is_ptr) die(pn->line,"struct-by-value parameter not supported");
+        if(ty.kind==T_COORD&&ty.is_ptr) die(pn->line,"coordinates cannot be pointers");
         if(np==cap){cap=cap?cap*2:4;params=realloc(params,cap*sizeof(Param));}
         params[np++]=(Param){strdup(pn->text),ty,un};
         if(!accept(ts,TK_COMMA))break;
     }
     expect(ts,TK_RPAREN,")"); expect(ts,TK_LBRACE,"{"); Block body=parse_braced(ts);
+    /* An explicit coordinate is itself a launch domain, so `void f(..., coord1D i)`
+     * is kernel syntax even without the optional `kernel` spelling. */
+    int coords=0; for(size_t i=0;i<np;i++) if(params[i].ty.kind==T_COORD) coords++;
+    if(coords>1) die(peek(ts)->line,"a kernel may have only one coordinate domain parameter");
+    if(coords) is_kernel=1;
     prog->funcs=realloc(prog->funcs,(prog->nfuncs+1)*sizeof(Function));
     prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,ret};
 }

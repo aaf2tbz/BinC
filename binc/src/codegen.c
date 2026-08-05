@@ -32,6 +32,11 @@ static int type_size(TypeKind k,int vecn){ int s=size_of(k); return vecn==2?s*2:
 static int type_align(TypeKind k,int vecn){ int a=align_of(k); return vecn==2?a*2:vecn>2?a*4:a; }
 static void ll_of(char *buf,size_t n,TypeKind k,int vecn){
     if(vecn>1) snprintf(buf,n,"<%d x %s>",vecn,scalar_ll(k)); else snprintf(buf,n,"%s",scalar_ll(k)); }
+static void type_ll(char *buf,size_t n,TypeKind k,char *sname,int vecn){
+    if(k==T_STRUCT) snprintf(buf,n,"%%struct.%s",sname);
+    else if(k==T_ATOMIC) snprintf(buf,n,"%%\"struct.metal::_atomic\"");
+    else ll_of(buf,n,k,vecn);
+}
 static void tn_of(char *buf,size_t n,TypeKind k,int vecn){
     if(vecn>1) snprintf(buf,n,"%s%d",type_name(k),vecn); else snprintf(buf,n,"%s",type_name(k)); }
 /* real struct size (tail-padded) and alignment per the AIR datalayout */
@@ -45,12 +50,14 @@ static int struct_layout(StructDef *s, int *al){
 typedef struct { char *name; char *slot; TypeKind kind; char *sname; int vecn; } Loc;
 typedef struct {
     SB *pre,*body; const Program *prog; Function *fn;
-    int tmp; char *idx; int *read,*written; char **scalar_load;
+    int tmp; char *idx; int explicit_domain; int coord_param; int grid_extent_param;
+    int uses_local_coord, uses_group_coord; int *read,*written; char **scalar_load;
     Loc *locs; size_t nlocs;
     int term; /* current block terminated */
     int lblc; /* label counter (separate from tmp) */
     int brk_l[32], cont_l[32], nloops; /* break/continue label stack */
     int uses_sync; /* body contains a barrier -> function must be convergent, not nosync */
+    int divergent; /* current control-flow region is varying/divergent */
     int rvw; /* vector width of the value gen_rval just returned (0 = scalar) */
 } CG;
 static char *newtmp(CG *c){ char *s=malloc(16); snprintf(s,16,"%%t%d",c->tmp++); return s; }
@@ -72,29 +79,44 @@ static const char *coerce(CG *c, const char *v, ValKind from, ValKind to){
 }
 
 /* resolve a name to: local | pointer param idx | scalar param idx */
-typedef enum { R_NONE,R_LOCAL,R_PTR,R_SCALAR } RKind;
+typedef enum { R_NONE,R_LOCAL,R_PTR,R_SCALAR,R_COORD,R_EXTENT } RKind;
 static RKind resolve(CG *c, const char *name, int *out){
     for(size_t i=0;i<c->nlocs;i++) if(!strcmp(c->locs[i].name,name)){ *out=(int)i; return R_LOCAL; }
     for(size_t i=0;i<c->fn->nparams;i++) if(!strcmp(c->fn->params[i].name,name)){
-        *out=(int)i; return c->fn->params[i].ty.is_ptr?R_PTR:R_SCALAR; }
+        *out=(int)i;
+        if(c->fn->params[i].ty.kind==T_COORD) return R_COORD;
+        if(c->fn->params[i].ty.kind==T_GRID_EXTENT) return R_EXTENT;
+        return c->fn->params[i].ty.is_ptr||c->fn->params[i].ty.array_n?R_PTR:R_SCALAR; }
     return R_NONE;
 }
 static int root_param(CG *c, Expr *e){
     while(e&&(e->kind==E_DEREF||e->kind==E_FIELD||e->kind==E_INDEX)) e=e->operand;
     if(e&&e->kind==E_IDENT){ int idx; if(resolve(c,e->name,&idx)==R_PTR) return idx; } return -1; }
+static const char *coord_ll(Type *t, char *buf, size_t n){
+    if(t->coordn==1) snprintf(buf,n,"i32");
+    else snprintf(buf,n,"<%d x i16>",t->coordn);
+    return buf;
+}
+static int coord_width(Type *t){ return t->coordn==1?0:t->coordn; }
+static const char *coord_value(CG *c, Type *t, const char *raw){
+    if(t->coordn==1) return strdup(raw);
+    const char *v=newtmp(c); emit(c,"  %s = zext <%d x i16> %s to <%d x i32>\n",v,t->coordn,raw,t->coordn); return v;
+}
 
 /* lvalue description: element type + where the address lives */
 typedef struct { TypeKind tk; char *sname; int as; int pi; int is_local; int vecn; } LInfo;
+static void shared_name(CG *c, int pi, char *buf, size_t n){
+    snprintf(buf,n,"@_binc_smem_%s_%s",c->fn->name,c->fn->params[pi].name);
+}
 static void pty_str(char *buf,size_t n,TypeKind tk,char *sname,int as,int is_local,int vecn){
     char elt[64];
-    if(tk==T_STRUCT) snprintf(elt,sizeof elt,"%%struct.%s",sname); else ll_of(elt,sizeof elt,tk,vecn);
+    type_ll(elt,sizeof elt,tk,sname,vecn);
     if(is_local) snprintf(buf,n,"%s*",elt); else snprintf(buf,n,"%s addrspace(%d)*",elt,as); }
 
 /* address of element p[ix] (i64 index value) for pointer param pi */
 static char *element_ptr_idx(CG *c,int pi,const char *ix){
     Param *pr=&c->fn->params[pi]; char elt[64];
-    if(pr->ty.kind==T_STRUCT) snprintf(elt,sizeof elt,"%%struct.%s",pr->ty.struct_name);
-    else ll_of(elt,sizeof elt,pr->ty.kind,pr->ty.vecn);
+    type_ll(elt,sizeof elt,pr->ty.kind,pr->ty.struct_name,pr->ty.vecn);
     char *s=newtmp(c);
     emit(c,"  %s = getelementptr inbounds %s, %s addrspace(%d)* %%_%s, i64 %s\n",s,elt,elt,pr->ty.as,pr->name,ix);
     return s;
@@ -106,7 +128,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k);
 /* pointer expression -> owning param + i64 index value; bare `p` means the implicit thread index */
 static int eval_ptr(CG *c, Expr *e, const char **ix){
     if(e->kind==E_IDENT){ int i; if(resolve(c,e->name,&i)==R_PTR){
-        if(!c->fn->is_kernel) die(0,"implicit *%s needs a kernel thread id; subscript explicitly: %s[i]",e->name,e->name);
+        if(!c->fn->is_kernel||!c->idx) die(0,"implicit *%s needs a scalar kernel thread id; subscript explicitly: %s[i]",e->name,e->name);
         *ix=c->idx; return i; } }
     if(e->kind==E_BIN&&(e->bop==B_ADD||e->bop==B_SUB)){
         const char *base; int pi=eval_ptr(c,e->lhs,&base);
@@ -197,6 +219,7 @@ static Builtin builtins[]={
     {"sync","air.wg.barrier",0,T_VOID,T_VOID,T_VOID},
 };
 static int builtin_used[sizeof builtins/sizeof *builtins];
+static int atomic_add_used[3];
 
 static const char *cmp_name(CmpOp op,int isfloat,int isuns){
     if(isfloat) switch(op){ case C_EQ:return "oeq"; case C_NE:return "one"; case C_LT:return "olt";
@@ -223,6 +246,12 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         int idx; RKind r=resolve(c,e->name,&idx);
         if(r==R_LOCAL){ LInfo li={c->locs[idx].kind,c->locs[idx].sname,0,-1,1,c->locs[idx].vecn};
             return emit_load_t(c,&li,c->locs[idx].slot,k); }
+        if(r==R_COORD){
+            Param *p=&c->fn->params[idx]; char nm[32]; snprintf(nm,sizeof nm,"%%_%s",p->name);
+            *k=VK_U32; c->rvw=coord_width(&p->ty); return coord_value(c,&p->ty,nm);
+        }
+        if(r==R_EXTENT){ *k=VK_U32; c->rvw=0; char *nm=malloc(strlen(e->name)+3);
+            snprintf(nm,strlen(e->name)+3,"%%_%s",e->name); return nm; }
         if(r==R_SCALAR){ Param *p=&c->fn->params[idx]; *k=scalar_vk(p->ty.kind); c->rvw=p->ty.vecn>1?p->ty.vecn:0;
             if(!c->scalar_load[idx]){
                 if(c->fn->is_kernel){ char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn); const char *v=newtmp(c);
@@ -236,6 +265,34 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         die(0,"undefined name %s",e->name);
     }
     case E_DEREF: case E_FIELD: case E_INDEX:{
+        /* Coordinate properties are built-ins rather than memory fields. The explicit
+         * coordinate itself is the global position; local/group values are appended as
+         * hidden built-in arguments when referenced. */
+        if(e->kind==E_FIELD){
+            if(e->operand->kind==E_IDENT){
+            int ci; RKind cr=resolve(c,e->operand->name,&ci);
+            if(cr==R_COORD && (!strcmp(e->field,"global")||!strcmp(e->field,"local")||!strcmp(e->field,"group"))){
+                Param *cp=&c->fn->params[ci]; char nm[64];
+                if(!strcmp(e->field,"global")){ snprintf(nm,sizeof nm,"%%_%s",cp->name); }
+                else if(!strcmp(e->field,"local")){ c->uses_local_coord=1; snprintf(nm,sizeof nm,"%%_%s_local",cp->name); }
+                else { c->uses_group_coord=1; snprintf(nm,sizeof nm,"%%_%s_group",cp->name); }
+                *k=VK_U32; c->rvw=coord_width(&cp->ty); return coord_value(c,&cp->ty,nm);
+            }
+            }
+            if(e->operand->kind==E_FIELD && e->operand->operand->kind==E_IDENT){
+                int ci; RKind cr=resolve(c,e->operand->operand->name,&ci);
+                if(cr==R_COORD && (!strcmp(e->operand->field,"global")||!strcmp(e->operand->field,"local")||!strcmp(e->operand->field,"group"))){
+                    Param *cp=&c->fn->params[ci]; char nm[64];
+                    if(!strcmp(e->operand->field,"global")) snprintf(nm,sizeof nm,"%%_%s",cp->name);
+                    else if(!strcmp(e->operand->field,"local")){ c->uses_local_coord=1; snprintf(nm,sizeof nm,"%%_%s_local",cp->name); }
+                    else { c->uses_group_coord=1; snprintf(nm,sizeof nm,"%%_%s_group",cp->name); }
+                    if(cp->ty.coordn==1) die(0,"scalar coordinate has no .%s component",e->field);
+                    int x=comp_idx(e->field); if(x<0||x>=cp->ty.coordn) die(0,"invalid coordinate component .%s",e->field);
+                    const char *r=newtmp(c); emit(c,"  %s = extractelement <%d x i16> %s, i32 %d\n",r,cp->ty.coordn,nm,x);
+                    const char *z=newtmp(c); emit(c,"  %s = zext i16 %s to i32\n",z,r); *k=VK_U32; c->rvw=0; return z;
+                }
+            }
+        }
         LInfo li; char *addr=gen_lval(c,e,&li,0);
         if(li.pi>=0) c->read[li.pi]=1;
         return emit_load_t(c,&li,addr,k);
@@ -307,6 +364,20 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         *k=scalar_vk(li.tk); c->rvw=vw; return ev;
     }
     case E_CALL:{
+        if(e->callee && e->callee->kind==E_FIELD){
+            if(strcmp(e->name,"add")) die(0,"unsupported atomic method %s",e->name);
+            if(e->nargs!=1) die(0,"atomic add expects one argument");
+            Expr *base=e->callee->operand; if(base->kind!=E_DEREF||base->operand->kind!=E_IDENT) die(0,"atomic methods require an atomic buffer");
+            int api; if(resolve(c,base->operand->name,&api)!=R_PTR||c->fn->params[api].ty.kind!=T_ATOMIC) die(0,".add() target is not atomic");
+            LInfo ali; fill_param_li(c,api,&ali); ali.pi=api; c->read[api]=1; c->written[api]=1;
+            char *ap=element_ptr_idx(c,api,"0"); TypeKind ak=c->fn->params[api].ty.atomic_base; ValKind vk; const char *v=gen_rval(c,e->args[0],&vk);
+            if(c->rvw) die(0,"atomic add does not accept vectors");
+            ValKind want=scalar_vk(ak); v=coerce(c,v,vk,want);
+            const char *intr=ak==T_FLOAT?"air.atomic.global.add.f32":"air.atomic.global.add.i32";
+            char *pp=newtmp(c); emit(c,"  %s = getelementptr inbounds %%\"struct.metal::_atomic\", %%\"struct.metal::_atomic\" addrspace(1)* %s, i64 0, i32 0\n",pp,ap);
+            const char *r=newtmp(c); emit(c,"  %s = call %s @%s(%s addrspace(1)* %s, %s %s, i32 0, i32 2, i32 0, i1 false)\n",r,scalar_ll(ak),intr,scalar_ll(ak),pp,scalar_ll(ak),v);
+            atomic_add_used[ak==T_FLOAT?0:1]=1; *k=want; c->rvw=0; return r;
+        }
         /* vector constructor? float4(...)/int3(...)/uint2(...), incl. single-scalar splat */
         TypeKind cb; int cn;
         if(vec_name(e->name,&cb,&cn)){
@@ -354,7 +425,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             if(strcmp(bi->name,e->name)) continue;
             if(e->nargs!=(size_t)bi->nargs) die(0,"%s expects %d argument(s), got %d",e->name,bi->nargs,(int)e->nargs);
             builtin_used[b]=1;
-            if(bi->ret==T_VOID){ c->uses_sync=1; emit(c,"  call void @%s(i32 2, i32 5, i32 1)\n",bi->ll); *k=VK_I32; return "0"; }
+            if(bi->ret==T_VOID){
+                if(c->divergent) die(0,"sync() is inside divergent control flow; every threadgroup lane must reach the barrier");
+                c->uses_sync=1; emit(c,"  call void @%s(i32 2, i32 5, i32 1)\n",bi->ll); *k=VK_I32; return "0"; }
             char args[256]; size_t o=0;
             for(int i=0;i<bi->nargs;i++){ ValKind ak; const char *v=gen_rval(c,e->args[i],&ak);
                 if(c->rvw) die(0,"vector argument to builtin %s",e->name);
@@ -379,6 +452,28 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
         if(mark)c->written[pi]=1; fill_param_li(c,pi,li); return element_ptr_idx(c,pi,ix); }
     if(e->kind==E_INDEX){
         int pi; const char *base=NULL;
+        /* Threadgroup arrays are module globals. Fold one- and two-dimensional
+         * subscripts into a single GEP so their ABI has no fake buffer argument. */
+        if(e->operand->kind==E_IDENT){
+            if(resolve(c,e->operand->name,&pi)!=R_PTR) die(0,"subscript of non-pointer");
+            Param *sp=&c->fn->params[pi];
+            if(sp->ty.array_n){
+                ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik); if(ik!=VK_I32&&ik!=VK_U32)die(0,"shared-memory subscript must be an integer");
+                char gn[128],elt[64]; shared_name(c,pi,gn,sizeof gn); ll_of(elt,sizeof elt,sp->ty.kind,sp->ty.vecn);
+                char *p=newtmp(c); if(sp->ty.array_m) emit(c,"  %s = getelementptr inbounds [%d x [%d x %s]], [%d x [%d x %s]] addrspace(3)* %s, i32 0, i32 %s\n",p,sp->ty.array_n,sp->ty.array_m,elt,sp->ty.array_n,sp->ty.array_m,elt,gn,iv);
+                else emit(c,"  %s = getelementptr inbounds [%d x %s], [%d x %s] addrspace(3)* %s, i32 0, i32 %s\n",p,sp->ty.array_n,elt,sp->ty.array_n,elt,gn,iv);
+                if(sp->ty.array_m){ li->tk=sp->ty.kind; li->sname=NULL; li->as=AS_THREADGROUP; li->pi=-1; li->is_local=0; li->vecn=sp->ty.vecn; return p; }
+                li->tk=sp->ty.kind; li->sname=sp->ty.struct_name; li->as=AS_THREADGROUP; li->pi=-1; li->is_local=0; li->vecn=sp->ty.vecn; return p;
+            }
+        } else if(e->operand->kind==E_INDEX && e->operand->operand->kind==E_IDENT){
+            if(resolve(c,e->operand->operand->name,&pi)!=R_PTR) die(0,"subscript of non-pointer");
+            Param *sp=&c->fn->params[pi]; if(!sp->ty.array_n||!sp->ty.array_m) die(0,"too many subscripts");
+            ValKind a,b; const char *av=gen_rval(c,e->operand->rhs,&a), *bv=gen_rval(c,e->rhs,&b);
+            if((a!=VK_I32&&a!=VK_U32)||(b!=VK_I32&&b!=VK_U32))die(0,"shared-memory subscript must be an integer");
+            char gn[128],elt[64]; shared_name(c,pi,gn,sizeof gn); ll_of(elt,sizeof elt,sp->ty.kind,sp->ty.vecn); char *p=newtmp(c);
+            emit(c,"  %s = getelementptr inbounds [%d x [%d x %s]], [%d x [%d x %s]] addrspace(3)* %s, i32 0, i32 %s, i32 %s\n",p,sp->ty.array_n,sp->ty.array_m,elt,sp->ty.array_n,sp->ty.array_m,elt,gn,av,bv);
+            li->tk=sp->ty.kind; li->sname=sp->ty.struct_name; li->as=AS_THREADGROUP; li->pi=-1; li->is_local=0; li->vecn=sp->ty.vecn; return p;
+        }
         if(e->operand->kind==E_IDENT){ if(resolve(c,e->operand->name,&pi)!=R_PTR) die(0,"subscript of non-pointer"); }
         else pi=eval_ptr(c,e->operand,&base); /* e.g. (p+1)[i] */
         ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
@@ -423,8 +518,14 @@ static const char *gen_cond(CG *c, Expr *e){
 /* divergence heuristic: does expr touch device/constant element data (=> varying)? */
 static int is_varying(CG *c, Expr *e){
     if(!e) return 0;
+    if(e->kind==E_IDENT){ int i; RKind r=resolve(c,e->name,&i);
+        if(r==R_COORD) return 1;
+        if(r==R_SCALAR && c->fn->params[i].un==UN_VARYING) return 1;
+    }
     if(e->kind==E_DEREF||e->kind==E_FIELD||e->kind==E_INDEX){ if(root_param(c,e)>=0) return 1; }
-    return is_varying(c,e->operand)||is_varying(c,e->lhs)||is_varying(c,e->rhs);
+    if(is_varying(c,e->operand)||is_varying(c,e->lhs)||is_varying(c,e->rhs)) return 1;
+    for(size_t i=0;i<e->nargs;i++) if(is_varying(c,e->args[i])) return 1;
+    return 0;
 }
 
 static void gen_block(CG *c, Block *b);
@@ -463,33 +564,37 @@ static void gen_stmt(CG *c, Stmt *s){
         emit(c,"  br label %%bb%d\n",c->cont_l[c->nloops-1]); c->term=1; break; }
     case S_BLOCK:{ gen_block(c,&s->then_b); break; }
     case S_IF:{
-        if(is_varying(c,s->cond)) fprintf(stderr,"binc: note: 'if' condition is data-dependent (divergent branch) — may cost SIMT performance\n");
+        int div=is_varying(c,s->cond);
+        if(div) fprintf(stderr,"binc: note: 'if' condition is data-dependent (divergent branch) — may cost SIMT performance\n");
         const char *cv=gen_cond(c,s->cond);
         int tl=newlbl(c), fl=newlbl(c), en=newlbl(c);
         int has_else=s->else_b.n>0;
         emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",cv,tl,has_else?fl:en);
-        lbl(c,tl); gen_block(c,&s->then_b); if(!c->term) emit(c,"  br label %%bb%d\n",en);
-        if(has_else){ lbl(c,fl); gen_block(c,&s->else_b); if(!c->term) emit(c,"  br label %%bb%d\n",en); }
+        lbl(c,tl); if(div)c->divergent++; gen_block(c,&s->then_b); if(div)c->divergent--; if(!c->term) emit(c,"  br label %%bb%d\n",en);
+        if(has_else){ lbl(c,fl); if(div)c->divergent++; gen_block(c,&s->else_b); if(div)c->divergent--; if(!c->term) emit(c,"  br label %%bb%d\n",en); }
         lbl(c,en); break; }
     case S_WHILE:{
-        if(is_varying(c,s->cond)) fprintf(stderr,"binc: note: 'while' condition is data-dependent — divergent\n");
+        int div=is_varying(c,s->cond);
+        if(div) fprintf(stderr,"binc: note: 'while' condition is data-dependent — divergent\n");
         int cond=newlbl(c), body=newlbl(c), en=newlbl(c);
         emit(c,"  br label %%bb%d\n",cond); lbl(c,cond);
         const char *cv=gen_cond(c,s->cond); emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",cv,body,en);
         lbl(c,body);
         c->brk_l[c->nloops]=en; c->cont_l[c->nloops]=cond; c->nloops++;
-        gen_block(c,&s->then_b); c->nloops--;
+        if(div)c->divergent++; gen_block(c,&s->then_b); if(div)c->divergent--; c->nloops--;
         if(!c->term) emit(c,"  br label %%bb%d\n",cond); lbl(c,en); break; }
     case S_FOR:{
         if(s->for_init) gen_stmt(c,s->for_init);
+        int div=s->for_cond&&is_varying(c,s->for_cond);
+        if(div) fprintf(stderr,"binc: note: 'for' bound is data-dependent (varying) — per-thread loop; consider a uniform bound\n");
         int cond=newlbl(c), body=newlbl(c), inc=newlbl(c), en=newlbl(c);
         emit(c,"  br label %%bb%d\n",cond); lbl(c,cond);
-        if(s->for_cond){ if(is_varying(c,s->for_cond)) fprintf(stderr,"binc: note: 'for' bound is data-dependent (varying) — per-thread loop; consider a uniform bound\n");
+        if(s->for_cond){
             const char *cv=gen_cond(c,s->for_cond); emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",cv,body,en); }
         else emit(c,"  br label %%bb%d\n",body);
         lbl(c,body);
         c->brk_l[c->nloops]=en; c->cont_l[c->nloops]=inc; c->nloops++;
-        gen_block(c,&s->then_b); c->nloops--;
+        if(div)c->divergent++; gen_block(c,&s->then_b); if(div)c->divergent--; c->nloops--;
         if(!c->term) emit(c,"  br label %%bb%d\n",inc);
         lbl(c,inc); if(s->for_incr){ ValKind k; gen_rval(c,s->for_incr,&k); } if(!c->term) emit(c,"  br label %%bb%d\n",cond);
         lbl(c,en); break; }
@@ -497,17 +602,30 @@ static void gen_stmt(CG *c, Stmt *s){
 }
 static void gen_block(CG *c, Block *b){ for(size_t i=0;i<b->n;i++) gen_stmt(c,&b->stmts[i]); }
 
+static int explicit_fn(const Function *fn){ for(size_t i=0;i<fn->nparams;i++) if(fn->params[i].ty.kind==T_COORD) return 1; return 0; }
+static int meta_count(const Function *fn){
+    int n=0, ex=explicit_fn(fn); for(size_t i=0;i<fn->nparams;i++) if(!fn->params[i].ty.array_n) n++;
+    if(fn->is_kernel) n += ex?2:1; /* local/group or implicit id */
+    return n;
+}
 static void fn_ptr_str(Function *fn,char *buf,size_t n){
-    size_t o=0; o+=snprintf(buf+o,n-o,"void (");
-    for(size_t i=0;i<fn->nparams;i++){ if(i)o+=snprintf(buf+o,n-o,", "); Param *p=&fn->params[i];
-        if(p->ty.is_ptr){ char elt[64]; if(p->ty.kind==T_STRUCT)snprintf(elt,sizeof elt,"%%struct.%s",p->ty.struct_name);
-            else ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn); o+=snprintf(buf+o,n-o,"%s addrspace(%d)*",elt,p->ty.as); }
-        else o+=snprintf(buf+o,n-o,"%s addrspace(2)*",scalar_ll(p->ty.kind)); }
-    if(fn->nparams)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"i32)* @%s",fn->name);
+    size_t o=0; int emitted=0, ex=explicit_fn(fn); o+=snprintf(buf+o,n-o,"void (");
+    for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i]; if(p->ty.array_n)continue; if(emitted++)o+=snprintf(buf+o,n-o,", ");
+        if(p->ty.kind==T_COORD){ char cl[32]; coord_ll(&p->ty,cl,sizeof cl); o+=snprintf(buf+o,n-o,"%s",cl); }
+        else if(p->ty.kind==T_GRID_EXTENT) o+=snprintf(buf+o,n-o,"i32");
+        else if(p->ty.is_ptr){ char elt[64]; type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
+            o+=snprintf(buf+o,n-o,"%s addrspace(%d)*",elt,p->ty.as); }
+        else if(fn->is_kernel){ char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn); o+=snprintf(buf+o,n-o,"%s addrspace(2)*",ll); }
+        else { char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn); o+=snprintf(buf+o,n-o,"%s",ll); }
+    }
+    if(fn->is_kernel){ if(ex){ Param *cp=NULL; for(size_t i=0;i<fn->nparams;i++)if(fn->params[i].ty.kind==T_COORD){cp=&fn->params[i];break;} char cl[32]; coord_ll(&cp->ty,cl,sizeof cl);
+            if(emitted++)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"%s, %s",cl,cl);
+        } else { if(emitted++)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"i32"); } }
+    o+=snprintf(buf+o,n-o,")* @%s",fn->name);
 }
 
 void emit_air(FILE *out, const Program *prog){
-    memset(builtin_used,0,sizeof builtin_used);
+    memset(builtin_used,0,sizeof builtin_used); memset(atomic_add_used,0,sizeof atomic_add_used);
     fprintf(out,"; generated by binc — works as C, acts as Metal\n");
     fprintf(out,"target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32\"\n");
     fprintf(out,"target triple = \"air64_v29-apple-macosx27.0.0\"\n\n");
@@ -515,32 +633,60 @@ void emit_air(FILE *out, const Program *prog){
         fprintf(out,"%%struct.%s = type { ",s->tag);
         for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[32];
             ll_of(fl,sizeof fl,s->fields[j].ty.kind,s->fields[j].ty.vecn); fprintf(out,"%s",fl); }
-        fprintf(out," }\n"); } fprintf(out,"\n");
+        fprintf(out," }\n"); }
+    for(size_t fi=0;fi<prog->nfuncs;fi++) for(size_t pi=0;pi<prog->funcs[fi].nparams;pi++){
+        Param *p=&prog->funcs[fi].params[pi]; if(!p->ty.array_n)continue;
+        char gn[128],elt[64]; snprintf(gn,sizeof gn,"@_binc_smem_%s_%s",prog->funcs[fi].name,p->name); ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn);
+        if(p->ty.array_m) fprintf(out,"%s = internal unnamed_addr addrspace(3) global [%d x [%d x %s]] undef, align %d\n",gn,p->ty.array_n,p->ty.array_m,elt,type_align(p->ty.kind,p->ty.vecn));
+        else fprintf(out,"%s = internal unnamed_addr addrspace(3) global [%d x %s] undef, align %d\n",gn,p->ty.array_n,elt,type_align(p->ty.kind,p->ty.vecn));
+    }
+    int atomic_base=-1;
+    for(size_t fi=0;fi<prog->nfuncs;fi++) for(size_t pi=0;pi<prog->funcs[fi].nparams;pi++) if(prog->funcs[fi].params[pi].ty.kind==T_ATOMIC){
+        int b=prog->funcs[fi].params[pi].ty.atomic_base; if(atomic_base<0)atomic_base=b; else if(atomic_base!=b) die(0,"atomic buffers in one module must have the same payload type"); }
+    if(atomic_base>=0) fprintf(out,"%%\"struct.metal::_atomic\" = type { %s }\n",scalar_ll((TypeKind)atomic_base));
+    fprintf(out,"\n");
 
-    typedef struct { int *read,*written; int np; } KF; KF *kf=calloc(prog->nfuncs,sizeof(KF));
+    typedef struct { int *read,*written; int np, nmeta; } KF; KF *kf=calloc(prog->nfuncs,sizeof(KF));
     for(size_t fi=0;fi<prog->nfuncs;fi++){
         Function *fn=&prog->funcs[fi]; CG c={0};
         SB pr={0},bd={0}; c.pre=&pr; c.body=&bd; c.prog=prog; c.fn=fn; c.tmp=0;
         c.read=calloc(fn->nparams,sizeof(int)); c.written=calloc(fn->nparams,sizeof(int));
-        c.scalar_load=calloc(fn->nparams,sizeof(char*));
-        /* signature: kernels get the hidden %_id and constant-buffer scalars;
-         * non-kernels are plain internal AIR functions with by-value scalars */
+        c.scalar_load=calloc(fn->nparams,sizeof(char*)); c.coord_param=-1; c.grid_extent_param=-1;
+        for(size_t i=0;i<fn->nparams;i++){
+            if(fn->params[i].ty.kind==T_COORD){ c.explicit_domain=1; c.coord_param=(int)i; }
+            if(fn->params[i].ty.kind==T_GRID_EXTENT) c.grid_extent_param=(int)i;
+        }
+        /* signature: explicit domains carry coordinate/grid built-ins by value;
+         * implicit kernels retain the historical hidden scalar thread id. */
         char sig[2048]; size_t so=0;
         if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,"define void @%s(",fn->name);
         else { char rl[32]; ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
             so+=snprintf(sig+so,sizeof sig-so,"define internal %s @%s(",rl,fn->name); }
-        for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i]; if(i)so+=snprintf(sig+so,sizeof sig-so,", ");
-            if(p->ty.is_ptr){ char elt[64]; if(p->ty.kind==T_STRUCT)snprintf(elt,sizeof elt,"%%struct.%s",p->ty.struct_name);
-                else ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn); so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(%d)* nocapture noundef %%_%s",elt,p->ty.as,p->name); }
+        int emitted=0;
+        for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i];
+            if(p->ty.array_n) continue; /* shared arrays are module globals, not ABI args */
+            if(emitted++)so+=snprintf(sig+so,sizeof sig-so,", ");
+            if(p->ty.kind==T_COORD){ char cl[32]; coord_ll(&p->ty,cl,sizeof cl);
+                so+=snprintf(sig+so,sizeof sig-so,"%s noundef %%_%s",cl,p->name); }
+            else if(p->ty.kind==T_GRID_EXTENT){ so+=snprintf(sig+so,sizeof sig-so,"i32 noundef %%_%s",p->name); }
+            else if(p->ty.is_ptr){ char elt[64]; type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
+                so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(%d)* nocapture noundef %%_%s",elt,p->ty.as,p->name); }
             else if(fn->is_kernel){ char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn);
                 so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(2)* nocapture noundef readonly align %d dereferenceable(%d) %%_%s",ll,type_align(p->ty.kind,p->ty.vecn),type_size(p->ty.kind,p->ty.vecn),p->name); }
             else { char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn);
                 so+=snprintf(sig+so,sizeof sig-so,"%s noundef %%_%s",ll,p->name); } }
-        if(fn->is_kernel){ if(fn->nparams)so+=snprintf(sig+so,sizeof sig-so,", ");
-            so+=snprintf(sig+so,sizeof sig-so,"i32 noundef %%_id) local_unnamed_addr"); }
+        if(fn->is_kernel && c.explicit_domain && c.coord_param>=0){ Param *cp=&fn->params[c.coord_param]; char cl[32]; coord_ll(&cp->ty,cl,sizeof cl);
+            so+=snprintf(sig+so,sizeof sig-so,", %s noundef %%_%s_local, %s noundef %%_%s_group",cl,cp->name,cl,cp->name); }
+        if(fn->is_kernel && !c.explicit_domain){ if(emitted)so+=snprintf(sig+so,sizeof sig-so,", ");
+            so+=snprintf(sig+so,sizeof sig-so,"i32 noundef %%_id"); }
+        if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,") local_unnamed_addr");
         else so+=snprintf(sig+so,sizeof sig-so,")");
-        if(fn->is_kernel){ c.idx=malloc(16); snprintf(c.idx,16,"%%t%d",c.tmp++);
+        if(fn->is_kernel && !c.explicit_domain){ c.idx=malloc(16); snprintf(c.idx,16,"%%t%d",c.tmp++);
             sb_printf(c.pre,"  %s = zext i32 %%_id to i64\n",c.idx); }
+        else if(c.explicit_domain && c.coord_param>=0 && fn->params[c.coord_param].ty.coordn==1){
+            c.idx=malloc(32); snprintf(c.idx,32,"%%_%s",fn->params[c.coord_param].name);
+            const char *z=newtmp(&c); sb_printf(c.pre,"  %s = zext i32 %s to i64\n",z,c.idx); c.idx=(char*)z;
+        }
         gen_block(&c,&fn->body);
         if(!c.term){ if(fn->ret.kind==T_VOID) emit(&c,"  ret void\n");
             else { char rl[32]; ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
@@ -551,7 +697,10 @@ void emit_air(FILE *out, const Program *prog){
         fwrite(pr.p,1,pr.n,out); fwrite(bd.p,1,bd.n,out);
         fprintf(out,"}\n\n");
         kf[fi].read=c.read; kf[fi].written=c.written; kf[fi].np=(int)fn->nparams;
+        kf[fi].nmeta=fn->is_kernel?meta_count(fn):0;
     }
+    if(atomic_add_used[0]) fprintf(out,"declare float @air.atomic.global.add.f32(float addrspace(1)*, float, i32, i32, i32, i1) local_unnamed_addr\n");
+    if(atomic_add_used[1]) fprintf(out,"declare i32 @air.atomic.global.add.i32(i32 addrspace(1)*, i32, i32, i32, i32, i1) local_unnamed_addr\n");
     /* declares for the builtins that were actually used */
     for(size_t b=0;b<sizeof builtins/sizeof *builtins;b++){ if(!builtin_used[b]) continue; Builtin *bi=&builtins[b];
         if(bi->ret==T_VOID){ fprintf(out,"declare void @%s(i32, i32, i32) local_unnamed_addr #3\n",bi->ll); continue; }
@@ -565,12 +714,14 @@ void emit_air(FILE *out, const Program *prog){
     /* fully-numbered metadata — only `kernel` functions get !air.kernel entries */
     size_t nk=0; for(size_t fi=0;fi<prog->nfuncs;fi++) if(prog->funcs[fi].is_kernel) nk++;
     int next=13; int *knode=calloc(nk?nk:1,sizeof(int)),*empty=calloc(nk?nk:1,sizeof(int)),
-        *arglist=calloc(nk?nk:1,sizeof(int)),**argnode=calloc(nk?nk:1,sizeof(int*)),*idnode=calloc(nk?nk:1,sizeof(int));
+        *arglist=calloc(nk?nk:1,sizeof(int)),**argnode=calloc(nk?nk:1,sizeof(int*)),**structnode=calloc(nk?nk:1,sizeof(int*));
     size_t ki=0;
     for(size_t fi=0;fi<prog->nfuncs;fi++){ if(!prog->funcs[fi].is_kernel) continue;
         knode[ki]=next++; empty[ki]=next++; arglist[ki]=next++;
-        argnode[ki]=malloc((kf[fi].np?kf[fi].np:1)*sizeof(int)); for(int a=0;a<kf[fi].np;a++)argnode[ki][a]=next++;
-        idnode[ki]=next++; ki++; }
+        int na=kf[fi].nmeta; argnode[ki]=malloc((na?na:1)*sizeof(int)); for(int a=0;a<na;a++)argnode[ki][a]=next++;
+        structnode[ki]=malloc((kf[fi].np?kf[fi].np:1)*sizeof(int)); for(int a=0;a<kf[fi].np;a++) structnode[ki][a]=-1;
+        for(int a=0;a<kf[fi].np;a++) if(prog->funcs[fi].params[a].ty.kind==T_ATOMIC) structnode[ki][a]=next++;
+        ki++; }
     fprintf(out,"!llvm.module.flags = !{!0, !1, !2, !3, !4, !5, !6}\n");
     fprintf(out,"!air.kernel = !{"); for(size_t k=0;k<nk;k++){ if(k)fprintf(out,", "); fprintf(out,"!%d",knode[k]); } fprintf(out,"}\n");
     fprintf(out,"!air.compile_options = !{!7, !8}\n!llvm.ident = !{!9}\n!air.version = !{!10}\n!air.language_version = !{!11}\n!air.source_file_name = !{!12}\n\n");
@@ -579,19 +730,33 @@ void emit_air(FILE *out, const Program *prog){
     for(size_t fi=0;fi<prog->nfuncs;fi++){ Function *fn=&prog->funcs[fi]; if(!fn->is_kernel) continue;
         char fptr[2048]; fn_ptr_str(fn,fptr,sizeof fptr);
         fprintf(out,"!%d = !{}\n",empty[ki]);
-        fprintf(out,"!%d = !{",arglist[ki]); for(int a=0;a<kf[fi].np;a++){ if(a)fprintf(out,", "); fprintf(out,"!%d",argnode[ki][a]); }
-        if(kf[fi].np)fprintf(out,", "); fprintf(out,"!%d}\n",idnode[ki]);
+        fprintf(out,"!%d = !{",arglist[ki]); for(int a=0;a<kf[fi].nmeta;a++){ if(a)fprintf(out,", "); fprintf(out,"!%d",argnode[ki][a]); }
+        fprintf(out,"}\n");
         fprintf(out,"!%d = !{%s, !%d, !%d}\n",knode[ki],fptr,empty[ki],arglist[ki]);
-        for(int a=0;a<kf[fi].np;a++){ Param *p=&fn->params[a];
+        int ai=0; Param *cp=NULL; for(size_t x=0;x<fn->nparams;x++)if(fn->params[x].ty.kind==T_COORD){cp=&fn->params[x];break;}
+        for(int a=0;a<(int)fn->nparams;a++){ Param *p=&fn->params[a]; if(p->ty.array_n)continue;
+            if(p->ty.kind==T_COORD){ char cn[32]; snprintf(cn,sizeof cn,p->ty.coordn==1?"uint":p->ty.coordn==2?"ushort2":"ushort3");
+                fprintf(out,"!%d = !{i32 %d, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",argnode[ki][ai++],a,cn,p->name); continue; }
+            if(p->ty.kind==T_GRID_EXTENT){ fprintf(out,"!%d = !{i32 %d, !\"air.threads_per_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",argnode[ki][ai++],a,p->name); continue; }
             if(p->ty.is_ptr){ int r=kf[fi].read[a],w=kf[fi].written[a]; const char *acc=(r&&w)?"air.read_write":w?"air.write":"air.read";
                 int sz=type_size(p->ty.kind,p->ty.vecn),al=type_align(p->ty.kind,p->ty.vecn); char tnb[64];
                 tn_of(tnb,sizeof tnb,p->ty.kind,p->ty.vecn); const char *tn=tnb;
+                if(p->ty.kind==T_ATOMIC){ snprintf(tnb,sizeof tnb,"metal::_atomic"); tn=tnb; }
                 if(p->ty.kind==T_STRUCT){ StructDef *s=find_struct(prog,p->ty.struct_name);
                     sz=struct_layout(s,&al); snprintf(tnb,sizeof tnb,"%s",p->ty.struct_name); tn=tnb; }
-                fprintf(out,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",argnode[ki][a],a,a,acc,p->ty.as,sz,al,tn,p->name); }
+                int an=argnode[ki][ai++];
+                if(p->ty.kind==T_ATOMIC) fprintf(out,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.struct_type_info\", !%d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an,a,a,acc,p->ty.as,structnode[ki][a],sz,al,tn,p->name);
+                else fprintf(out,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an,a,a,acc,p->ty.as,sz,al,tn,p->name); }
             else { char tnb[64]; tn_of(tnb,sizeof tnb,p->ty.kind,p->ty.vecn);
-                fprintf(out,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",argnode[ki][a],a,type_size(p->ty.kind,p->ty.vecn),a,type_size(p->ty.kind,p->ty.vecn),type_align(p->ty.kind,p->ty.vecn),tnb,p->name); } }
-        fprintf(out,"!%d = !{i32 %d, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"id\"}\n",idnode[ki],(int)fn->nparams);
+                fprintf(out,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",argnode[ki][ai++],a,type_size(p->ty.kind,p->ty.vecn),a,type_size(p->ty.kind,p->ty.vecn),type_align(p->ty.kind,p->ty.vecn),tnb,p->name); } }
+        for(int a=0;a<(int)fn->nparams;a++) if(structnode[ki][a]>=0){ Param *p=&fn->params[a];
+            fprintf(out,"!%d = !{i32 0, i32 4, i32 0, !\"%s\", !\"__s\"}\n",structnode[ki][a],type_name(p->ty.atomic_base)); }
+        if(cp){ char cn[32]; snprintf(cn,sizeof cn,cp->ty.coordn==1?"uint":cp->ty.coordn==2?"ushort2":"ushort3");
+            fprintf(out,"!%d = !{i32 %d, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s_local\"}\n",argnode[ki][ai++],(int)fn->nparams,cn,cp->name);
+            fprintf(out,"!%d = !{i32 %d, !\"air.threadgroup_position_in_grid\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s_group\", !\"air.arg_unused\"}\n",argnode[ki][ai++],(int)fn->nparams+1,cn,cp->name);
+        } else {
+            fprintf(out,"!%d = !{i32 %d, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"id\"}\n",argnode[ki][ai++],(int)fn->nparams);
+        }
         ki++;
     }
 }
