@@ -1,0 +1,37 @@
+kernel void k(device float* out, coord1D i) {
+    float3 a = float3(3.0f, 0.0f, 4.0f);
+    float3 b = float3(1.0f, 2.0f, 2.0f);
+    out[0] = dot(a, b);                     /* 3+0+8 = 11 */
+    float3 c = cross(a, b);                 /* (0*2-4*2, 4*1-3*2, 3*2-0*1) = (-8,-2,6) */
+    out[1] = c.x + c.y + c.z;               /* -4 */
+    out[2] = length(a);                     /* 5 */
+    out[3] = distance(a, b);                /* sqrt(12) = 3.4641 */
+    float3 n = normalize(b);                /* (1/3, 2/3, 2/3) */
+    out[4] = n.x + n.y + n.z;               /* 5/3 = 1.6667 */
+    out[5] = clamp(7.0f, 0.0f, 5.0f);       /* 5 */
+    out[6] = mix(2.0f, 8.0f, 0.25f);        /* 3.5 */
+    out[7] = step(0.5f, 0.2f);              /* 0 */
+    out[8] = step(0.5f, 0.8f);              /* 1 */
+    out[9] = smoothstep(0.0f, 1.0f, 0.5f);  /* 0.5 */
+    out[10] = fract(3.75f);                 /* 0.75 */
+    out[11] = mod(7.5f, 2.0f);              /* 1.5 */
+    out[12] = rsqrt(16.0f);                 /* 0.25 */
+    out[13] = atan2(1.0f, 1.0f);            /* pi/4 = 0.7854 */
+    out[14] = sign(-3.0f) + sign(0.0f) + sign(5.0f);  /* -1+0+1 = 0 */
+    out[15] = radians(180.0f);              /* pi = 3.14159 */
+    out[16] = degrees(radians(90.0f));      /* 90 */
+    float4 v = float4(4.0f, 9.0f, 16.0f, 25.0f);
+    float4 r4 = sqrt(v);                    /* vectorized intrinsic */
+    out[17] = r4.x + r4.y + r4.z + r4.w;    /* 2+3+4+5 = 14 */
+    float2 ri = float2(1.0f, -1.0f);
+    float2 rn = float2(0.0f, 1.0f);
+    float2 rr = reflect(ri, rn);            /* (1, 1) */
+    out[18] = rr.x;
+    out[19] = rr.y;
+    int4 ia = int4(1, 5, 3, 9);
+    int4 ib = int4(4, 2, 8, 6);
+    int4 im = imax(ia, ib);                 /* vectorized int builtin */
+    out[20] = (float)(im.x + im.y + im.z + im.w);  /* 4+5+8+9 = 26 */
+    float4 m4 = mix(float4(0.0f), float4(10.0f), float4(0.5f));
+    out[21] = m4.x;                         /* 5 */
+}

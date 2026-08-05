@@ -242,25 +242,229 @@ static const char *swizzle_read(CG *c, const char *vec, const char *vty, const c
 /* builtins: AIR spellings probed from the metal frontend (metal -emit-llvm -S on MSL using
  * metal::sqrt etc.; the module sets air.compile.fast_math_enable, hence the fast_ variants).
  * sync() is the threadgroup barrier: air.wg.barrier(i32 2, i32 5, i32 1). */
-typedef struct { const char *name,*ll; int nargs; TypeKind ret, a0, a1; } Builtin;
+typedef struct { const char *name,*ll; int nargs; TypeKind ret, a0, a1; int vec_ok; } Builtin;
 static Builtin builtins[]={
-    {"sqrt","air.fast_sqrt.f32",1,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"fabs","air.fast_fabs.f32",1,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"floor","air.fast_floor.f32",1,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"ceil","air.fast_ceil.f32",1,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"sin","air.fast_sin.f32",1,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"cos","air.fast_cos.f32",1,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"exp","air.fast_exp.f32",1,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"log","air.fast_log.f32",1,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"fmin","air.fast_fmin.f32",2,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"fmax","air.fast_fmax.f32",2,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"pow","air.fast_pow.f32",2,T_FLOAT,T_FLOAT,T_FLOAT},
-    {"imin","air.min.s.i32",2,T_INT32,T_INT32,T_INT32},
-    {"imax","air.max.s.i32",2,T_INT32,T_INT32,T_INT32},
-    {"sync","air.wg.barrier",0,T_VOID,T_VOID,T_VOID},
+    {"sqrt","air.fast_sqrt.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"fabs","air.fast_fabs.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"floor","air.fast_floor.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"ceil","air.fast_ceil.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"sin","air.fast_sin.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"cos","air.fast_cos.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"exp","air.fast_exp.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"log","air.fast_log.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"fmin","air.fast_fmin.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"fmax","air.fast_fmax.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"pow","air.fast_pow.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"atan2","air.fast_atan2.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"rsqrt","air.fast_rsqrt.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"sign","air.sign.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"imin","air.min.s.i32",2,T_INT32,T_INT32,T_INT32,1},
+    {"imax","air.max.s.i32",2,T_INT32,T_INT32,T_INT32,1},
+    {"sync","air.wg.barrier",0,T_VOID,T_VOID,T_VOID,0},
 };
 static int builtin_used[sizeof builtins/sizeof *builtins];
+static void mark_builtin(const char *name){ for(size_t i=0;i<sizeof builtins/sizeof *builtins;i++) if(!strcmp(builtins[i].name,name)){ builtin_used[i]=1; return; } }
 static int atomic_add_used[3];
+
+/* ---- composite math builtins ----
+ * dot/cross/length/... are composed from elementwise intrinsics and vector
+ * arithmetic; they accept float scalars and vectors of matching width. */
+static const char *vbin(CG *c, const char *op, const char *a, const char *b, int n){
+    if(n>1){ const char *r=newtmp(c); emit(c,"  %s = %s <%d x float> %s, %s\n",r,op,n,a,b); return r; }
+    const char *r=newtmp(c); emit(c,"  %s = %s float %s, %s\n",r,op,a,b); return r;
+}
+/* sum of every element -> scalar float */
+static const char *vreduce(CG *c, const char *v, int n){
+    if(n==1) return v;
+    const char *acc=NULL;
+    for(int i=0;i<n;i++){
+        const char *x=newtmp(c);
+        emit(c,"  %s = extractelement <%d x float> %s, i32 %d\n",x,n,v,i);
+        if(!acc) acc=x;
+        else { const char *r=newtmp(c); emit(c,"  %s = fadd fast float %s, %s\n",r,acc,x); acc=r; }
+    }
+    return acc;
+}
+/* elementwise scalar intrinsic call on a vector register (or plain scalar) */
+static const char *elem_call(CG *c, const char *intr, const char *v, int n, TypeKind at, TypeKind rt){
+    if(n==1){
+        const char *r=newtmp(c);
+        emit(c,"  %s = call %s @%s(%s %s)\n",r,scalar_ll(rt),intr,scalar_ll(at),v);
+        return r;
+    }
+    const char *acc="undef";
+    char rty[32], vty[32]; snprintf(rty,sizeof rty,"<%d x %s>",n,scalar_ll(rt)); snprintf(vty,sizeof vty,"<%d x %s>",n,scalar_ll(at));
+    for(int i=0;i<n;i++){
+        const char *x=newtmp(c);
+        emit(c,"  %s = extractelement %s %s, i32 %d\n",x,vty,v,i);
+        const char *r=newtmp(c);
+        emit(c,"  %s = call %s @%s(%s %s)\n",r,scalar_ll(rt),intr,scalar_ll(at),x);
+        const char *ins=newtmp(c);
+        emit(c,"  %s = insertelement %s %s, %s %s, i32 %d\n",ins,rty,acc,scalar_ll(rt),r,i);
+        acc=ins;
+    }
+    return acc;
+}
+/* clamp v to [lo, hi] elementwise; lo/hi may be vector registers or splatted scalars */
+static const char *clamp_elem(CG *c, const char *v, const char *lo, const char *hi, int n){
+    mark_builtin("fmin"); mark_builtin("fmax");
+    const char *acc="undef";
+    char rty[32]; snprintf(rty,sizeof rty,"<%d x float>",n);
+    for(int i=0;i<n;i++){
+        const char *x=v, *l=lo, *h=hi;
+        if(n>1){
+            x=newtmp(c); l=newtmp(c); h=newtmp(c);
+            emit(c,"  %s = extractelement <%d x float> %s, i32 %d\n",x,n,v,i);
+            emit(c,"  %s = extractelement <%d x float> %s, i32 %d\n",l,n,lo,i);
+            emit(c,"  %s = extractelement <%d x float> %s, i32 %d\n",h,n,hi,i);
+        }
+        const char *mn=newtmp(c);
+        emit(c,"  %s = call float @air.fast_fmin.f32(float %s, float %s)\n",mn,x,h);
+        const char *mx=newtmp(c);
+        emit(c,"  %s = call float @air.fast_fmax.f32(float %s, float %s)\n",mx,l,mn);
+        if(n>1){ const char *ins=newtmp(c); emit(c,"  %s = insertelement %s %s, float %s, i32 %d\n",ins,rty,acc,mx,i); acc=ins; }
+        else acc=mx;
+    }
+    return acc;
+}
+/* scalars are broadcast to width n for vector arithmetic */
+static const char *spread(CG *c, const char *v, int w, int n){
+    return (w||n==1)?v:splat(c,v,"float",n);
+}
+/* returns the result register, or NULL if `e->name` is not a composite builtin */
+static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
+    const char *nm=e->name;
+    static const char *names[]={"dot","cross","length","distance","normalize","reflect","clamp","mix","step","smoothstep","fract","mod","radians","degrees"};
+    int hit=0; for(size_t i=0;i<sizeof names/sizeof *names;i++) if(!strcmp(names[i],nm)){ hit=1; break; }
+    if(!hit) return NULL;
+    if(e->nargs<1||e->nargs>3) die(0,"%s: wrong number of arguments",nm);
+    ValKind ak=VK_F32,bk=VK_F32,ck=VK_F32;
+    const char *av=gen_rval(c,e->args[0],&ak); int aw=c->rvw;
+    const char *bv=NULL; int bw=0; if(e->nargs>=2){ bv=gen_rval(c,e->args[1],&bk); bw=c->rvw; }
+    const char *cv=NULL; int cw=0; if(e->nargs>=3){ cv=gen_rval(c,e->args[2],&ck); cw=c->rvw; }
+    int n=aw?aw:(bw?bw:cw); if(n==0) n=1;
+    if((aw&&aw!=n)||(bw&&bw!=n)||(cw&&cw!=n)) die(0,"vector width mismatch in %s",nm);
+    if(ak!=VK_F32||bk!=VK_F32||ck!=VK_F32) die(0,"%s requires float arguments",nm);
+    if(!strcmp(nm,"dot")){
+        if(e->nargs!=2) die(0,"dot expects 2 arguments");
+        *k=VK_F32; c->rvw=0;
+        return vreduce(c,vbin(c,"fmul fast",spread(c,av,aw,n),spread(c,bv,bw,n),n),n);
+    }
+    if(!strcmp(nm,"cross")){
+        if(e->nargs!=2) die(0,"cross expects 2 arguments");
+        if(n!=3) die(0,"cross requires float3 arguments");
+        int s1[3]={1,2,0}, s2[3]={2,0,1};
+        const char *ayz=swizzle_read(c,av,"<3 x float>","float",s1,3);
+        const char *azy=swizzle_read(c,av,"<3 x float>","float",s2,3);
+        const char *byz=swizzle_read(c,bv,"<3 x float>","float",s1,3);
+        const char *bzy=swizzle_read(c,bv,"<3 x float>","float",s2,3);
+        *k=VK_F32; c->rvw=3;
+        return vbin(c,"fsub fast",vbin(c,"fmul fast",ayz,bzy,3),vbin(c,"fmul fast",azy,byz,3),3);
+    }
+    if(!strcmp(nm,"length")||!strcmp(nm,"distance")){
+        if(e->nargs!=(!strcmp(nm,"length")?1:2)) die(0,"%s: wrong number of arguments",nm);
+        mark_builtin("sqrt");
+        const char *va=spread(c,av,aw,n);
+        const char *vb = !strcmp(nm,"distance") ? spread(c,bv,bw,n) : NULL;
+        const char *d;
+        if(vb) d=vreduce(c,vbin(c,"fmul fast",vbin(c,"fsub fast",vb,va,n),vbin(c,"fsub fast",vb,va,n),n),n);
+        else d=vreduce(c,vbin(c,"fmul fast",va,va,n),n);
+        *k=VK_F32; c->rvw=0;
+        const char *r=newtmp(c);
+        emit(c,"  %s = call float @air.fast_sqrt.f32(float %s)\n",r,d);
+        return r;
+    }
+    if(!strcmp(nm,"normalize")){
+        if(e->nargs!=1) die(0,"normalize expects 1 argument");
+        mark_builtin("sqrt");
+        const char *va=spread(c,av,aw,n);
+        const char *d=vreduce(c,vbin(c,"fmul fast",va,va,n),n);
+        const char *r=newtmp(c);
+        emit(c,"  %s = call float @air.fast_sqrt.f32(float %s)\n",r,d);
+        const char *len=n>1?splat(c,r,"float",n):r;
+        *k=VK_F32; c->rvw=n>1?n:0;
+        return vbin(c,"fdiv fast",va,len,n);
+    }
+    if(!strcmp(nm,"reflect")){
+        if(e->nargs!=2) die(0,"reflect expects 2 arguments");
+        const char *va=spread(c,av,aw,n), *vb=spread(c,bv,bw,n);
+        const char *d=vreduce(c,vbin(c,"fmul fast",vb,va,n),n);   /* dot(n,i) */
+        const char *t2=newtmp(c); emit(c,"  %s = fmul fast float %s, %s\n",t2,fconst(c,2.0),d);
+        const char *tv=n>1?splat(c,t2,"float",n):t2;
+        *k=VK_F32; c->rvw=n>1?n:0;
+        return vbin(c,"fsub fast",va,vbin(c,"fmul fast",vb,tv,n),n);
+    }
+    if(!strcmp(nm,"clamp")){
+        if(e->nargs!=3) die(0,"clamp expects 3 arguments");
+        *k=VK_F32; c->rvw=n>1?n:0;
+        return clamp_elem(c,spread(c,av,aw,n),spread(c,bv,bw,n),spread(c,cv,cw,n),n);
+    }
+    if(!strcmp(nm,"mix")){
+        if(e->nargs!=3) die(0,"mix expects 3 arguments");
+        const char *va=spread(c,av,aw,n), *vb=spread(c,bv,bw,n), *vc=spread(c,cv,cw,n);
+        *k=VK_F32; c->rvw=n>1?n:0;
+        return vbin(c,"fadd fast",va,vbin(c,"fmul fast",vbin(c,"fsub fast",vb,va,n),vc,n),n);
+    }
+    if(!strcmp(nm,"step")){
+        if(e->nargs!=2) die(0,"step expects 2 arguments");
+        const char *va=spread(c,av,aw,n), *vb=spread(c,bv,bw,n);
+        const char *zero=fconst(c,0.0), *one=fconst(c,1.0);
+        if(n>1){
+            const char *m=newtmp(c);
+            emit(c,"  %s = fcmp olt <%d x float> %s, %s\n",m,n,vb,va);
+            const char *z=splat(c,zero,"float",n), *o=splat(c,one,"float",n);
+            char mty[32], rty[32]; snprintf(mty,sizeof mty,"<%d x i1>",n); snprintf(rty,sizeof rty,"<%d x float>",n);
+            const char *r=newtmp(c);
+            emit(c,"  %s = select %s %s, %s %s, %s %s\n",r,mty,m,rty,z,rty,o);
+            *k=VK_F32; c->rvw=n; return r;
+        }
+        const char *m=newtmp(c);
+        emit(c,"  %s = fcmp olt float %s, %s\n",m,vb,va);
+        const char *r=newtmp(c);
+        emit(c,"  %s = select i1 %s, float %s, float %s\n",r,m,zero,one);
+        *k=VK_F32; c->rvw=0; return r;
+    }
+    if(!strcmp(nm,"smoothstep")){
+        if(e->nargs!=3) die(0,"smoothstep expects 3 arguments");
+        const char *va=spread(c,av,aw,n), *vb=spread(c,bv,bw,n), *vc=spread(c,cv,cw,n);
+        const char *num=vbin(c,"fsub fast",vc,va,n);
+        const char *den=vbin(c,"fsub fast",vb,va,n);
+        const char *t0=vbin(c,"fdiv fast",num,den,n);
+        const char *lo=fconst(c,0.0), *hi=fconst(c,1.0);
+        const char *tc=clamp_elem(c,t0,lo,hi,n);
+        const char *tt=vbin(c,"fmul fast",tc,tc,n);
+        const char *t3=n>1?splat(c,fconst(c,3.0),"float",n):fconst(c,3.0);
+        const char *t2=n>1?splat(c,fconst(c,2.0),"float",n):fconst(c,2.0);
+        *k=VK_F32; c->rvw=n>1?n:0;
+        return vbin(c,"fmul fast",tt,vbin(c,"fsub fast",t3,vbin(c,"fmul fast",t2,tc,n),n),n);
+    }
+    if(!strcmp(nm,"fract")){
+        if(e->nargs!=1) die(0,"fract expects 1 argument");
+        mark_builtin("floor");
+        const char *va=spread(c,av,aw,n);
+        const char *fl=elem_call(c,"air.fast_floor.f32",va,n,T_FLOAT,T_FLOAT);
+        *k=VK_F32; c->rvw=n>1?n:0;
+        return vbin(c,"fsub fast",va,fl,n);
+    }
+    if(!strcmp(nm,"mod")){
+        if(e->nargs!=2) die(0,"mod expects 2 arguments");
+        mark_builtin("floor");
+        const char *va=spread(c,av,aw,n), *vb=spread(c,bv,bw,n);
+        const char *q=vbin(c,"fdiv fast",va,vb,n);
+        const char *fl=elem_call(c,"air.fast_floor.f32",q,n,T_FLOAT,T_FLOAT);
+        *k=VK_F32; c->rvw=n>1?n:0;
+        return vbin(c,"fsub fast",va,vbin(c,"fmul fast",vb,fl,n),n);
+    }
+    if(!strcmp(nm,"radians")||!strcmp(nm,"degrees")){
+        if(e->nargs!=1) die(0,"%s expects 1 argument",nm);
+        const char *va=spread(c,av,aw,n);
+        const char *f=fconst(c,!strcmp(nm,"radians")?0.017453292519943295:57.29577951308232);
+        const char *fc=n>1?splat(c,f,"float",n):f;
+        *k=VK_F32; c->rvw=n>1?n:0;
+        return vbin(c,"fmul fast",va,fc,n);
+    }
+    die(0,"unreachable in %s",nm);
+}
 
 static const char *cmp_name(CmpOp op,int isfloat,int isuns){
     if(isfloat) switch(op){ case C_EQ:return "oeq"; case C_NE:return "one"; case C_LT:return "olt";
@@ -579,6 +783,8 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             } else emit(c,"  %s = select i1 %s, %s %s, %s %s\n",r,mv,elt,av,elt,bv);
             return r;
         }
+        /* composite math builtins (dot, cross, length, clamp, mix, ...) */
+        { const char *cm=gen_composite_math(c,e,k); if(cm) return cm; }
         /* user function? the whole Program is visible, so definition order doesn't matter */
         Function *f=NULL; for(size_t i=0;i<c->prog->nfuncs;i++)
             if(!strcmp(c->prog->funcs[i].name,e->name)){ f=&c->prog->funcs[i]; break; }
@@ -617,10 +823,38 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             if(bi->ret==T_VOID){
                 if(c->divergent) die(0,"sync() is inside divergent control flow; every threadgroup lane must reach the barrier");
                 c->uses_sync=1; emit(c,"  call void @%s(i32 2, i32 5, i32 1)\n",bi->ll); *k=VK_I32; return "0"; }
+            ValKind aks[4]; const char *vls[4]; int wids[4];
+            int vw=0;
+            for(int i=0;i<bi->nargs;i++){ vls[i]=gen_rval(c,e->args[i],&aks[i]); wids[i]=c->rvw; if(wids[i]) vw=wids[i]; }
+            if(vw && !bi->vec_ok) die(0,"vector argument to builtin %s",e->name);
+            for(int i=0;i<bi->nargs;i++) if(wids[i]&&wids[i]!=vw) die(0,"vector width mismatch in %s",e->name);
+            if(vw){
+                /* per-element application of the scalar intrinsic */
+                const char *ret_elt=scalar_ll(bi->ret);
+                char rty[32]; snprintf(rty,sizeof rty,"<%d x %s>",vw,ret_elt);
+                const char *acc="undef";
+                for(int kk=0;kk<vw;kk++){
+                    char da[128]; size_t o2=0;
+                    for(int i=0;i<bi->nargs;i++){
+                        const char *ael=aks[i]==VK_F32?"float":"i32";
+                        char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",vw,ael);
+                        const char *x=newtmp(c);
+                        emit(c,"  %s = extractelement %s %s, i32 %d\n",x,vty,vls[i],kk);
+                        TypeKind at=i==0?bi->a0:bi->a1; const char *ev;
+                        const char *sv=store_val(c,x,aks[i],at,&ev);
+                        o2+=snprintf(da+o2,sizeof da-o2,"%s%s %s",i?", ":"",scalar_ll(at),sv);
+                    }
+                    const char *r2=newtmp(c);
+                    emit(c,"  %s = call %s @%s(%s)\n",r2,ret_elt,bi->ll,da);
+                    const char *ins=newtmp(c);
+                    emit(c,"  %s = insertelement %s %s, %s %s, i32 %d\n",ins,rty,acc,ret_elt,r2,kk);
+                    acc=ins;
+                }
+                *k=scalar_vk(bi->ret); c->rvw=vw; return acc;
+            }
             char args[256]; size_t o=0;
-            for(int i=0;i<bi->nargs;i++){ ValKind ak; const char *v=gen_rval(c,e->args[i],&ak);
-                if(c->rvw) die(0,"vector argument to builtin %s",e->name);
-                TypeKind at=i==0?bi->a0:bi->a1; const char *ev; const char *sv=store_val(c,v,ak,at,&ev);
+            for(int i=0;i<bi->nargs;i++){
+                TypeKind at=i==0?bi->a0:bi->a1; const char *ev; const char *sv=store_val(c,vls[i],aks[i],at,&ev);
                 o+=snprintf(args+o,sizeof args-o,"%s%s %s",i?", ":"",scalar_ll(at),sv); }
             const char *r=newtmp(c); *k=scalar_vk(bi->ret);
             emit(c,"  %s = call %s @%s(%s)\n",r,scalar_ll(bi->ret),bi->ll,args); return r;
