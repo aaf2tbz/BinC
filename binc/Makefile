@@ -49,6 +49,41 @@ test-interp: binc
 test-grammar:
 	@bash ../tools/tree-sitter-binc/test/parse_all.sh
 
+# ---- HLSL-to-Metal Phase 0 (vendored DirectX corpus; see .hermes/plans/) ----
+# third_party/ is gitignored; targets skip when the corpus is absent.
+
+DDS_BIN  := ../tools/dds/test_dds
+
+$(DDS_BIN): ../tools/dds/test_dds.c ../tools/dds/dds.h
+	cc -std=c11 -Wall -Wextra -O2 ../tools/dds/test_dds.c -o $@
+
+# every vendored .dds must parse (header + size); the degenerate allowlist
+# (tools/vendor/degenerate_dds.txt) documents files with lying/mangled headers
+test-dds: $(DDS_BIN)
+	@if [ ! -d ../third_party ]; then echo "SKIP: third_party corpus not present"; exit 0; fi; \
+	find ../third_party -name "*.dds" | sort > /tmp/dds_list.txt; \
+	: > /tmp/dds_sweep.txt; while read f; do $(DDS_BIN) "$$f" >> /tmp/dds_sweep.txt 2>&1 || true; done < /tmp/dds_list.txt; \
+	grep -q ": parse error" /tmp/dds_sweep.txt && rc=1 || rc=0; \
+	if [ $$rc -ne 0 ]; then \
+	  grep -v "^#\|  #" ../tools/vendor/degenerate_dds.txt | grep -v "^$$" > /tmp/dds_degen.txt; \
+	  ok=1; for f in $$(grep ": parse error" /tmp/dds_sweep.txt | sed 's|: parse error.*||; s|^\.\./third_party/||'); do \
+	    if ! grep -qxF "$$f" /tmp/dds_degen.txt; then echo "UNEXPECTED FAIL: $$f"; ok=0; fi; done; \
+	  if [ $$ok -eq 1 ]; then echo "DDS sweep OK ($$(grep -c ': parse error' /tmp/dds_sweep.txt) degenerate, allowlisted)"; \
+	  else echo "DDS sweep: unexpected failures"; exit 1; fi; \
+	else echo "DDS sweep OK"; fi
+
+# regenerate tools/vendor/corpus.json (shader + texture index with profiles)
+corpus-scan:
+	@python3 ../tools/vendor/scan_corpus.py
+
+# DXC acceptance over the manifest (reference toolchain sanity; hard BinC gate lands in Phase 1)
+corpus-parse:
+	@bash ../tools/hlsl-diff/corpus-parse.sh
+
+# differential smoke: reference side (DXC -> SPIRV-Cross -> metal -> harness)
+diff-smoke:
+	@bash ../tools/hlsl-diff/diff.sh --reference-only -g 4 -w 4 ../tools/hlsl-diff/tests/hello_hlsl/main.hlsl
+
 # GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
 ci: binc test-negative test-fuzz test-interp examples
 	@echo "CI OK"

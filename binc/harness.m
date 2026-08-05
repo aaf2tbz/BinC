@@ -61,6 +61,7 @@ int main(int argc, char **argv){
     NSMutableArray<NSNumber*> *expectIdx=[NSMutableArray array];
     NSMutableArray<NSArray<NSString*>*> *expectVals=[NSMutableArray array];
     NSMutableArray<NSNumber*> *expectHex=[NSMutableArray array];
+    NSMutableArray<NSNumber*> *dumpIdx=[NSMutableArray array];
     NSMutableDictionary<NSNumber*,NSArray<NSString*>*> *expectTexVals=[NSMutableDictionary dictionary];
     NSMutableArray<NSArray<NSString*>*> *pixExpect=[NSMutableArray array];   /* rt x y r g b a */
     NSMutableArray<NSArray<NSString*>*> *depExpect=[NSMutableArray array];   /* x y v */
@@ -100,6 +101,9 @@ int main(int argc, char **argv){
         else if([d isEqualToString:@"expecttex"]){
             /* expecttex <idx> <r> <g> <b> <a>: every texel must equal these 4 values */
             expectTexVals[@(toks[1].intValue)]=[toks subarrayWithRange:NSMakeRange(2,toks.count-2)];
+        }
+        else if([d isEqualToString:@"dump"]){ /* dump <idx>: print the buffer as floats, for differential comparisons */
+            [dumpIdx addObject:@(toks[1].intValue)];
         }
         else if([d isEqualToString:@"expect"]||[d isEqualToString:@"expecth"]){
             [expectIdx addObject:@(toks[1].intValue)];
@@ -298,6 +302,17 @@ int main(int argc, char **argv){
             if(fabsf(gotf-expf)>tol){ printf("  depth[%d,%d]=%g exp %s X\n",x,y,(double)gotf,[de[2] UTF8String]); ok=0; }
             free(db);
         }
+    }
+    /* differential dump: print whole buffers as floats ('.7g') so two
+     * compilations of the same shader can be compared word-for-word */
+    for(NSNumber *dn in dumpIdx){
+        int idx=dn.intValue;
+        if(!bufs[idx]) die([NSString stringWithFormat:@"dump on unbound buffer %d",idx]);
+        const uint32_t *w=(const uint32_t*)[bufs[idx] contents];
+        NSInteger words=(NSInteger)[bufs[idx] length]/4;
+        printf("buf%d:",idx);
+        for(NSInteger i=0;i<words;i++){ float f; memcpy(&f,&w[i],4); printf(" %.7g",(double)f); }
+        printf("\n");
     }
     printf(ok?"\n✅ %s correct on GPU\n":"\n❌ %s mismatch\n",[kernel UTF8String]);
     return ok?0:1;

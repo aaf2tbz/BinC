@@ -1,0 +1,14 @@
+# Known-degenerate .dds files in the vendored corpus — tolerated by `make test-dds`.
+# Each entry documents WHY the header is unloadable:
+DirectX-Graphics-Samples/Samples/Desktop/D3D12Raytracing/src/D3D12RaytracingOpacityMicromaps/jacaranda_tree_leaves_alpha_4k.dds
+  # mangled header: width/pitch fields inconsistent with the 11 MB payload
+DirectX-SDK-Samples/Media/Textures/bump_NM_height_density.dds
+DirectX-SDK-Samples/Media/Textures/dent_NM_height_density.dds
+DirectX-SDK-Samples/Media/Textures/four_NM_height_density.dds
+DirectX-SDK-Samples/Media/Textures/rocks_NM_height_density.dds
+DirectX-SDK-Samples/Media/Textures/saint_NM_height_density.dds
+DirectX-SDK-Samples/Media/Textures/stones_NM_height_density.dds
+DirectX-SDK-Samples/Media/Textures/wall_NM_height_density.dds
+  # D3D9 "HILO" height/density files: header claims 32bpp RGBA with masks, but
+  # the payload is 8-bit grayscale (data size matches 8bpp exactly) — lying
+  # headers; the loader correctly rejects them per their own layout.

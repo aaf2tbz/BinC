@@ -165,6 +165,7 @@ int main(int argc, char **argv) {
         binc_set_air(triple,sdk,sdk-18);
     }
     const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0; int no_prelude = 0; int interpret = 0; int syntax_only = 0;
+    const char *hlsl_entry = NULL; const char *hlsl_profile = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i+1 < argc) outfile = argv[++i];
         else if (!strcmp(argv[i], "-I") && i+1 < argc) add_inc_dir(argv[++i]);
@@ -186,10 +187,33 @@ int main(int argc, char **argv) {
                 if(vb[0]){ printf("binc %s\n",vb); return 0; } }
             printf("binc %s\n", BINC_VERSION); return 0;
         }
+        else if (!strcmp(argv[i], "-E") && i + 1 < argc) { hlsl_entry = argv[++i]; }
+        else if (!strcmp(argv[i], "-T") && i + 1 < argc) { hlsl_profile = argv[++i]; }
         else if (argv[i][0] != '-') infile = argv[i];
         else { fprintf(stderr, "binc: unknown option %s\n", argv[i]); fputs(usage_text, stderr); return 2; }
     }
     if (!infile) { fputs(usage_text, stderr); return 2; }
+
+    /* ---- HLSL frontend routing (Phase 1 of the HLSL-to-Metal plan) ----
+     * `binc -E <entry> -T <profile> file.hlsl` mirrors DXC's interface.
+     * The frontend itself lands in Phase 1; the CLI surface is defined here. */
+    const char *entry = hlsl_entry ? hlsl_entry : "main";
+    const char *profile = hlsl_profile;
+    const char *ext = strrchr(infile, '.');
+    int is_hlsl = ext && (!strcmp(ext, ".hlsl") || !strcmp(ext, ".fx") || !strcmp(ext, ".fxh"));
+    if (is_hlsl) {
+        if (profile) {
+            /* validate the target profile: vs_5_0 / ps_5_0 / cs_5_0 / *_3_0 ... */
+            int maj = -1, min = -1; char stage[4] = {0};
+            if (sscanf(profile, "%3[vspscs]_%d_%d", stage, &maj, &min) != 3 ||
+                (strcmp(stage, "vs") && strcmp(stage, "ps") && strcmp(stage, "cs")))
+                { fprintf(stderr, "binc: invalid target profile '%s' (expected vs/ps/cs_N_M)\n", profile); return 2; }
+            fprintf(stderr, "binc: HLSL frontend lands in Phase 1 (-E %s -T %s); see .hermes/plans/2026-08-05_163031-hlsl-to-metal.md\n", entry, profile);
+            return 3;
+        }
+        fprintf(stderr, "binc: %s looks like an HLSL shader — compile with -T <profile> (e.g. -T vs_5_0); frontend lands in Phase 1\n", infile);
+        return 3;
+    }
 
     /* preprocess: optional prelude, then the user file, splicing includes */
     char *src; int first_line = 1;
