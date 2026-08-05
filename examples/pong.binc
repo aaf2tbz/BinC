@@ -15,6 +15,17 @@ void rect3(device float4* v, int b, float cx, float cy, float z, float hw, float
     v[b + 5] = float4(cx - hw, cy + hh, z, 1.0f);
 }
 
+void streak3(device float4* v, int b, float x1, float y1, float x2, float y2, float z, float width) {
+    float dx = x2 - x1; float dy = y2 - y1; float len = sqrt(dx * dx + dy * dy);
+    float nx = -dy / len * width; float ny = dx / len * width;
+    v[b + 0] = float4(x1 + nx, y1 + ny, z, 1.0f);
+    v[b + 1] = float4(x2 + nx, y2 + ny, z, 1.0f);
+    v[b + 2] = float4(x2 - nx, y2 - ny, z, 1.0f);
+    v[b + 3] = float4(x1 + nx, y1 + ny, z, 1.0f);
+    v[b + 4] = float4(x2 - nx, y2 - ny, z, 1.0f);
+    v[b + 5] = float4(x1 - nx, y1 - ny, z, 1.0f);
+}
+
 void continue_from_left(device Game* g) {
     g[0].ballx = -0.75f; g[0].vx = fabs(g[0].vx); g[0].round_time = 30.0f;
 }
@@ -23,8 +34,9 @@ void continue_from_right(device Game* g) {
     g[0].ballx = 0.75f; g[0].vx = -fabs(g[0].vx); g[0].round_time = 30.0f;
 }
 
-void arena(device float4* v, int b, int round) {
-    float bgz = 0.921875f + 0.015625f * sin(round * 0.5f);
+void arena(device float4* v, int b, int round, float clock) {
+    int theme = (round / 5) % 6;
+    float bgz = 0.8984375f + theme * 0.015625f + 0.00390625f * sin(clock * 2.0f);
     rect3(v, b, 0.0f, 0.0f, bgz, 1.0f, 1.0f);
     rect3(v, b + 6, 0.0f, -0.75f, 0.75f, 0.875f, 0.0078125f);
     rect3(v, b + 12, 0.0f, -0.5f, 0.6875f, 0.875f, 0.0078125f);
@@ -47,7 +59,7 @@ kernel void update(device Game* g, device float4* vertices, float dt, float inpu
     g->clock += dt;
     g->round_time -= dt;
     float factor = pow(1.25f, g->round - 1);
-    float paddle_speed = 0.75f * factor;
+    float paddle_speed = 1.125f * factor;
     g->trail = g->ballx;
     g->ballx += g->vx * factor * dt;
     g->bally += g->vy * factor * dt;
@@ -93,14 +105,14 @@ kernel void update(device Game* g, device float4* vertices, float dt, float inpu
         g->round += 1; g->round_time = 30.0f; g->event = 3; g->flash = 2;
     }
 
-    arena(vertices, 0, g->round);
-    /* Six depth-separated samples create a real GPU motion-blur trail. */
-    rect3(vertices, 90,  g->ballx - g->vx * 0.0625f, g->bally - g->vy * 0.0625f, 0.1875f, 0.0390625f, 0.0390625f);
-    rect3(vertices, 96,  g->ballx - g->vx * 0.125f,  g->bally - g->vy * 0.125f,  0.21875f, 0.03125f, 0.03125f);
-    rect3(vertices, 102, g->ballx - g->vx * 0.1875f, g->bally - g->vy * 0.1875f, 0.25f, 0.0234375f, 0.0234375f);
-    rect3(vertices, 108, g->ballx - g->vx * 0.25f,   g->bally - g->vy * 0.25f,   0.28125f, 0.015625f, 0.015625f);
-    rect3(vertices, 114, g->ballx - g->vx * 0.3125f, g->bally - g->vy * 0.3125f, 0.3125f, 0.01171875f, 0.01171875f);
-    rect3(vertices, 120, g->ballx - g->vx * 0.375f, g->bally - g->vy * 0.375f, 0.34375f, 0.0078125f, 0.0078125f);
+    arena(vertices, 0, g->round, g->clock);
+    /* Smooth, tapered motion smear: three overlapping ribbons, not persistent echo sprites. */
+    streak3(vertices, 90, g->ballx - g->vx * factor * 0.375f, g->bally - g->vy * factor * 0.375f, g->ballx, g->bally, 0.34375f, 0.0234375f);
+    streak3(vertices, 96, g->ballx - g->vx * factor * 0.25f, g->bally - g->vy * factor * 0.25f, g->ballx, g->bally, 0.28125f, 0.015625f);
+    streak3(vertices, 102, g->ballx - g->vx * factor * 0.125f, g->bally - g->vy * factor * 0.125f, g->ballx, g->bally, 0.21875f, 0.0078125f);
+    rect3(vertices, 108, 2.0f, 2.0f, 0.25f, 0.0078125f, 0.0078125f);
+    rect3(vertices, 114, 2.0f, 2.0f, 0.25f, 0.0078125f, 0.0078125f);
+    rect3(vertices, 120, 2.0f, 2.0f, 0.25f, 0.0078125f, 0.0078125f);
     rect3(vertices, 126, -0.875f, g->left, 0.125f, 0.03125f, 0.25f);
     rect3(vertices, 132, 0.875f, g->right, 0.125f, 0.03125f, 0.25f);
     rect3(vertices, 138, g->ballx, g->bally, g->ballz, 0.046875f, 0.046875f);
@@ -136,8 +148,20 @@ vertex float4 pong_vs(device float4* vertices, vertex_id vid) { return vertices[
 
 fragment float4 pong_fs(float4 pos) {
     float wave = 0.5f + 0.5f * sin(pos.x * 4.0f + pos.y * 3.0f + pos.z * 8.0f);
+    if (pos.z > 0.96875f) return float4(0.25f + wave * 0.25f, 0.0f, 0.015625f + wave * 0.0625f, 1.0f);
+    if (pos.z > 0.953125f) return float4(0.75f + wave * 0.25f, 0.25f + wave * 0.25f, 0.015625f, 1.0f);
+    if (pos.z > 0.9375f) return float4(0.75f + wave * 0.1875f, 0.03125f, 0.015625f + wave * 0.03125f, 1.0f);
+    if (pos.z > 0.921875f) return float4(0.015625f, 0.375f + wave * 0.25f, 0.1875f + wave * 0.125f, 1.0f);
+    if (pos.z > 0.90625f) {
+        float stars = sin(pos.x * 64.0f + pos.z * 128.0f) * sin(pos.y * 96.0f - pos.z * 64.0f);
+        if (stars > 0.9375f) return float4(0.875f, 0.9375f, 1.0f, 1.0f);
+        return float4(0.0f, 0.015625f + wave * 0.03125f, 0.125f + wave * 0.125f, 1.0f);
+    }
     if (pos.z > 0.890625f) return float4(0.015625f + wave * 0.25f, 0.03125f + wave * 0.1875f, 0.1875f + wave * 0.5f, 1.0f);
-    if (pos.z > 0.25f) return float4(0.0f, 0.5f + wave * 0.25f, 0.75f + wave * 0.25f, 1.0f);
+    if (pos.z > 0.375f) return float4(0.0f, 0.5f + wave * 0.25f, 0.75f + wave * 0.25f, 1.0f);
+    if (pos.z > 0.3125f) return float4(0.0f, 0.625f + wave * 0.25f, 1.0f, 0.0625f);
+    if (pos.z > 0.25f) return float4(0.75f, 0.03125f, 0.875f + wave * 0.125f, 0.125f);
+    if (pos.z > 0.203125f) return float4(1.0f, 0.0f, 0.5f + wave * 0.25f, 0.25f);
     if (pos.z > 0.125f) return float4(0.75f + wave * 0.25f, 0.03125f, 0.5f + wave * 0.25f, 1.0f);
     return float4(0.875f + wave * 0.125f, 0.875f + wave * 0.125f, 1.0f, 1.0f);
 }
