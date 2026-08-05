@@ -170,19 +170,15 @@ kernel void k(device float* out, texture2d<float> tex, sampler smp, coord2D c) {
 
 ### Render stages
 
-The current render subset is intentionally small and useful:
-
 ```c
-vertex float4 vs(device float4* vertices, vertex_id vid) {
-    return vertices[vid];
-}
+struct VOut { float4 pos [[position]]; float3 col; };
+struct FOut { float4 color0 [[color(0)]]; float4 color1 [[color(1)]]; float depth [[depth(any)]]; };
 
-fragment float4 fs(float4 position) {
-    return float4(1.0f, 1.0f, 1.0f, 1.0f);
-}
+vertex VOut vs(device float4* vertices, vertex_id vid) { ... }
+fragment FOut fs(VIn in) { ... }
 ```
 
-`vertex` and `fragment` functions become external AIR entry points. Vertex `float4` output is tagged as `air.position`; fragment `float4` input can consume the rasterized position; the return value targets render target 0.
+Stage structs, `[[position]]`/`[[flat]]`/`[[color(N)]]`/`[[depth(any)]]` attributes, interpolants, multiple render targets, and depth output are supported; the pixel-verifying harness checks renders with `expectpix`/`expectdepth`.
 
 ---
 

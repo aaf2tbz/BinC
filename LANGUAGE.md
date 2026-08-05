@@ -198,19 +198,29 @@ Textures use read-write access; reads/samples return a `float4` (half textures p
 
 ## Render stages
 
-The current render surface is intentionally minimal:
+Vertex and fragment functions support the full stage contract:
 
 ```c
-vertex float4 vs(device float4* vertices, vertex_id vid) {
-    return vertices[vid];
+struct VOut { float4 pos [[position]]; float3 col; };
+struct FIn  { float4 pos [[position]]; float3 col; };
+struct FOut { float4 color0 [[color(0)]]; float4 color1 [[color(1)]]; float depth [[depth(any)]]; };
+
+vertex VOut vs(device float4* vertices, vertex_id vid) {
+    VOut o;
+    o.pos = vertices[vid];
+    o.col = float3(vertices[vid].xy, 1.0f);
+    return o;
 }
 
-fragment float4 fs(float4 pos) {
-    return float4(1.0f, 1.0f, 1.0f, 1.0f);
+fragment FOut fs(FIn in) {
+    FOut o;
+    o.color0 = float4(in.col, 1.0f);
+    o.depth = in.pos.z * 0.5f + 0.5f;
+    return o;
 }
 ```
 
-Vertex output is position-only. A fragment can receive the rasterized position and return a float4 render target. The Pong example uses this to create depth-based neon color and atmospheric effects.
+Struct fields accept `[[position]]`, `[[flat]]`, `[[color(N)]]`, `[[depth(any)]]`, and `[[user(locnN)]]`. A vertex returning a struct emits `air.position` + `air.vertex_output user(locnN)` per field; a fragment taking a struct receives its fields as separate stage-in arguments (`air.fragment_input` with perspective or flat interpolation); a fragment returning a struct emits one `air.render_target` per `[[color(N)]]` field plus an `air.depth` output. The simple forms (`vertex float4`, `fragment float4`) remain supported. The harness verifies renders with `expectpix`/`expectdepth` pixel readback (see RENDER.md).
 
 ---
 

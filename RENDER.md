@@ -1,6 +1,6 @@
 # BinC rendering
 
-AIR describes render stages through named module metadata. BinC exposes the first useful part of that contract with `vertex` and `fragment` functions.
+AIR describes render stages through named module metadata. BinC exposes the render contract with `vertex` and `fragment` functions, including stage-in/out structs, interpolants, and multiple render targets.
 
 ---
 
@@ -25,7 +25,32 @@ The compiler emits:
 - `air.position` fragment input metadata for a float4 position parameter
 - `air.render_target` index 0 for the fragment float4 return value
 
-The current stage contract is position-first. It is intentionally smaller than a complete general-purpose shader interface.
+## Stage structs, interpolants, and multiple render targets
+
+Struct fields can carry `[[...]]` attributes — `[[position]]`, `[[flat]]`, `[[color(N)]]`, `[[depth(any)]]`, `[[user(locnN)]]` — enabling the full stage contract:
+
+```c
+struct VOut { float4 pos [[position]]; float3 col; };   /* col -> user(locn0) */
+struct FIn  { float4 pos [[position]]; float3 col; };
+struct FOut { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float d [[depth(any)]]; };
+
+vertex VOut vs(device float4* verts, vertex_id vid) { ... return o; }
+fragment FOut fs(FIn in) { ... return o; }
+```
+
+A vertex returning a struct emits `air.position` + `air.vertex_output user(locnN)` per field; the fragment's stage-in struct is unpacked into separate AIR arguments with `air.fragment_input user(locnN)` metadata (`air.center`/`air.perspective`, or `air.flat` for `[[flat]]` fields); a fragment returning a struct emits one `air.render_target` per `[[color(N)]]` field plus an `air.depth` entry for `[[depth(any)]]`.
+
+## Verified with a pixel-verifying render harness
+
+`binc/harness.m` gained a render mode, driven by spec directives:
+
+- `vertex <name>` / `fragment <name>` — stage functions
+- `render <w> <h> [nrt]` — offscreen RGBA32Float framebuffer(s) + Depth32Float attachment
+- `draw <n>` — triangle list from `buf 0`
+- `expectpix <rt> <x> <y> <r> <g> <b> <a>` — per-pixel comparison of a render target
+- `expectdepth <x> <y> <v>` — depth-buffer comparison
+
+`examples/render.binc` + `render.spec` exercise the whole path: a triangle with an interpolated color attribute (constant in the test so expectations are exact), dual render targets (interpolated NDC position and pixel-space position), a depth output, and clear-color verification. The fragment position is in pixel coordinates (origin top-left); depth writes require a depth-stencil state, which the harness binds.
 
 ---
 
@@ -98,10 +123,9 @@ The AIR spellings were reverse-engineered from real MSL output. Relevant files i
 
 Not currently implemented as general BinC language features:
 
-- arbitrary vertex-output structs
-- general `stage_in` records and interpolants
-- texture/sampler syntax
+- vertex/fragment textures and samplers (compute textures are supported)
 - mesh/object shaders
 - ray tracing stages
+- explicit interpolation qualifiers beyond `[[flat]]`
 
 The reference AIR probes document possible future targets but should not be confused with current compiler support.

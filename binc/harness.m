@@ -14,6 +14,15 @@
 //   out <idx> <nwords>            zero-initialized output buffer at <idx>
 //   expect <idx> <v0> <v1> ...    post-run comparison of buffer <idx>
 //   expecth <idx> <bb bb ...>     byte-exact post-run comparison of buffer <idx>
+//   tex <idx> <w> <h>             RGBA32Float texture at <idx> (compute mode), filled with
+//                                 texel(x,y) = (x+1, y+1, x+y+1, 1); kernel writes verified
+//                                 by host readback with expecttex <idx> <r> <g> <b> <a>
+// Render mode (offscreen pipeline instead of compute):
+//   vertex <name> / fragment <name>   stage functions
+//   render <w> <h> [nrt]              framebuffer size + color-attachment count
+//   draw <n>                          triangle list from buf 0
+//   expectpix <rt> <x> <y> <r> <g> <b> <a>   per-pixel render-target check
+//   expectdepth <x> <y> <v>                  depth-buffer check
 //
 // A word is a 32-bit value: tokens containing '.', 'e', or 'E' are stored as
 // float bits, anything else as int32 bits. `expect` compares int tokens
