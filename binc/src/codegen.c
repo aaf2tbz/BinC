@@ -206,11 +206,37 @@ static int vec_name(const char *s,TypeKind *k,int *n){
     else if(!strcmp(base,"uint"))*k=T_UINT32; else return 0;
     *n=w-'0'; return 1;
 }
-/* component name -> index, or -1 */
+/* component name -> index, or -1; multi-char swizzles return -1 here */
 static int comp_idx(const char *f){
     const char *names="xyzw"; const char *rgba="rgba";
     const char *p=strchr(names,f[0]); if(!p) p=strchr(rgba,f[0]);
     if(!p||f[1]) return -1; return (int)(p-(p==strchr(names,f[0])?names:rgba))%4;
+}
+/* swizzle "xy"/"wzyx"/"rga": up to 4 component indices; -1 if invalid */
+static int swizzle_idx(const char *f, int *out){
+    size_t l=strlen(f);
+    if(l<1||l>4) return -1;
+    const char *names="xyzwrgba";
+    for(size_t i=0;i<l;i++){
+        const char *p=strchr(names,f[i]);
+        if(!p) return -1;
+        int pos=(int)(p-names);
+        out[i]=pos>=4?pos-4:pos;
+    }
+    return (int)l;
+}
+/* build <nc x elt> from component indices of a vector register */
+static const char *swizzle_read(CG *c, const char *vec, const char *vty, const char *ety, const int *idxs, int nc){
+    const char *acc="undef";
+    for(int i=0;i<nc;i++){
+        const char *x=newtmp(c);
+        emit(c,"  %s = extractelement %s %s, i32 %d\n",x,vty,vec,idxs[i]);
+        char ty[32]; snprintf(ty,sizeof ty,"<%d x %s>",nc,ety);
+        const char *r=newtmp(c);
+        emit(c,"  %s = insertelement %s %s, %s %s, i32 %d\n",r,ty,acc,ety,x,i);
+        acc=r;
+    }
+    return acc;
 }
 
 /* builtins: AIR spellings probed from the metal frontend (metal -emit-llvm -S on MSL using
@@ -326,9 +352,31 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             if(e->operand->kind==E_IDENT){
                 int vi; RKind vr=resolve(c,e->operand->name,&vi);
                 if(vr==R_SCALAR && c->fn->params[vi].ty.vecn>1){
-                    Param *vp=&c->fn->params[vi]; int x=comp_idx(e->field); if(x<0||x>=vp->ty.vecn)die(0,"invalid vector component .%s",e->field);
-                    char vl[32]; ll_of(vl,sizeof vl,vp->ty.kind,vp->ty.vecn); char nm[64]; snprintf(nm,sizeof nm,"%%_%s",vp->name); const char *r=newtmp(c);
-                    emit(c,"  %s = extractelement %s %s, i32 %d\n",r,vl,nm,x); *k=scalar_vk(vp->ty.kind); c->rvw=0; return r;
+                    Param *vp=&c->fn->params[vi];
+                    int idxs[4]; int nc=swizzle_idx(e->field,idxs);
+                    if(nc<0) die(0,"invalid vector component .%s",e->field);
+                    for(int i=0;i<nc;i++) if(idxs[i]>=vp->ty.vecn) die(0,"invalid vector component .%s",e->field);
+                    char nm[64]; snprintf(nm,sizeof nm,"%%_%s",vp->name);
+                    const char *elt = vp->ty.kind==T_HALF?"float":scalar_ll(vp->ty.kind);
+                    char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",vp->ty.vecn,elt);
+                    *k=scalar_vk(vp->ty.kind);
+                    if(nc==1){ const char *r=newtmp(c); c->rvw=0;
+                        emit(c,"  %s = extractelement %s %s, i32 %d\n",r,vty,nm,idxs[0]); return r; }
+                    c->rvw=nc;
+                    return swizzle_read(c,nm,vty,elt,idxs,nc);
+                }
+                if(vr==R_LOCAL && c->locs[vi].vecn>1){
+                    int idxs[4]; int nc=swizzle_idx(e->field,idxs);
+                    if(nc<0) die(0,"invalid vector component .%s",e->field);
+                    for(int i=0;i<nc;i++) if(idxs[i]>=c->locs[vi].vecn) die(0,"invalid vector component .%s",e->field);
+                    if(nc>1){
+                        LInfo li={c->locs[vi].kind,c->locs[vi].sname,0,-1,1,c->locs[vi].vecn};
+                        ValKind lk; const char *lv=emit_load_t(c,&li,c->locs[vi].slot,&lk);
+                        const char *elt = c->locs[vi].kind==T_HALF?"float":scalar_ll(c->locs[vi].kind);
+                        char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",c->locs[vi].vecn,elt);
+                        *k=scalar_vk(c->locs[vi].kind); c->rvw=nc;
+                        return swizzle_read(c,lv,vty,elt,idxs,nc);
+                    }
                 }
             }
             if(e->operand->kind==E_IDENT){

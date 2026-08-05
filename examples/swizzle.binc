@@ -1,0 +1,9 @@
+kernel void k(device float* out, coord1D i) {
+    float4 a = float4(1.0f, 2.0f, 3.0f, 4.0f);
+    float2 b = a.xy;                /* 1, 2 */
+    float3 c = a.wzy;               /* 4, 3, 2 */
+    float4 d = a.zzxx;              /* 3, 3, 1, 1 */
+    out[i]      = b.x + b.y;        /* 3 */
+    out[i + 8]  = c.x * 10.0f + c.y + c.z;        /* 45 */
+    out[i + 16] = d.x * 100.0f + d.y * 10.0f + d.z + d.w * 0.1f; /* 331.1 */
+}
