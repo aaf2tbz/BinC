@@ -4,6 +4,25 @@
 #include <string.h>
 #include <stdio.h>
 
+#define BINC_VERSION "0.1.0"
+
+static const char *usage_text =
+    "usage: binc <file.binc> [options]\n"
+    "options:\n"
+    "  -o <file.metallib>   output metallib path (default: <base>.metallib)\n"
+    "  --emit-ll            stop after emitting AIR .ll (no metal/metallib)\n"
+    "  -h, --help           show this help and exit\n"
+    "  --version            show the compiler version and exit\n"
+    "environment: METAL / METALLIB override the AIR tool invocations\n"
+    "             (defaults: \"xcrun metal\" / \"xcrun metallib\")\n";
+
+/* METAL/METALLIB env override, defaulting to xcrun (works on local and CI
+ * macOS runners regardless of which Xcode is selected). */
+static const char *tool(const char *env, const char *def){
+    const char *v = getenv(env);
+    return v && *v ? v : def;
+}
+
 static char *read_file(const char *path, size_t *out_n) {
     FILE *f = fopen(path, "rb");
     if (!f) die(0, "cannot open %s", path);
@@ -41,12 +60,16 @@ static void emit_host_header(const char *lib, const Program *p){
 }
 
 int main(int argc, char **argv) {
-    const char *infile = NULL; const char *outfile = NULL;
+    const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i+1 < argc) outfile = argv[++i];
+        else if (!strcmp(argv[i], "--emit-ll")) emit_ll_only = 1;
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { fputs(usage_text, stdout); return 0; }
+        else if (!strcmp(argv[i], "--version")) { printf("binc %s\n", BINC_VERSION); return 0; }
         else if (argv[i][0] != '-') infile = argv[i];
+        else { fprintf(stderr, "binc: unknown option %s\n", argv[i]); fputs(usage_text, stderr); return 2; }
     }
-    if (!infile) { fprintf(stderr, "usage: binc <file.binc> [-o out.metallib]\n"); return 2; }
+    if (!infile) { fputs(usage_text, stderr); return 2; }
 
     size_t srclen; char *src = read_file(infile, &srclen);
 
@@ -69,13 +92,15 @@ int main(int argc, char **argv) {
     if (had_errors()) { remove(ll); return 1; }
     fprintf(stderr, "binc: emitted AIR -> %s\n", ll);
 
+    if (emit_ll_only) { fprintf(stderr, "binc: stopped after AIR emission (--emit-ll)\n"); return 0; }
+
     char cmd[1600];
-    snprintf(cmd, sizeof cmd, "metal %s -c -o %s 2>&1", ll, air);
+    snprintf(cmd, sizeof cmd, "%s %s -c -o %s 2>&1", tool("METAL","xcrun metal"), ll, air);
     fprintf(stderr, "binc: $ %s\n", cmd);
     int rc = system(cmd);
     if (rc != 0) { fprintf(stderr, "binc: metal front-end failed (exit %d)\n", rc); return 1; }
 
-    snprintf(cmd, sizeof cmd, "metallib %s -o %s 2>&1", air, lib);
+    snprintf(cmd, sizeof cmd, "%s %s -o %s 2>&1", tool("METALLIB","xcrun metallib"), air, lib);
     fprintf(stderr, "binc: $ %s\n", cmd);
     rc = system(cmd);
     if (rc != 0) { fprintf(stderr, "binc: metallib link failed (exit %d)\n", rc); return 1; }
