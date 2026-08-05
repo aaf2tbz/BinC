@@ -1,9 +1,9 @@
 /* BinC owns the complete game: simulation, physics, rounds, lives, scoreboard,
- * 3-D arena geometry, motion trails, vertex stage, and atmospheric fragment stage. */
+ * 3-D arena geometry, timer, particles, vertex stage, and atmosphere. */
 struct Game {
     float ballx, bally, ballz, vx, vy, vz;
     float left, right, trail, clock, round_time;
-    int round, lives, flash, event, player_score, ai_score;
+    int round, lives, flash, event, player_score, ai_score, game_over;
 };
 
 void rect3(device float4* v, int b, float cx, float cy, float z, float hw, float hh) {
@@ -13,6 +13,14 @@ void rect3(device float4* v, int b, float cx, float cy, float z, float hw, float
     v[b + 3] = float4(cx - hw, cy - hh, z, 1.0f);
     v[b + 4] = float4(cx + hw, cy + hh, z, 1.0f);
     v[b + 5] = float4(cx - hw, cy + hh, z, 1.0f);
+}
+
+void continue_from_left(device Game* g) {
+    g[0].ballx = -0.75f; g[0].vx = fabs(g[0].vx); g[0].round_time = 30.0f;
+}
+
+void continue_from_right(device Game* g) {
+    g[0].ballx = 0.75f; g[0].vx = -fabs(g[0].vx); g[0].round_time = 30.0f;
 }
 
 void arena(device float4* v, int b, int round) {
@@ -34,18 +42,11 @@ void arena(device float4* v, int b, int round) {
     rect3(v, b + 84, 0.0f, 0.875f, 0.25f, 0.03125f + round * 0.00390625f, 0.015625f);
 }
 
-void reset_ball(device Game* g, float direction) {
-    g[0].ballx = 0.0f; g[0].bally = 0.0f; g[0].ballz = 0.1875f;
-    g[0].vx = direction * 0.5f; g[0].vy = 0.25f; g[0].vz = 0.0f;
-    g[0].round_time = 30.0f;
-}
-
 kernel void update(device Game* g, device float4* vertices, float dt, float input) {
     g->event = 0;
     g->clock += dt;
     g->round_time -= dt;
     float factor = pow(1.25f, g->round - 1);
-    float ball_speed = 0.5f * factor;
     float paddle_speed = 0.75f * factor;
     g->trail = g->ballx;
     g->ballx += g->vx * factor * dt;
@@ -65,16 +66,31 @@ kernel void update(device Game* g, device float4* vertices, float dt, float inpu
     if (g->right < -0.75f) g->right = -0.75f;
     if (g->bally > 0.875f || g->bally < -0.875f) { g->vy = -g->vy; g->event = 1; }
     if (g->ballz > 0.375f || g->ballz < 0.0625f) g->vz = -g->vz;
-    if (g->ballx < -0.75f && fabs(g->bally - g->left) < 0.25f) { g->vx = fabs(g->vx); g->event = 1; }
-    if (g->ballx > 0.75f && fabs(g->bally - g->right) < 0.25f) { g->vx = -fabs(g->vx); g->event = 1; }
-    /* A ball through the player costs a life and restarts the same round. */
-    if (g->ballx < -1.0f) {
-        g->lives -= 1; g->event = 2; g->flash = 1; reset_ball(g, 1.0f);
-        if (g->lives < 1) { g->lives = 3; g->round = 1; g->player_score = 0; g->ai_score = 0; }
+    /* Impact angle follows the side of the paddle that was hit. */
+    if (g->ballx < -0.75f && fabs(g->bally - g->left) < 0.25f) {
+        float impact = g->bally - g->left;
+        if (impact > 0.125f) g->vy = fabs(g->vy);
+        if (impact < -0.125f) g->vy = -fabs(g->vy);
+        g->vx = fabs(g->vx); g->event = 1;
     }
-    /* Score, timeout, and restart advance an infinite round ladder. */
-    if (g->ballx > 1.0f || g->round_time < 0.0f) {
-        g->player_score += 1; g->round += 1; g->event = 3; g->flash = 2; reset_ball(g, -1.0f);
+    if (g->ballx > 0.75f && fabs(g->bally - g->right) < 0.25f) {
+        float impact = g->bally - g->right;
+        if (impact > 0.125f) g->vy = fabs(g->vy);
+        if (impact < -0.125f) g->vy = -fabs(g->vy);
+        g->vx = -fabs(g->vx); g->event = 1;
+    }
+    /* Passing the player costs a life and restarts the current round at its current speed. */
+    if (g->ballx < -1.0f) {
+        g->lives -= 1; g->ai_score += 1; g->event = 2; g->flash = 1; continue_from_left(g);
+        if (g->lives < 1 || g->ai_score >= 5) { g->game_over = 1; g->round = 0; }
+    }
+    /* A right-side score advances the round without teleporting the ball to center. */
+    if (g->ballx > 1.0f) {
+        g->player_score += 1; g->round += 1; g->event = 3; g->flash = 2; continue_from_right(g);
+        if (g->player_score >= 5) g->game_over = 2;
+    } else if (g->round_time < 0.0f) {
+        /* A timeout only accelerates the current flight; it never resets the ball. */
+        g->round += 1; g->round_time = 30.0f; g->event = 3; g->flash = 2;
     }
 
     arena(vertices, 0, g->round);
@@ -88,16 +104,31 @@ kernel void update(device Game* g, device float4* vertices, float dt, float inpu
     rect3(vertices, 126, -0.875f, g->left, 0.125f, 0.03125f, 0.25f);
     rect3(vertices, 132, 0.875f, g->right, 0.125f, 0.03125f, 0.25f);
     rect3(vertices, 138, g->ballx, g->bally, g->ballz, 0.046875f, 0.046875f);
+    /* Timer: ten GPU bars at the top edge of the playfield. */
+    for (int i = 0; i < 10; i += 1) {
+        if (i * 3 < g->round_time) rect3(vertices, 144 + i * 6, -0.25f + i * 0.0546875f, 0.953125f, 0.28125f, 0.0234375f, 0.0078125f);
+        else rect3(vertices, 144 + i * 6, 2.0f, 2.0f, 0.0625f, 0.0078125f, 0.0078125f);
+    }
     /* Lives and compact score bars are GPU-generated HUD geometry. */
     for (int i = 0; i < 3; i += 1) {
-        if (i < g->lives) rect3(vertices, 144 + i * 6, -0.75f + i * 0.046875f, 0.875f, 0.125f, 0.015625f, 0.015625f);
-        else rect3(vertices, 144 + i * 6, 2.0f, 2.0f, 0.125f, 0.015625f, 0.015625f);
+        if (i < g->lives) rect3(vertices, 204 + i * 6, -0.75f + i * 0.046875f, 0.875f, 0.125f, 0.015625f, 0.015625f);
+        else rect3(vertices, 204 + i * 6, 2.0f, 2.0f, 0.125f, 0.015625f, 0.015625f);
     }
     for (int i = 0; i < 5; i += 1) {
-        if (i < g->player_score % 6) rect3(vertices, 162 + i * 6, -0.5f + i * 0.03125f, 0.875f, 0.0625f, 0.01171875f, 0.0078125f);
-        else rect3(vertices, 162 + i * 6, 2.0f, 2.0f, 0.0625f, 0.0078125f, 0.0078125f);
-        if (i < g->ai_score % 6) rect3(vertices, 192 + i * 6, 0.5f - i * 0.03125f, 0.875f, 0.0625f, 0.01171875f, 0.0078125f);
-        else rect3(vertices, 192 + i * 6, 2.0f, 2.0f, 0.0625f, 0.0078125f, 0.0078125f);
+        if (i < g->player_score % 6) rect3(vertices, 222 + i * 6, -0.5f + i * 0.03125f, 0.875f, 0.0625f, 0.01171875f, 0.0078125f);
+        else rect3(vertices, 222 + i * 6, 2.0f, 2.0f, 0.0625f, 0.0078125f, 0.0078125f);
+        if (i < g->ai_score % 6) rect3(vertices, 252 + i * 6, 0.5f - i * 0.03125f, 0.875f, 0.0625f, 0.01171875f, 0.0078125f);
+        else rect3(vertices, 252 + i * 6, 2.0f, 2.0f, 0.0625f, 0.0078125f, 0.0078125f);
+    }
+    /* Particle ribbons around the ball and both paddles. */
+    for (int i = 0; i < 8; i += 1) {
+        float a = g->clock * 4.0f + i;
+        rect3(vertices, 282 + i * 6, g->ballx + sin(a) * 0.09375f, g->bally + cos(a) * 0.09375f, 0.09375f + i * 0.0078125f, 0.0078125f, 0.0078125f);
+    }
+    for (int i = 0; i < 4; i += 1) {
+        float a = g->clock * 3.0f + i;
+        rect3(vertices, 330 + i * 6, -0.875f + sin(a) * 0.0625f, g->left + cos(a) * 0.28125f, 0.078125f, 0.0078125f, 0.0078125f);
+        rect3(vertices, 354 + i * 6, 0.875f + sin(a) * 0.0625f, g->right + cos(a) * 0.28125f, 0.078125f, 0.0078125f, 0.0078125f);
     }
 }
 
