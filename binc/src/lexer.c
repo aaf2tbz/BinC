@@ -5,11 +5,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+int g_last_line=0, g_last_col=0, g_err_count=0;
+jmp_buf *g_recover=NULL;
+
 _Noreturn void die(int line, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
-    fprintf(stderr, line ? "binc: error (line %d): " : "binc: error: ", line);
-    vfprintf(stderr, fmt, ap); fprintf(stderr, "\n"); va_end(ap); exit(1);
+    int ln=line?line:g_last_line, col=line?0:g_last_col;
+    if(ln&&col) fprintf(stderr,"binc: error (line %d, col %d): ",ln,col);
+    else if(ln) fprintf(stderr,"binc: error (line %d): ",ln);
+    else fprintf(stderr,"binc: error: ");
+    vfprintf(stderr, fmt, ap); fprintf(stderr,"\n"); va_end(ap);
+    g_err_count++;
+    if(g_recover) longjmp(*g_recover, 1);
+    exit(1);
 }
+int had_errors(void){ return g_err_count>0; }
 static char *dup_n(const char *s, size_t n){ char *p=malloc(n+1); memcpy(p,s,n); p[n]='\0'; return p; }
 typedef struct { const char *p; int line; const char *line_start; } L;
 static Token tk(TokKind k,int ln,int col){ Token t={k,NULL,0,0,ln,col}; return t; }

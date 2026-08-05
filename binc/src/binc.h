@@ -5,6 +5,7 @@
 #define BINC_H
 #include <stddef.h>
 #include <stdio.h>
+#include <setjmp.h>
 
 typedef enum { AS_DEVICE=1, AS_CONSTANT=2, AS_THREADGROUP=3, AS_THREAD=0 } AddrSpace;
 typedef enum { UN_UNIFORM=0, UN_VARYING=1 } Uniformity;
@@ -40,6 +41,7 @@ typedef enum { A_ASSIGN, A_ADDEQ, A_SUBEQ, A_MULEQ, A_DIVEQ, A_MODEQ } AssignOp;
 
 struct Expr {
     ExprKind kind;
+    int line, col;
     double   fval; long ival; int bval;
     char    *name, *field;
     BinOp    bop; CmpOp cmp; LogOp log; AssignOp aop;
@@ -53,6 +55,7 @@ typedef struct { Stmt *stmts; size_t n; } Block;
 typedef enum { S_EXPR, S_DECL, S_RETURN, S_IF, S_FOR, S_WHILE, S_BLOCK, S_BREAK, S_CONTINUE } StmtKind;
 struct Stmt {
     StmtKind kind;
+    int line, col;
     Expr *expr;
     /* S_DECL */ Type ty; char *name; Expr *init;
     /* S_IF / S_WHILE */ Expr *cond;
@@ -63,7 +66,7 @@ struct Stmt {
 
 typedef struct { char *name; Type ty; Uniformity un; } Param;
 typedef enum { ST_NONE, ST_VERTEX, ST_FRAGMENT } Stage;
-typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; } Function;
+typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; int line; } Function;
 typedef struct { char *name; Type ty; } Field;
 typedef struct { char *tag; Field *fields; size_t nfields; } StructDef;
 typedef struct { StructDef *structs; size_t nstructs; Function *funcs; size_t nfuncs; } Program;
@@ -87,6 +90,11 @@ typedef struct { Token *toks; size_t n; size_t i; } TokStream;
 
 void lex(const char *src, Token **out, size_t *out_n);
 _Noreturn void die(int line, const char *fmt, ...);
+int had_errors(void);
+/* position of the expression/statement being lowered, for located die(0, ...) errors */
+extern int g_last_line, g_last_col, g_err_count;
+/* when set, die() reports and longjmps to the recovery point instead of exiting */
+extern jmp_buf *g_recover;
 Program parse_program(TokStream *ts);
 void emit_air(FILE *out, const Program *prog);
 #endif

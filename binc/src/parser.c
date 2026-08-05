@@ -36,7 +36,7 @@ static int starts_scalar_type(TokStream *ts){ TokKind k=peek(ts)->kind;
     return k==TK_KW_FLOAT||k==TK_KW_HALF||k==TK_KW_INT||k==TK_KW_UINT||k==TK_KW_BOOL||
            k==TK_KW_COORD||k==TK_KW_GRID_EXTENT; }
 
-static Expr *E(ExprKind k){ Expr *e=calloc(1,sizeof(Expr)); e->kind=k; return e; }
+static Expr *E(ExprKind k,int line,int col){ Expr *e=calloc(1,sizeof(Expr)); e->kind=k; e->line=line; e->col=col; return e; }
 static Expr *parse_expr(TokStream *ts);
 
 /* known struct tags, for disambiguating `Dog d;` local declarations */
@@ -45,25 +45,26 @@ static int is_stag(const char *s){ for(size_t i=0;i<nstags;i++) if(!strcmp(stags
 
 static Expr *parse_primary(TokStream *ts){
     Token *t=peek(ts);
-    if(t->kind==TK_FCONST){ advance(ts); Expr *e=E(E_FCONST); e->fval=t->fval; return e; }
-    if(t->kind==TK_ICONST){ advance(ts); Expr *e=E(E_ICONST); e->ival=t->ival; return e; }
-    if(t->kind==TK_KW_TRUE){ advance(ts); Expr *e=E(E_BOOL); e->bval=1; return e; }
-    if(t->kind==TK_KW_FALSE){ advance(ts); Expr *e=E(E_BOOL); e->bval=0; return e; }
+    if(t->kind==TK_FCONST){ advance(ts); Expr *e=E(E_FCONST,t->line,t->col); e->fval=t->fval; return e; }
+    if(t->kind==TK_ICONST){ advance(ts); Expr *e=E(E_ICONST,t->line,t->col); e->ival=t->ival; return e; }
+    if(t->kind==TK_KW_TRUE){ advance(ts); Expr *e=E(E_BOOL,t->line,t->col); e->bval=1; return e; }
+    if(t->kind==TK_KW_FALSE){ advance(ts); Expr *e=E(E_BOOL,t->line,t->col); e->bval=0; return e; }
     if((t->kind==TK_KW_FLOAT||t->kind==TK_KW_INT||t->kind==TK_KW_UINT)&&t->ival>1){
         /* vector constructor: float4(...) etc. — synthesize the type name as the callee */
-        advance(ts); Expr *e=E(E_IDENT); char nm[16];
+        advance(ts); Expr *e=E(E_IDENT,t->line,t->col); char nm[16];
         snprintf(nm,sizeof nm,"%s%d",t->kind==TK_KW_FLOAT?"float":t->kind==TK_KW_INT?"int":"uint",(int)t->ival);
         e->name=strdup(nm); return e; }
-    if(t->kind==TK_IDENT){ advance(ts); Expr *e=E(E_IDENT); e->name=strdup(t->text); return e; }
+    if(t->kind==TK_IDENT){ advance(ts); Expr *e=E(E_IDENT,t->line,t->col); e->name=strdup(t->text); return e; }
     if(accept(ts,TK_LPAREN)){ Expr *e=parse_expr(ts); expect(ts,TK_RPAREN,")"); return e; }
     die(t->line,"expected an expression");
 }
 static Expr *parse_postfix(TokStream *ts){
     Expr *e=parse_primary(ts);
     for(;;){
-        if(peek(ts)->kind==TK_LPAREN){ /* calls may also target an atomic method (`acc->add`) */
-            if(e->kind!=E_IDENT && !(e->kind==E_FIELD && e->field)) die(peek(ts)->line,"callee must be a function or method name");
-            advance(ts); Expr *n=E(E_CALL); n->name=e->kind==E_IDENT?e->name:e->field; if(e->kind!=E_IDENT)n->callee=e;
+        Token *ot=peek(ts);
+        if(ot->kind==TK_LPAREN){ /* calls may also target an atomic method (`acc->add`) */
+            if(e->kind!=E_IDENT && !(e->kind==E_FIELD && e->field)) die(ot->line,"callee must be a function or method name");
+            advance(ts); Expr *n=E(E_CALL,ot->line,ot->col); n->name=e->kind==E_IDENT?e->name:e->field; if(e->kind!=E_IDENT)n->callee=e;
             Expr **args=NULL; size_t na=0,cap=0;
             while(peek(ts)->kind!=TK_RPAREN){
                 if(na==cap){cap=cap?cap*2:4;args=realloc(args,cap*sizeof(Expr*));}
@@ -71,65 +72,66 @@ static Expr *parse_postfix(TokStream *ts){
                 if(!accept(ts,TK_COMMA))break; }
             expect(ts,TK_RPAREN,")");
             n->args=args; n->nargs=na; e=n; }
-        else if(accept(ts,TK_LBRACK)){ Expr *i=parse_expr(ts); expect(ts,TK_RBRACK,"]");
-            Expr *n=E(E_INDEX); n->operand=e; n->rhs=i; e=n; }
-        else if(accept(ts,TK_DOT)){ Token *f=peek(ts); expect(ts,TK_IDENT,"field after .");
-            Expr *n=E(E_FIELD); n->operand=e; n->field=strdup(f->text); e=n; }
-        else if(accept(ts,TK_ARROW)){ Token *f=peek(ts); expect(ts,TK_IDENT,"field after ->");
-            Expr *d=E(E_DEREF); d->operand=e; /* p->f == (*p).f == p[id].f */
-            Expr *n=E(E_FIELD); n->operand=d; n->field=strdup(f->text); e=n; }
+        else if(ot->kind==TK_LBRACK){ advance(ts); Expr *i=parse_expr(ts); expect(ts,TK_RBRACK,"]");
+            Expr *n=E(E_INDEX,ot->line,ot->col); n->operand=e; n->rhs=i; e=n; }
+        else if(ot->kind==TK_DOT){ advance(ts); Token *f=peek(ts); expect(ts,TK_IDENT,"field after .");
+            Expr *n=E(E_FIELD,ot->line,ot->col); n->operand=e; n->field=strdup(f->text); e=n; }
+        else if(ot->kind==TK_ARROW){ advance(ts); Token *f=peek(ts); expect(ts,TK_IDENT,"field after ->");
+            Expr *d=E(E_DEREF,ot->line,ot->col); d->operand=e; /* p->f == (*p).f == p[id].f */
+            Expr *n=E(E_FIELD,ot->line,ot->col); n->operand=d; n->field=strdup(f->text); e=n; }
         else break;
     }
     return e;
 }
 static Expr *parse_unary(TokStream *ts){
-    if(accept(ts,TK_MINUS)){ Expr *o=parse_unary(ts); Expr *e=E(E_NEG); e->operand=o; return e; }
-    if(accept(ts,TK_BANG)){ Expr *o=parse_unary(ts); Expr *e=E(E_NOT); e->operand=o; return e; }
-    if(accept(ts,TK_STAR)){ Expr *o=parse_unary(ts); Expr *e=E(E_DEREF); e->operand=o; return e; }
+    Token *ut=peek(ts);
+    if(ut->kind==TK_MINUS){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_NEG,ut->line,ut->col); e->operand=o; return e; }
+    if(ut->kind==TK_BANG){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_NOT,ut->line,ut->col); e->operand=o; return e; }
+    if(ut->kind==TK_STAR){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_DEREF,ut->line,ut->col); e->operand=o; return e; }
     return parse_postfix(ts);
 }
 static Expr *parse_mul(TokStream *ts){
     Expr *l=parse_unary(ts);
-    for(;;){ TokKind k=peek(ts)->kind; BinOp op;
+    for(;;){ Token *ot=peek(ts); TokKind k=ot->kind; BinOp op;
         if(k==TK_STAR)op=B_MUL; else if(k==TK_SLASH)op=B_DIV; else if(k==TK_PERCENT)op=B_MOD; else break;
-        advance(ts); Expr *r=parse_unary(ts); Expr *e=E(E_BIN); e->bop=op; e->lhs=l; e->rhs=r; l=e; }
+        advance(ts); Expr *r=parse_unary(ts); Expr *e=E(E_BIN,ot->line,ot->col); e->bop=op; e->lhs=l; e->rhs=r; l=e; }
     return l;
 }
 static Expr *parse_add(TokStream *ts){
     Expr *l=parse_mul(ts);
-    for(;;){ TokKind k=peek(ts)->kind; if(k!=TK_PLUS&&k!=TK_MINUS)break; BinOp op=k==TK_PLUS?B_ADD:B_SUB;
-        advance(ts); Expr *r=parse_mul(ts); Expr *e=E(E_BIN); e->bop=op; e->lhs=l; e->rhs=r; l=e; }
+    for(;;){ Token *ot=peek(ts); TokKind k=ot->kind; if(k!=TK_PLUS&&k!=TK_MINUS)break; BinOp op=k==TK_PLUS?B_ADD:B_SUB;
+        advance(ts); Expr *r=parse_mul(ts); Expr *e=E(E_BIN,ot->line,ot->col); e->bop=op; e->lhs=l; e->rhs=r; l=e; }
     return l;
 }
 static Expr *parse_rel(TokStream *ts){
     Expr *l=parse_add(ts);
-    for(;;){ TokKind k=peek(ts)->kind; CmpOp op;
+    for(;;){ Token *ot=peek(ts); TokKind k=ot->kind; CmpOp op;
         if(k==TK_LT)op=C_LT; else if(k==TK_LE)op=C_LE; else if(k==TK_GT)op=C_GT; else if(k==TK_GE)op=C_GE; else break;
-        advance(ts); Expr *r=parse_add(ts); Expr *e=E(E_CMP); e->cmp=op; e->lhs=l; e->rhs=r; l=e; }
+        advance(ts); Expr *r=parse_add(ts); Expr *e=E(E_CMP,ot->line,ot->col); e->cmp=op; e->lhs=l; e->rhs=r; l=e; }
     return l;
 }
 static Expr *parse_eq(TokStream *ts){
     Expr *l=parse_rel(ts);
-    for(;;){ TokKind k=peek(ts)->kind; if(k!=TK_EQEQ&&k!=TK_NEQ)break; CmpOp op=k==TK_EQEQ?C_EQ:C_NE;
-        advance(ts); Expr *r=parse_rel(ts); Expr *e=E(E_CMP); e->cmp=op; e->lhs=l; e->rhs=r; l=e; }
+    for(;;){ Token *ot=peek(ts); TokKind k=ot->kind; if(k!=TK_EQEQ&&k!=TK_NEQ)break; CmpOp op=k==TK_EQEQ?C_EQ:C_NE;
+        advance(ts); Expr *r=parse_rel(ts); Expr *e=E(E_CMP,ot->line,ot->col); e->cmp=op; e->lhs=l; e->rhs=r; l=e; }
     return l;
 }
 static Expr *parse_and(TokStream *ts){
     Expr *l=parse_eq(ts);
-    while(peek(ts)->kind==TK_AND){ advance(ts); Expr *r=parse_eq(ts); Expr *e=E(E_LOG); e->log=L_AND; e->lhs=l; e->rhs=r; l=e; }
+    while(peek(ts)->kind==TK_AND){ Token *ot=peek(ts); advance(ts); Expr *r=parse_eq(ts); Expr *e=E(E_LOG,ot->line,ot->col); e->log=L_AND; e->lhs=l; e->rhs=r; l=e; }
     return l;
 }
 static Expr *parse_or(TokStream *ts){
     Expr *l=parse_and(ts);
-    while(peek(ts)->kind==TK_OR){ advance(ts); Expr *r=parse_and(ts); Expr *e=E(E_LOG); e->log=L_OR; e->lhs=l; e->rhs=r; l=e; }
+    while(peek(ts)->kind==TK_OR){ Token *ot=peek(ts); advance(ts); Expr *r=parse_and(ts); Expr *e=E(E_LOG,ot->line,ot->col); e->log=L_OR; e->lhs=l; e->rhs=r; l=e; }
     return l;
 }
 static Expr *parse_assign(TokStream *ts){
-    Expr *l=parse_or(ts); TokKind k=peek(ts)->kind; AssignOp op;
+    Expr *l=parse_or(ts); Token *ot=peek(ts); TokKind k=ot->kind; AssignOp op;
     if(k==TK_EQ)op=A_ASSIGN; else if(k==TK_PLUSEQ)op=A_ADDEQ; else if(k==TK_MINUSEQ)op=A_SUBEQ;
     else if(k==TK_STAREQ)op=A_MULEQ; else if(k==TK_SLASHEQ)op=A_DIVEQ; else if(k==TK_MODEQ)op=A_MODEQ;
     else return l;
-    advance(ts); Expr *r=parse_assign(ts); Expr *e=E(E_ASSIGN); e->aop=op; e->operand=l; e->rhs=r; return e;
+    advance(ts); Expr *r=parse_assign(ts); Expr *e=E(E_ASSIGN,ot->line,ot->col); e->aop=op; e->operand=l; e->rhs=r; return e;
 }
 static Expr *parse_expr(TokStream *ts){ return parse_assign(ts); }
 
@@ -138,36 +140,38 @@ static Block parse_braced(TokStream *ts){ /* assumes '{' consumed */
     Stmt *s=NULL; size_t n=0,cap=0;
     while(peek(ts)->kind!=TK_RBRACE&&peek(ts)->kind!=TK_EOF){
         if(n==cap){cap=cap?cap*2:8;s=realloc(s,cap*sizeof(Stmt));} s[n++]=parse_stmt(ts); }
-    expect(ts,TK_RBRACE,"}"); return (Block){s,n};
+    expect(ts,TK_RBRACE,"}");
+    return (Block){s,n};
 }
 static Block parse_block_or_stmt(TokStream *ts){
     if(accept(ts,TK_LBRACE)) return parse_braced(ts);
     Stmt *s=malloc(sizeof(Stmt)); s[0]=parse_stmt(ts); return (Block){s,1};
 }
 static Stmt parse_stmt(TokStream *ts){
-    if(accept(ts,TK_KW_RETURN)){ Stmt st={0}; st.kind=S_RETURN;
+    Token *kt=peek(ts);
+    if(kt->kind==TK_KW_RETURN){ advance(ts); Stmt st={0}; st.kind=S_RETURN; st.line=kt->line; st.col=kt->col;
         if(peek(ts)->kind!=TK_SEMI) st.expr=parse_expr(ts);
         expect(ts,TK_SEMI,";"); return st; }
-    if(accept(ts,TK_KW_BREAK)){ expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_BREAK; return st; }
-    if(accept(ts,TK_KW_CONTINUE)){ expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_CONTINUE; return st; }
-    if(peek(ts)->kind==TK_KW_IF){
+    if(kt->kind==TK_KW_BREAK){ advance(ts); expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_BREAK; st.line=kt->line; st.col=kt->col; return st; }
+    if(kt->kind==TK_KW_CONTINUE){ advance(ts); expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_CONTINUE; st.line=kt->line; st.col=kt->col; return st; }
+    if(kt->kind==TK_KW_IF){
         advance(ts); expect(ts,TK_LPAREN,"("); Expr *cond=parse_expr(ts); expect(ts,TK_RPAREN,")");
-        Stmt st={0}; st.kind=S_IF; st.cond=cond; st.then_b=parse_block_or_stmt(ts);
+        Stmt st={0}; st.kind=S_IF; st.line=kt->line; st.col=kt->col; st.cond=cond; st.then_b=parse_block_or_stmt(ts);
         st.else_b = accept(ts,TK_KW_ELSE)? parse_block_or_stmt(ts) : ((Block){NULL,0});
         return st;
     }
-    if(peek(ts)->kind==TK_KW_WHILE){
+    if(kt->kind==TK_KW_WHILE){
         advance(ts); expect(ts,TK_LPAREN,"("); Expr *cond=parse_expr(ts); expect(ts,TK_RPAREN,")");
-        Stmt st={0}; st.kind=S_WHILE; st.cond=cond; st.then_b=parse_block_or_stmt(ts); return st;
+        Stmt st={0}; st.kind=S_WHILE; st.line=kt->line; st.col=kt->col; st.cond=cond; st.then_b=parse_block_or_stmt(ts); return st;
     }
-    if(peek(ts)->kind==TK_KW_FOR){
-        advance(ts); expect(ts,TK_LPAREN,"("); Stmt st={0}; st.kind=S_FOR;
+    if(kt->kind==TK_KW_FOR){
+        advance(ts); expect(ts,TK_LPAREN,"("); Stmt st={0}; st.kind=S_FOR; st.line=kt->line; st.col=kt->col;
         if(peek(ts)->kind!=TK_SEMI){
             Stmt *fi=malloc(sizeof(Stmt)); memset(fi,0,sizeof *fi);
             if(starts_scalar_type(ts)){ Type ty=parse_type(ts); Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
                 Expr *init=NULL; if(accept(ts,TK_EQ))init=parse_expr(ts);
-                fi->kind=S_DECL; fi->ty=ty; fi->name=strdup(nm->text); fi->init=init; }
-            else { fi->kind=S_EXPR; fi->expr=parse_expr(ts); }
+                fi->kind=S_DECL; fi->line=nm->line; fi->col=nm->col; fi->ty=ty; fi->name=strdup(nm->text); fi->init=init; }
+            else { fi->kind=S_EXPR; fi->line=peek(ts)->line; fi->expr=parse_expr(ts); }
             st.for_init=fi;
         }
         expect(ts,TK_SEMI,";");
@@ -177,19 +181,19 @@ static Stmt parse_stmt(TokStream *ts){
         expect(ts,TK_RPAREN,")");
         st.then_b=parse_block_or_stmt(ts); return st;
     }
-    if(peek(ts)->kind==TK_LBRACE){ advance(ts); Block b=parse_braced(ts); Stmt st={0}; st.kind=S_BLOCK; st.then_b=b; return st; }
-    if(peek(ts)->kind==TK_IDENT&&is_stag(peek(ts)->text)&&ts->toks[ts->i+1].kind==TK_IDENT){
+    if(kt->kind==TK_LBRACE){ advance(ts); Block b=parse_braced(ts); Stmt st={0}; st.kind=S_BLOCK; st.line=kt->line; st.col=kt->col; st.then_b=b; return st; }
+    if(kt->kind==TK_IDENT&&is_stag(kt->text)&&ts->toks[ts->i+1].kind==TK_IDENT){
         /* struct local: `Dog d;` */
         Type ty={0}; ty.kind=T_STRUCT; ty.struct_name=strdup(advance(ts)->text);
         Token *nm=peek(ts); expect(ts,TK_IDENT,"name"); expect(ts,TK_SEMI,";");
-        Stmt st={0}; st.kind=S_DECL; st.ty=ty; st.name=strdup(nm->text); return st;
+        Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); return st;
     }
     if(starts_scalar_type(ts)){
         Type ty=parse_type(ts); Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
         Expr *init=NULL; if(accept(ts,TK_EQ))init=parse_expr(ts); expect(ts,TK_SEMI,";");
-        Stmt st={0}; st.kind=S_DECL; st.ty=ty; st.name=strdup(nm->text); st.init=init; return st;
+        Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init; return st;
     }
-    Expr *e=parse_expr(ts); expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_EXPR; st.expr=e; return st;
+    Expr *e=parse_expr(ts); expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_EXPR; st.line=e->line; st.col=e->col; st.expr=e; return st;
 }
 
 static void parse_function(TokStream *ts, Program *prog){
@@ -222,7 +226,7 @@ static void parse_function(TokStream *ts, Program *prog){
     if(coords>1) die(peek(ts)->line,"a kernel may have only one coordinate domain parameter");
     if(coords) is_kernel=1;
     prog->funcs=realloc(prog->funcs,(prog->nfuncs+1)*sizeof(Function));
-    prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,stage,ret};
+    prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,stage,ret,nm->line};
 }
 static void parse_struct(TokStream *ts, Program *prog){
     Token *tag=peek(ts); expect(ts,TK_IDENT,"struct tag"); expect(ts,TK_LBRACE,"{");

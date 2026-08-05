@@ -237,6 +237,7 @@ static const char *as_op(AssignOp a, int isfloat, int isuns){
 }
 
 static const char *gen_rval(CG *c, Expr *e, ValKind *k){
+    g_last_line=e->line; g_last_col=e->col;
     c->rvw=0; /* cases set this to the vector width of their result, if any */
     switch(e->kind){
     case E_FCONST:{ *k=VK_F32; char *s=malloc(32); snprintf(s,32,"%e",e->fval); return s; }
@@ -450,6 +451,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
     die(0,"unreachable");
 }
 static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
+    g_last_line=e->line; g_last_col=e->col;
     if(e->kind==E_IDENT){
         int idx; RKind r=resolve(c,e->name,&idx);
         if(r==R_LOCAL){ li->tk=c->locs[idx].kind; li->sname=c->locs[idx].sname; li->as=0; li->pi=-1;
@@ -516,6 +518,7 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
 }
 /* produce an i1 condition from any expression */
 static const char *gen_cond(CG *c, Expr *e){
+    g_last_line=e->line; g_last_col=e->col;
     ValKind k; const char *v=gen_rval(c,e,&k);
     if(c->rvw) die(0,"vector value in a condition");
     if(k==VK_I1) return v;
@@ -538,6 +541,7 @@ static int is_varying(CG *c, Expr *e){
 
 static void gen_block(CG *c, Block *b);
 static void gen_stmt(CG *c, Stmt *s){
+    g_last_line=s->line; g_last_col=s->col;
     switch(s->kind){
     case S_EXPR:{ ValKind k; if(s->expr) gen_rval(c,s->expr,&k); break; }
     case S_DECL:{ TypeKind kk=s->ty.kind;
@@ -573,7 +577,7 @@ static void gen_stmt(CG *c, Stmt *s){
     case S_BLOCK:{ gen_block(c,&s->then_b); break; }
     case S_IF:{
         int div=is_varying(c,s->cond);
-        if(div) fprintf(stderr,"binc: note: 'if' condition is data-dependent (divergent branch) — may cost SIMT performance\n");
+        if(div) fprintf(stderr,"binc: note (line %d): 'if' condition is data-dependent (divergent branch) — may cost SIMT performance\n",s->cond->line);
         const char *cv=gen_cond(c,s->cond);
         int tl=newlbl(c), fl=newlbl(c), en=newlbl(c);
         int has_else=s->else_b.n>0;
@@ -583,7 +587,7 @@ static void gen_stmt(CG *c, Stmt *s){
         lbl(c,en); break; }
     case S_WHILE:{
         int div=is_varying(c,s->cond);
-        if(div) fprintf(stderr,"binc: note: 'while' condition is data-dependent — divergent\n");
+        if(div) fprintf(stderr,"binc: note (line %d): 'while' condition is data-dependent — divergent\n",s->cond->line);
         int cond=newlbl(c), body=newlbl(c), en=newlbl(c);
         emit(c,"  br label %%bb%d\n",cond); lbl(c,cond);
         const char *cv=gen_cond(c,s->cond); emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",cv,body,en);
@@ -594,7 +598,7 @@ static void gen_stmt(CG *c, Stmt *s){
     case S_FOR:{
         if(s->for_init) gen_stmt(c,s->for_init);
         int div=s->for_cond&&is_varying(c,s->for_cond);
-        if(div) fprintf(stderr,"binc: note: 'for' bound is data-dependent (varying) — per-thread loop; consider a uniform bound\n");
+        if(div) fprintf(stderr,"binc: note (line %d): 'for' bound is data-dependent (varying) — per-thread loop; consider a uniform bound\n",s->for_cond->line);
         int cond=newlbl(c), body=newlbl(c), inc=newlbl(c), en=newlbl(c);
         emit(c,"  br label %%bb%d\n",cond); lbl(c,cond);
         if(s->for_cond){
@@ -672,6 +676,7 @@ void emit_air(FILE *out, const Program *prog){
         }
         /* signature: explicit domains carry coordinate/grid built-ins by value;
          * implicit kernels retain the historical hidden scalar thread id. */
+        g_last_line=fn->line; g_last_col=0;
         char sig[2048]; size_t so=0;
         if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,"define void @%s(",fn->name);
         else { char rl[32]; if(fn->ret.kind==T_VOID) snprintf(rl,sizeof rl,"void"); else ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
