@@ -34,6 +34,10 @@ test-negative: binc
 	chmod +x check_negative.sh
 	./check_negative.sh
 
+# Mutation fuzz smoke: the compiler must never crash or hang on malformed input
+test-fuzz: binc
+	python3 fuzz.py
+
 # GPU-free CI pipeline: build, negative tests, fuzz, compile all examples
 ci: binc test-negative test-fuzz examples
 	@echo "CI OK"
