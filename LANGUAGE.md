@@ -180,6 +180,20 @@ Scalar and vector (per-element) built-ins include:
 
 Vector comparisons (`v1 < v2`, `==`, etc.) produce bool-vector masks for use with `select`.
 
+## Textures and samplers
+
+`texture2d<float>` (also `half`/`int`/`uint`) and `sampler` are supported kernel parameter types:
+
+```c
+kernel void k(device float* out, texture2d<float> tex, sampler smp, coord2D c) {
+    float4 t = tex.read(int2(c.global.x, c.global.y));   // direct texel read
+    float4 s = tex.sample(smp, float2(0.5f, 0.5f));      // filtered sample
+    tex.write(float4(1.0f), int2(c.global.x, c.global.y)); // texel write
+}
+```
+
+Textures use read-write access; reads/samples return a `float4` (half textures promote), and `write` takes a `float4` plus an `int2` coordinate. The harness binds textures declared with `tex <idx> <w> <h>` (deterministic fill: texel(x,y) = (x+1, y+1, x+y+1, 1)) and verifies kernel writes with `expecttex <idx> <r> <g> <b> <a>` host readback.
+
 ---
 
 ## Render stages
