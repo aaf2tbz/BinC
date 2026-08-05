@@ -1934,6 +1934,7 @@ void emit_air(FILE *out, const Program *prog){
         if(fn->stage==ST_NONE) for(size_t pi2=0;pi2<fn->nparams;pi2++){ Param *p=&fn->params[pi2];
             if(p->ty.kind!=T_STRUCT||p->ty.is_ptr) continue;
             StructDef *sd=find_struct(prog,p->ty.struct_name);
+            if(!sd) die(0,"unknown struct %s",p->ty.struct_name);
             int sal; struct_layout(sd,&sal);
             char *slot=newtmp(&c); sb_printf(c.pre,"  %s = alloca %%struct.%s, align %d\n",slot,p->ty.struct_name,sal);
             char an[64]; snprintf(an,sizeof an,"%%_%s",p->name);
