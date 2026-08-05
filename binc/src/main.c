@@ -60,6 +60,18 @@ static void emit_host_header(const char *lib, const Program *p){
 }
 
 int main(int argc, char **argv) {
+    /* Detect the installed Metal toolchain's SDK and derive the AIR contract:
+     * air64_v<SDK+2>-apple-macosx<SDK>.0.0 with !air.version 2.<SDK-18>.
+     * The local Xcode beta (SDK 27) emits v29/2.9; GitHub CI's stable Xcode
+     * (SDK 26) expects v28/2.8 — hardcoding either breaks the other. */
+    {
+        int sdk=27;
+        FILE *pf=popen("xcrun --show-sdk-version 2>/dev/null","r");
+        if(pf){ char buf[64]; if(fgets(buf,sizeof buf,pf)) sdk=atoi(buf); pclose(pf); }
+        if(sdk<20) sdk=27; /* probe failed: keep the known-good default */
+        char triple[64]; snprintf(triple,sizeof triple,"air64_v%d-apple-macosx%d.0.0",sdk+2,sdk);
+        binc_set_air(triple,sdk,sdk-18);
+    }
     const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i+1 < argc) outfile = argv[++i];
