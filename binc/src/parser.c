@@ -282,10 +282,12 @@ static Stmt parse_stmt(TokStream *ts){
     }
     if(kt->kind==TK_LBRACE){ advance(ts); Block b=parse_braced(ts); Stmt st={0}; st.kind=S_BLOCK; st.line=kt->line; st.col=kt->col; st.then_b=b; return st; }
     if(kt->kind==TK_IDENT&&is_stag(kt->text)&&ts->toks[ts->i+1].kind==TK_IDENT){
-        /* struct local: `Dog d;` */
+        /* struct local: `Dog d;` / `Dog d = other;` */
         Type ty={0}; ty.kind=T_STRUCT; ty.struct_name=strdup(advance(ts)->text);
-        Token *nm=peek(ts); expect(ts,TK_IDENT,"name"); expect(ts,TK_SEMI,";");
-        Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); return st;
+        Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
+        Expr *init=NULL; if(accept(ts,TK_EQ)) init=parse_expr(ts);
+        expect(ts,TK_SEMI,";");
+        Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init; return st;
     }
     /* optional `const` qualifier on a local declaration */
     if(peek(ts)->kind==TK_KW_CONSTANT && ts->i+1<ts->n){
@@ -308,7 +310,7 @@ static void parse_function(TokStream *ts, Program *prog){
     Type ret=parse_type(ts);
     if(stage!=ST_NONE&&is_kernel) die(peek(ts)->line,"render stages cannot also be kernels");
     if(is_kernel&&ret.kind!=T_VOID) die(peek(ts)->line,"kernel functions must return void");
-    if(ret.kind==T_STRUCT) { if(stage==ST_NONE) die(peek(ts)->line,"struct-by-value return only in vertex/fragment functions"); }
+    if(ret.kind==T_STRUCT) { /* struct-by-value returns: plain + stage functions; kernels keep void */ }
     if(ret.matn) die(peek(ts)->line,"matrix-by-value return not supported");
     Token *nm=peek(ts); expect(ts,TK_IDENT,"function name"); expect(ts,TK_LPAREN,"(");
     Param *params=NULL; size_t np=0,cap=0;
@@ -320,7 +322,10 @@ static void parse_function(TokStream *ts, Program *prog){
             if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); }
             if(ty.as!=AS_THREADGROUP) die(pn->line,"only threadgroup parameters may be arrays");
         }
-        if(ty.kind==T_STRUCT&&!ty.is_ptr){ if(stage!=ST_FRAGMENT) die(pn->line,"struct-by-value parameter only in fragment functions (stage-in)"); }
+        if(ty.kind==T_STRUCT&&!ty.is_ptr){
+            if(is_kernel) die(pn->line,"kernel struct-by-value parameters not supported");
+            if(stage!=ST_NONE&&stage!=ST_FRAGMENT) die(pn->line,"vertex struct parameters must be pointers");
+        }
         if(ty.matn&&!ty.is_ptr) die(pn->line,"matrix-by-value parameter not supported");
         if(ty.kind==T_COORD&&ty.is_ptr) die(pn->line,"coordinates cannot be pointers");
         if(np==cap){cap=cap?cap*2:4;params=realloc(params,cap*sizeof(Param));}

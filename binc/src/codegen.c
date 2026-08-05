@@ -72,8 +72,9 @@ typedef struct {
     int brk_l[32], cont_l[32], nloops; /* break/continue label stack */
     int uses_sync; /* body contains a barrier -> function must be convergent, not nosync */
     int divergent; /* current control-flow region is varying/divergent */
-    int rvw; /* vector width of the value gen_rval just returned (0 = scalar) */
-    int rmat; /* matrix width of the value gen_rval just returned (0 = not a matrix) */
+    int rvw; /* vector width of the last gen_rval result, 0 = scalar */
+    int rmat; /* matrix width of the last gen_rval result, 0 = not a matrix */
+    const char *rstruct; /* struct tag of the last gen_rval result, NULL = not a struct value */
 } CG;
 static char *newtmp(CG *c){ char *s=malloc(16); snprintf(s,16,"%%t%d",c->tmp++); return s; }
 static int newlbl(CG *c){ return c->lblc++; }
@@ -224,7 +225,15 @@ static void fill_param_li(CG *c,int pi,LInfo *li){
 
 /* load an lvalue, promoting half to float; *k gets the expression-level kind, c->rvw the vector width */
 static const char *emit_load_t(CG *c, LInfo *li, const char *addr, ValKind *k){
-    if(li->tk==T_STRUCT) die(0,"cannot use a whole struct as a value");
+    if(li->tk==T_STRUCT){
+        StructDef *sd=find_struct(c->prog,li->sname);
+        int sal; struct_layout(sd,&sal);
+        char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",li->sname);
+        char sp[64]; snprintf(sp,sizeof sp,"%%struct.%s*",li->sname);
+        const char *v=newtmp(c);
+        emit(c,"  %s = load %s, %s %s, align %d\n",v,sn,sp,addr,sal);
+        *k=VK_I32; c->rvw=0; c->rstruct=li->sname; return v;
+    }
     char pty[96]; pty_str(pty,sizeof pty,li->tk,li->sname,li->as,li->is_local,li->vecn,li->matn);
     char ll[32]; ll_of(ll,sizeof ll,li->tk,li->vecn); const char *v=newtmp(c);
     emit(c,"  %s = load %s, %s %s, align %d\n",v,ll,pty,addr,type_align(li->tk,li->vecn));
@@ -584,7 +593,7 @@ static const char *as_op(AssignOp a, int isfloat, int isuns){
 
 static const char *gen_rval(CG *c, Expr *e, ValKind *k){
     g_last_line=e->line; g_last_col=e->col;
-    c->rvw=0; c->rmat=0; /* cases set these to the width of their result, if any */
+    c->rvw=0; c->rmat=0; c->rstruct=NULL; /* cases set these to the width of their result, if any */
     switch(e->kind){
     case E_FCONST:{ *k=VK_F32; return fconst(c,e->fval); }
     case E_ICONST:{ *k=VK_I32; char *s=malloc(16); snprintf(s,16,"%ld",e->ival); return s; }
@@ -634,6 +643,22 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
          * coordinate itself is the global position; local/group values are appended as
          * hidden built-in arguments when referenced. */
         if(e->kind==E_FIELD){
+            /* field access on a struct VALUE (function-call result): extractvalue */
+            if(e->operand->kind==E_CALL){
+                ValKind ck; const char *cv=gen_rval(c,e->operand,&ck);
+                if(!c->rstruct) die(0,"field access on a non-struct value");
+                StructDef *sd=find_struct(c->prog,c->rstruct);
+                int fi=-1; for(size_t i=0;i<sd->nfields;i++) if(!strcmp(sd->fields[i].name,e->field)){ fi=(int)i; break; }
+                if(fi<0) die(0,"no field .%s on %s",e->field,c->rstruct);
+                Field *fd=&sd->fields[fi];
+                const char *ev=newtmp(c);
+                char fl[32]; type_ll(fl,sizeof fl,fd->ty.kind,fd->ty.struct_name,fd->ty.vecn);
+                emit(c,"  %s = extractvalue %%struct.%s %s, %d\n",ev,c->rstruct,cv,fi);
+                if(fd->ty.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,ev); ev=w; }
+                *k=scalar_vk(fd->ty.kind); c->rvw=fd->ty.vecn>1?fd->ty.vecn:0;
+                c->rstruct = fd->ty.kind==T_STRUCT?fd->ty.struct_name:NULL;
+                return ev;
+            }
             if(e->operand->kind==E_IDENT){
                 int vi; RKind vr=resolve(c,e->operand->name,&vi);
                 if(vr==R_SCALAR && c->fn->params[vi].ty.vecn>1){
@@ -940,7 +965,15 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             emit(c,"  store %s %s, %s %s, align %d\n",mty,rhs,mty,addr,mat_align(rm));
             *k=VK_F32; c->rvw=0; c->rmat=rm; return rhs;
         }
-        if(li.tk==T_STRUCT) die(0,"cannot assign a whole struct");
+        if(li.tk==T_STRUCT){
+            if(e->aop!=A_ASSIGN) die(0,"compound assignment on a struct");
+            if(!c->rstruct||strcmp(c->rstruct,li.sname)) die(0,"struct type mismatch in assignment");
+            char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",li.sname);
+            char sp[64]; snprintf(sp,sizeof sp,"%%struct.%s*",li.sname);
+            int sal; StructDef *sd=find_struct(c->prog,li.sname); struct_layout(sd,&sal);
+            emit(c,"  store %s %s, %s %s, align %d\n",sn,rhs,sp,addr,sal);
+            *k=VK_I32; c->rvw=0; c->rstruct=li.sname; return rhs;
+        }
         int vw=li.vecn;
         if(e->aop!=A_ASSIGN){
             ValKind ck; const char *cur=emit_load_t(c,&li,addr,&ck);
@@ -1176,7 +1209,14 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             char args[2048]; size_t o=0;
             for(size_t i=0;i<f->nparams;i++){ Param *p=&f->params[i];
                 if(i)o+=snprintf(args+o,sizeof args-o,", ");
-                if(p->ty.is_ptr){ Expr *a=e->args[i]; int pi;
+                if(p->ty.kind==T_STRUCT && !p->ty.is_ptr){
+                    /* struct by-value argument */
+                    ValKind ak; const char *v=gen_rval(c,e->args[i],&ak);
+                    if(!c->rstruct||strcmp(c->rstruct,p->ty.struct_name))
+                        die(0,"%s: struct type mismatch on argument %d",e->name,(int)i+1);
+                    char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",p->ty.struct_name);
+                    o+=snprintf(args+o,sizeof args-o,"%s %s",sn,v);
+                } else if(p->ty.is_ptr){ Expr *a=e->args[i]; int pi;
                     if(a->kind!=E_IDENT||resolve(c,a->name,&pi)!=R_PTR)
                         die(0,"%s: pointer argument %d must be one of the caller's buffer parameters",e->name,(int)i+1);
                     Param *cp=&c->fn->params[pi];
@@ -1194,7 +1234,13 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     o+=snprintf(args+o,sizeof args-o,"%s %s",ll,sv); }
             }
             if(f->ret.kind==T_VOID){ emit(c,"  call void @%s(%s)\n",f->name,args); *k=VK_I32; c->rvw=0; return "0"; }
-            const char *r=newtmp(c); char rll[32]; ll_of(rll,sizeof rll,f->ret.kind,f->ret.vecn);
+            const char *r=newtmp(c);
+            if(f->ret.kind==T_STRUCT){
+                char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",f->ret.struct_name);
+                emit(c,"  %s = call %s @%s(%s)\n",r,sn,f->name,args);
+                *k=VK_I32; c->rvw=0; c->rstruct=f->ret.struct_name; return r;
+            }
+            char rll[32]; ll_of(rll,sizeof rll,f->ret.kind,f->ret.vecn);
             emit(c,"  %s = call %s @%s(%s)\n",r,rll,f->name,args);
             if(f->ret.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,r); r=w; }
             *k=scalar_vk(f->ret.kind); c->rvw=f->ret.vecn>1?f->ret.vecn:0; return r;
@@ -1379,11 +1425,14 @@ static void gen_stmt(CG *c, Stmt *s){
     case S_DECL:{ TypeKind kk=s->ty.kind;
         if(kk==T_STRUCT){ StructDef *sd=find_struct(c->prog,s->ty.struct_name);
             if(!sd) die(0,"unknown struct %s",s->ty.struct_name);
-            if(s->init) die(0,"struct local initializer not supported; assign fields instead");
             int sal; struct_layout(sd,&sal);
             char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %%struct.%s, align %d\n",slot,s->ty.struct_name,sal);
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
             c->locs[c->nlocs++]=(Loc){s->name,slot,kk,s->ty.struct_name,0,0,0};
+            if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
+                if(!c->rstruct||strcmp(c->rstruct,s->ty.struct_name)) die(0,"struct type mismatch in initializer");
+                char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",s->ty.struct_name);
+                emit(c,"  store %s %s, %s* %s, align %d\n",sn,v,sn,slot,sal); }
             break; }
         if(s->ty.matn){
             char mty[32]; mll_of(mty,sizeof mty,s->ty.matn);
@@ -1407,7 +1456,13 @@ static void gen_stmt(CG *c, Stmt *s){
         if(s->expr){ if(rk==T_VOID) die(0,"return with a value in void function");
             if(rk==T_STRUCT){
                 /* stage struct return: build the literal output struct from a struct local */
-                if(c->fn->stage==ST_NONE) die(0,"struct-by-value return is only supported in vertex/fragment functions");
+                if(c->fn->stage==ST_NONE){
+                    /* plain function: return the struct value directly */
+                    ValKind k; const char *v=gen_rval(c,s->expr,&k);
+                    if(!c->rstruct||strcmp(c->rstruct,c->fn->ret.struct_name)) die(0,"struct type mismatch in return");
+                    char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",c->fn->ret.struct_name);
+                    emit(c,"  ret %s %s\n",sn,v);
+                } else {
                 if(s->expr->kind!=E_IDENT) die(0,"stage struct returns must name a struct local");
                 int li; if(resolve(c,s->expr->name,&li)!=R_LOCAL||c->locs[li].kind!=T_STRUCT)
                     die(0,"stage struct returns must name a struct local");
@@ -1427,7 +1482,7 @@ static void gen_stmt(CG *c, Stmt *s){
                 }
                 char lt[256]; stage_lit_type(lt,sizeof lt,sd);
                 emit(c,"  ret %s %s\n",lt,lit);
-            } else {
+            } } else {
                 ValKind k; const char *v=gen_rval(c,s->expr,&k);
                 const char *sv=to_storage(c,v,k,c->rvw,rk,c->fn->ret.vecn);
                 char ll[32]; ll_of(ll,sizeof ll,rk,c->fn->ret.vecn);
@@ -1762,7 +1817,8 @@ void emit_air(FILE *out, const Program *prog){
         if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,"define void @%s(",fn->name);
         else { char rl[64];
             if(fn->ret.kind==T_VOID) snprintf(rl,sizeof rl,"void");
-            else if(fn->ret.kind==T_STRUCT){ StructDef *sd=find_struct(prog,fn->ret.struct_name); stage_lit_type(rl,sizeof rl,sd); }
+            else if(fn->ret.kind==T_STRUCT){ if(fn->stage==ST_NONE) snprintf(rl,sizeof rl,"%%struct.%s",fn->ret.struct_name);
+                else { StructDef *sd=find_struct(prog,fn->ret.struct_name); stage_lit_type(rl,sizeof rl,sd); } }
             else ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
             so+=snprintf(sig+so,sizeof sig-so,"define %s%s @%s(",fn->stage==ST_NONE?"internal ":"",rl,fn->name); }
         int emitted=0;
@@ -1786,7 +1842,9 @@ void emit_air(FILE *out, const Program *prog){
                 so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(%d)* nocapture noundef %%_%s",elt,p->ty.as,p->name); }
             else if(fn->is_kernel){ char ll[32]; pll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn,p->ty.matn);
                 so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(2)* nocapture noundef readonly align %d dereferenceable(%d) %%_%s",ll,tal(p->ty.kind,p->ty.vecn,p->ty.matn),tsz(p->ty.kind,p->ty.vecn,p->ty.matn),p->name); }
-            else { char ll[32]; pll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn,p->ty.matn);
+            else { char ll[32];
+                if(p->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",p->ty.struct_name);
+                else pll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn,p->ty.matn);
                 so+=snprintf(sig+so,sizeof sig-so,"%s noundef %%_%s",ll,p->name); } }
         if(fn->is_kernel && c.explicit_domain && c.coord_param>=0){ Param *cp=&fn->params[c.coord_param]; char cl[32]; coord_ll(&cp->ty,cl,sizeof cl);
             so+=snprintf(sig+so,sizeof sig-so,", %s noundef %%_%s_local, %s noundef %%_%s_group",cl,cp->name,cl,cp->name); }
@@ -1799,6 +1857,18 @@ void emit_air(FILE *out, const Program *prog){
         else if(c.explicit_domain && c.coord_param>=0 && fn->params[c.coord_param].ty.coordn==1){
             c.idx=malloc(32); snprintf(c.idx,32,"%%_%s",fn->params[c.coord_param].name);
             const char *z=newtmp(&c); sb_printf(c.pre,"  %s = zext i32 %s to i64\n",z,c.idx); c.idx=(char*)z;
+        }
+        /* plain-function struct-by-value params: copy the value argument into a local */
+        if(fn->stage==ST_NONE) for(size_t pi2=0;pi2<fn->nparams;pi2++){ Param *p=&fn->params[pi2];
+            if(p->ty.kind!=T_STRUCT||p->ty.is_ptr) continue;
+            StructDef *sd=find_struct(prog,p->ty.struct_name);
+            int sal; struct_layout(sd,&sal);
+            char *slot=newtmp(&c); sb_printf(c.pre,"  %s = alloca %%struct.%s, align %d\n",slot,p->ty.struct_name,sal);
+            char an[64]; snprintf(an,sizeof an,"%%_%s",p->name);
+            char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",p->ty.struct_name);
+            emit(&c,"  store %s %s, %s* %s, align %d\n",sn,an,sn,slot,sal);
+            c.locs=realloc(c.locs,(c.nlocs+1)*sizeof(Loc));
+            c.locs[c.nlocs++]=(Loc){p->name,slot,T_STRUCT,p->ty.struct_name,0,0,0};
         }
         /* fragment stage-in struct: unpack the argument registers into a struct local */
         if(fn->stage==ST_FRAGMENT) for(size_t pi2=0;pi2<fn->nparams;pi2++){ Param *p=&fn->params[pi2];
