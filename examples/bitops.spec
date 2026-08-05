@@ -1,0 +1,6 @@
+kernel bitops
+grid 1
+out 0 8
+out 1 5
+expect 0 0x000F000F 0x00FF00FF 0x0FF00FF0 0xFF00FF00 0x0FF00FF0 0x0000FF00 0x00800000 0x400
+expect 1 -4 1 7 4 255

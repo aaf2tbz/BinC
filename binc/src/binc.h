@@ -31,13 +31,14 @@ typedef enum { VK_F32, VK_I32, VK_U32, VK_I1, VK_PTR } ValKind;
 typedef struct Expr Expr;
 typedef enum {
     E_FCONST, E_ICONST, E_BOOL, E_IDENT, E_DEREF, E_FIELD, E_INDEX,
-    E_BIN, E_CMP, E_LOG, E_NOT, E_NEG, E_ASSIGN, E_CALL
+    E_BIN, E_CMP, E_LOG, E_NOT, E_NEG, E_COMPL, E_ASSIGN, E_CALL
 } ExprKind;
 
-typedef enum { B_ADD, B_SUB, B_MUL, B_DIV, B_MOD } BinOp;
+typedef enum { B_ADD, B_SUB, B_MUL, B_DIV, B_MOD, B_AND, B_OR, B_XOR, B_SHL, B_SHR } BinOp;
 typedef enum { C_EQ, C_NE, C_LT, C_LE, C_GT, C_GE } CmpOp;
 typedef enum { L_AND, L_OR } LogOp;
-typedef enum { A_ASSIGN, A_ADDEQ, A_SUBEQ, A_MULEQ, A_DIVEQ, A_MODEQ } AssignOp;
+typedef enum { A_ASSIGN, A_ADDEQ, A_SUBEQ, A_MULEQ, A_DIVEQ, A_MODEQ,
+               A_ANDEQ, A_OREQ, A_XOREQ, A_SHLEQ, A_SHREQ } AssignOp;
 
 struct Expr {
     ExprKind kind;
@@ -78,7 +79,9 @@ typedef enum {
     TK_STAR, TK_COMMA, TK_SEMI, TK_ARROW, TK_DOT,
     TK_PLUS, TK_MINUS, TK_SLASH, TK_PERCENT, TK_BANG,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_LE, TK_GT, TK_GE, TK_AND, TK_OR,
+    TK_AMP, TK_PIPE, TK_CARET, TK_TILDE, TK_SHL, TK_SHR,
     TK_PLUSEQ, TK_MINUSEQ, TK_STAREQ, TK_SLASHEQ, TK_MODEQ,
+    TK_AMPEQ, TK_PIPEEQ, TK_CARETEQ, TK_SHLEQ, TK_SHREQ,
     TK_KW_STRUCT, TK_KW_KERNEL, TK_KW_VOID, TK_KW_FLOAT, TK_KW_HALF, TK_KW_INT, TK_KW_UINT, TK_KW_BOOL,
     TK_KW_RETURN, TK_KW_IF, TK_KW_ELSE, TK_KW_FOR, TK_KW_WHILE, TK_KW_TRUE, TK_KW_FALSE,
     TK_KW_BREAK, TK_KW_CONTINUE,

@@ -53,12 +53,25 @@ void lex(const char *src, Token **out, size_t *out_n){
         if(c=='%'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_MODEQ,ln,col));}else{PUSH(tk(TK_PERCENT,ln,col));} continue;}
         if(c=='!'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_NEQ,ln,col));}else{PUSH(tk(TK_BANG,ln,col));} continue;}
         if(c=='='){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_EQEQ,ln,col));}else{PUSH(tk(TK_EQ,ln,col));} continue;}
-        if(c=='<'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_LE,ln,col));}else{PUSH(tk(TK_LT,ln,col));} continue;}
-        if(c=='>'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_GE,ln,col));}else{PUSH(tk(TK_GT,ln,col));} continue;}
-        if(c=='&'){l.p++; if(*l.p=='&'){l.p++;PUSH(tk(TK_AND,ln,col));}else die(ln,"unexpected '&'"); continue;}
-        if(c=='|'){l.p++; if(*l.p=='|'){l.p++;PUSH(tk(TK_OR,ln,col));}else die(ln,"unexpected '|'"); continue;}
+        if(c=='<'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_LE,ln,col));}
+                   else if(*l.p=='<'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_SHLEQ,ln,col));}else{PUSH(tk(TK_SHL,ln,col));}}
+                   else {PUSH(tk(TK_LT,ln,col));} continue;}
+        if(c=='>'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_GE,ln,col));}
+                   else if(*l.p=='>'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_SHREQ,ln,col));}else{PUSH(tk(TK_SHR,ln,col));}}
+                   else {PUSH(tk(TK_GT,ln,col));} continue;}
+        if(c=='&'){l.p++; if(*l.p=='&'){l.p++;PUSH(tk(TK_AND,ln,col));}
+                   else if(*l.p=='='){l.p++;PUSH(tk(TK_AMPEQ,ln,col));} else {PUSH(tk(TK_AMP,ln,col));} continue;}
+        if(c=='|'){l.p++; if(*l.p=='|'){l.p++;PUSH(tk(TK_OR,ln,col));}
+                   else if(*l.p=='='){l.p++;PUSH(tk(TK_PIPEEQ,ln,col));} else {PUSH(tk(TK_PIPE,ln,col));} continue;}
+        if(c=='^'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_CARETEQ,ln,col));}else{PUSH(tk(TK_CARET,ln,col));} continue;}
+        if(c=='~'){l.p++;PUSH(tk(TK_TILDE,ln,col));continue;}
         if(isdigit((unsigned char)c)){
             const char *s=l.p; int isint=1;
+            if(l.p[0]=='0'&&(l.p[1]=='x'||l.p[1]=='X')){
+                l.p+=2; while(*l.p&&isxdigit((unsigned char)*l.p))l.p++;
+                char *num=dup_n(s,(size_t)(l.p-s));
+                Token x=tk(TK_ICONST,ln,col); x.ival=(long)strtoul(num+2,NULL,16); free(num); PUSH(x); continue;
+            }
             while(*l.p&&(isdigit((unsigned char)*l.p)||*l.p=='.')){ if(*l.p=='.')isint=0; l.p++; }
             char *num=dup_n(s,(size_t)(l.p-s));
             if(*l.p=='f'||*l.p=='F'){ isint=0; l.p++; }

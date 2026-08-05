@@ -87,13 +87,15 @@ static Expr *parse_unary(TokStream *ts){
     Token *ut=peek(ts);
     if(ut->kind==TK_MINUS){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_NEG,ut->line,ut->col); e->operand=o; return e; }
     if(ut->kind==TK_BANG){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_NOT,ut->line,ut->col); e->operand=o; return e; }
+    if(ut->kind==TK_TILDE){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_COMPL,ut->line,ut->col); e->operand=o; return e; }
     if(ut->kind==TK_STAR){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_DEREF,ut->line,ut->col); e->operand=o; return e; }
     return parse_postfix(ts);
 }
 static Expr *parse_mul(TokStream *ts){
     Expr *l=parse_unary(ts);
     for(;;){ Token *ot=peek(ts); TokKind k=ot->kind; BinOp op;
-        if(k==TK_STAR)op=B_MUL; else if(k==TK_SLASH)op=B_DIV; else if(k==TK_PERCENT)op=B_MOD; else break;
+        if(k==TK_STAR)op=B_MUL; else if(k==TK_SLASH)op=B_DIV; else if(k==TK_PERCENT)op=B_MOD;
+        else if(k==TK_SHL)op=B_SHL; else if(k==TK_SHR)op=B_SHR; else break;
         advance(ts); Expr *r=parse_unary(ts); Expr *e=E(E_BIN,ot->line,ot->col); e->bop=op; e->lhs=l; e->rhs=r; l=e; }
     return l;
 }
@@ -116,9 +118,27 @@ static Expr *parse_eq(TokStream *ts){
         advance(ts); Expr *r=parse_rel(ts); Expr *e=E(E_CMP,ot->line,ot->col); e->cmp=op; e->lhs=l; e->rhs=r; l=e; }
     return l;
 }
-static Expr *parse_and(TokStream *ts){
+static Expr *parse_bitor(TokStream *ts);
+static Expr *parse_bitxor(TokStream *ts);
+static Expr *parse_bitand(TokStream *ts);
+static Expr *parse_bitor(TokStream *ts){
+    Expr *l=parse_bitxor(ts);
+    while(peek(ts)->kind==TK_PIPE){ Token *ot=peek(ts); advance(ts); Expr *r=parse_bitxor(ts); Expr *e=E(E_BIN,ot->line,ot->col); e->bop=B_OR; e->lhs=l; e->rhs=r; l=e; }
+    return l;
+}
+static Expr *parse_bitxor(TokStream *ts){
+    Expr *l=parse_bitand(ts);
+    while(peek(ts)->kind==TK_CARET){ Token *ot=peek(ts); advance(ts); Expr *r=parse_bitand(ts); Expr *e=E(E_BIN,ot->line,ot->col); e->bop=B_XOR; e->lhs=l; e->rhs=r; l=e; }
+    return l;
+}
+static Expr *parse_bitand(TokStream *ts){
     Expr *l=parse_eq(ts);
-    while(peek(ts)->kind==TK_AND){ Token *ot=peek(ts); advance(ts); Expr *r=parse_eq(ts); Expr *e=E(E_LOG,ot->line,ot->col); e->log=L_AND; e->lhs=l; e->rhs=r; l=e; }
+    while(peek(ts)->kind==TK_AMP){ Token *ot=peek(ts); advance(ts); Expr *r=parse_eq(ts); Expr *e=E(E_BIN,ot->line,ot->col); e->bop=B_AND; e->lhs=l; e->rhs=r; l=e; }
+    return l;
+}
+static Expr *parse_and(TokStream *ts){
+    Expr *l=parse_bitor(ts);
+    while(peek(ts)->kind==TK_AND){ Token *ot=peek(ts); advance(ts); Expr *r=parse_bitor(ts); Expr *e=E(E_LOG,ot->line,ot->col); e->log=L_AND; e->lhs=l; e->rhs=r; l=e; }
     return l;
 }
 static Expr *parse_or(TokStream *ts){
@@ -130,6 +150,8 @@ static Expr *parse_assign(TokStream *ts){
     Expr *l=parse_or(ts); Token *ot=peek(ts); TokKind k=ot->kind; AssignOp op;
     if(k==TK_EQ)op=A_ASSIGN; else if(k==TK_PLUSEQ)op=A_ADDEQ; else if(k==TK_MINUSEQ)op=A_SUBEQ;
     else if(k==TK_STAREQ)op=A_MULEQ; else if(k==TK_SLASHEQ)op=A_DIVEQ; else if(k==TK_MODEQ)op=A_MODEQ;
+    else if(k==TK_AMPEQ)op=A_ANDEQ; else if(k==TK_PIPEEQ)op=A_OREQ; else if(k==TK_CARETEQ)op=A_XOREQ;
+    else if(k==TK_SHLEQ)op=A_SHLEQ; else if(k==TK_SHREQ)op=A_SHREQ;
     else return l;
     advance(ts); Expr *r=parse_assign(ts); Expr *e=E(E_ASSIGN,ot->line,ot->col); e->aop=op; e->operand=l; e->rhs=r; return e;
 }

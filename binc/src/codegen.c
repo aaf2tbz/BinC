@@ -229,11 +229,23 @@ static const char *cmp_name(CmpOp op,int isfloat,int isuns){
     switch(op){ case C_EQ:return "eq"; case C_NE:return "ne"; case C_LT:return "slt";
         case C_LE:return "sle"; case C_GT:return "sgt"; case C_GE:return "sge"; } return "eq";
 }
+static int bitwise_bin(BinOp b){ return b==B_AND||b==B_OR||b==B_XOR||b==B_SHL||b==B_SHR; }
+static const char *bin_op(BinOp b, int isf, int uns){
+    if(isf) switch(b){ case B_ADD:return "fadd fast"; case B_SUB:return "fsub fast"; case B_MUL:return "fmul fast";
+        case B_DIV:return "fdiv fast"; case B_MOD:return "frem fast"; default:return NULL; }
+    switch(b){ case B_ADD:return "add"; case B_SUB:return "sub"; case B_MUL:return "mul";
+        case B_DIV:return uns?"udiv":"sdiv"; case B_MOD:return uns?"urem":"srem";
+        case B_AND:return "and"; case B_OR:return "or"; case B_XOR:return "xor";
+        case B_SHL:return "shl"; case B_SHR:return uns?"lshr":"ashr"; default:return NULL; }
+}
+static int bitwise_assign(AssignOp a){ return a==A_ANDEQ||a==A_OREQ||a==A_XOREQ||a==A_SHLEQ||a==A_SHREQ; }
 static const char *as_op(AssignOp a, int isfloat, int isuns){
     if(isfloat) switch(a){ case A_ADDEQ:return "fadd"; case A_SUBEQ:return "fsub"; case A_MULEQ:return "fmul";
         case A_DIVEQ:return "fdiv"; case A_MODEQ:return "frem"; default:return NULL; }
     switch(a){ case A_ADDEQ:return "add"; case A_SUBEQ:return "sub"; case A_MULEQ:return "mul";
-        case A_DIVEQ:return isuns?"udiv":"sdiv"; case A_MODEQ:return isuns?"urem":"srem"; default:return NULL; }
+        case A_DIVEQ:return isuns?"udiv":"sdiv"; case A_MODEQ:return isuns?"urem":"srem";
+        case A_ANDEQ:return "and"; case A_OREQ:return "or"; case A_XOREQ:return "xor";
+        case A_SHLEQ:return "shl"; case A_SHREQ:return isuns?"lshr":"ashr"; default:return NULL; }
 }
 
 static const char *gen_rval(CG *c, Expr *e, ValKind *k){
@@ -311,25 +323,31 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         if(lk==VK_F32){ *k=VK_F32; emit(c,"  %s = fneg fast %s %s\n",r,ty,v); }
         else { *k=lk; emit(c,"  %s = sub %s %s, %s\n",r,ty,vw?"zeroinitializer":"0",v); }
         c->rvw=vw; return r; }
+    case E_COMPL:{ ValKind lk; const char *v=gen_rval(c,e->operand,&lk); int vw=c->rvw;
+        if(lk==VK_F32) die(0,"bitwise complement requires an integer operand");
+        char ty[32]; ll_of(ty,sizeof ty,T_INT32,vw);
+        const char *r=newtmp(c); *k=lk; c->rvw=vw;
+        if(vw){ const char *ones=splat(c,"-1","i32",vw);
+            emit(c,"  %s = xor %s %s, %s\n",r,ty,v,ones); }
+        else emit(c,"  %s = xor %s %s, -1\n",r,ty,v);
+        return r; }
     case E_NOT:{ ValKind lk; const char *v=gen_rval(c,e->operand,&lk); if(lk!=VK_I1) die(0,"! on non-bool");
         const char *r=newtmp(c); *k=VK_I1; emit(c,"  %s = xor i1 %s, true\n",r,v); return r; }
     case E_BIN:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw;
         const char *r=gen_rval(c,e->rhs,&rk); int rw=c->rvw;
         int isf=(lk==VK_F32||rk==VK_F32);
+        if(isf&&bitwise_bin(e->bop)) die(0,"bitwise operators require integer operands");
         int uns=(lk==VK_U32||rk==VK_U32);
         ValKind ok=isf?VK_F32:uns?VK_U32:VK_I32;
         int vw=lw?lw:rw;
         if(lw&&rw&&lw!=rw) die(0,"vector width mismatch");
+        const char *op=bin_op(e->bop,isf,uns);
         if(vw){ const char *elt=ok==VK_F32?"float":"i32";
             if(!lw){ l=coerce(c,l,lk,ok); l=splat(c,l,elt,vw); } else if(lk!=ok) l=vconv(c,l,lw,lk,ok);
             if(!rw){ r=coerce(c,r,rk,ok); r=splat(c,r,elt,vw); } else if(rk!=ok) r=vconv(c,r,rw,rk,ok);
-            const char *op; if(isf) op=e->bop==B_ADD?"fadd fast":e->bop==B_SUB?"fsub fast":e->bop==B_MUL?"fmul fast":e->bop==B_DIV?"fdiv fast":"frem fast";
-            else op=e->bop==B_ADD?"add":e->bop==B_SUB?"sub":e->bop==B_MUL?"mul":e->bop==B_DIV?(uns?"udiv":"sdiv"):(uns?"urem":"srem");
             const char *v=newtmp(c); *k=ok; c->rvw=vw;
             emit(c,"  %s = %s <%d x %s> %s, %s\n",v,op,vw,elt,l,r); return v; }
         if(isf){ l=coerce(c,l,lk,VK_F32); r=coerce(c,r,rk,VK_F32); }
-        const char *op; if(isf) op=e->bop==B_ADD?"fadd fast":e->bop==B_SUB?"fsub fast":e->bop==B_MUL?"fmul fast":e->bop==B_DIV?"fdiv fast":"frem fast";
-        else op=e->bop==B_ADD?"add":e->bop==B_SUB?"sub":e->bop==B_MUL?"mul":e->bop==B_DIV?(uns?"udiv":"sdiv"):(uns?"urem":"srem");
         const char *v=newtmp(c); *k=ok;
         emit(c,"  %s = %s %s %s, %s\n",v,op,isf?"float":"i32",l,r); return v; }
     case E_CMP:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw;
@@ -352,6 +370,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             ValKind ck; const char *cur=emit_load_t(c,&li,addr,&ck);
             if(li.pi>=0) c->read[li.pi]=1;
             int isf=(ck==VK_F32||rk==VK_F32);
+            if(isf&&bitwise_assign(e->aop)) die(0,"bitwise assignment requires integer operands");
             int uns=!isf&&(ck==VK_U32||rk==VK_U32);
             ValKind ok=isf?VK_F32:uns?VK_U32:VK_I32;
             const char *nv=newtmp(c);

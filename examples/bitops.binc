@@ -1,0 +1,22 @@
+kernel void bitops(device uint* out, device int* iout, coord1D i) {
+    uint flags = 0x00FF00FF;
+    uint mask  = 0x0F0F0F0F;
+    out[0] = flags & mask;        /* 0x000F000F */
+    out[1] = flags | 0x000000F0;  /* 0x00FF00FF */
+    out[2] = flags ^ mask;        /* 0x0FF00FF0 */
+    out[3] = ~flags;              /* 0xFF00FF00 */
+    out[4] = flags << 4;          /* 0x0FF00FF0 */
+    out[5] = flags >> 8;          /* 0x0000FF00 */
+    uint top = 0x80000000;
+    out[6] = top >> 8;            /* uint: logical shift -> 0x00800000 */
+    iout[0] = -8 >> 1;            /* int: arithmetic shift -> -4 */
+    iout[1] = 5 & 3;              /* 1 */
+    iout[2] = 5 | 2;              /* 7 */
+    iout[3] = 5 ^ 1;              /* 4 */
+    iout[4] = -1 & 0xFF;          /* 255 */
+    flags &= 0xFF;
+    flags |= 0x100;
+    flags ^= 0xFF;
+    flags <<= 2;
+    out[7] = flags;               /* 0x400 */
+}
