@@ -1950,6 +1950,7 @@ void emit_air(FILE *out, Program *prog){
     }
     if(prog->nconsts) fprintf(out,"\n");
     for(size_t i=0;i<prog->nstructs;i++){ StructDef *s=&prog->structs[i];
+        if(s->is_template) continue; /* template defs emit nothing; uses instantiate concrete defs */
         fprintf(out,"%%struct.%s = type { ",s->tag);
         for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[64];
             char elt[32]; ll_of(elt,sizeof elt,s->fields[j].ty.kind,s->fields[j].ty.vecn);

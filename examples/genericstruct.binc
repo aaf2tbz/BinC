@@ -1,0 +1,22 @@
+/* genericstruct.binc — template structs: layout per concrete type. */
+template<typename T> struct Pair { T a; T b; };
+
+float pair_sum_float(Pair<float> p) { return p.a + p.b; }
+int pair_sum_int(Pair<int> p) { return p.a + p.b; }
+Pair<float> make_pair(float x, float y) {
+    Pair<float> p;
+    p.a = x;
+    p.b = y;
+    return p;
+}
+
+kernel void k(device float* out, device int* iout, coord1D i) {
+    Pair<float> pf;
+    pf.a = (float)i;
+    pf.b = 2.0f;
+    out[i] = pair_sum_float(pf) + make_pair(10.0f, 5.0f).b;   /* (i + 2) + 5 = i + 7 */
+    Pair<int> pi;
+    pi.a = 3;
+    pi.b = 4;
+    iout[i] = pair_sum_int(pi);                                /* 7 */
+}

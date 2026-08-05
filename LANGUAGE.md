@@ -43,6 +43,10 @@ Matrix types `mat2`, `mat3`, and `mat4` are column-major, with the same buffer l
 
 Module-level constants are declared `constant float PI = 3.14159f;` — one per line, scalar numeric types only. The initializer must be a literal.
 
+## Generics
+
+`template<typename T> T f(T x) { ... }` declares a monomorphized generic function: each call site with a concrete argument type instantiates a separate copy (`f.f32`, `f.i32`, ...) with zero runtime overhead; the body may use `T` locals and `(T)` casts. `template<typename T> struct Pair { T a; T b; };` declares a generic struct, used as `Pair<float> p;` — every concrete `Tag<Type>` use instantiates its own layout (`Pair$f32`). Instantiations are cached per type; unsupported instantiation types (structs compared with `<`, type-variable-nested instantiations) are located errors.
+
 ## Modules and the prelude
 
 `include "path.binc";` textually splices another BinC file (resolved relative to the including file, then `-I <dir>` search paths, then the current directory). A file containing `once;` is included at most once per compilation; include cycles are located errors. `binc/prelude.binc` is automatically spliced before every compilation (disable with `-no-prelude`) and provides `PI`, `TAU`, `E`, `min`, `max`, `lerp`, `saturate`, `pack_rgba`/`unpack_rgba` (0-255 uint color packing), and a deterministic `hash12` — all written in BinC.

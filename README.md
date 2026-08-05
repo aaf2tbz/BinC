@@ -160,6 +160,7 @@ kernel void paint(device float* out, coord2D c) {
 - Module-level `constant` globals
 - `include "file.binc";` with `-I <dir>` search paths, `once;` guards, and cycle detection
 - A standard prelude (auto-included, `-no-prelude` to disable): `PI`, `TAU`, `E`, `min`, `max`, `lerp`, `saturate`, `pack_rgba`/`unpack_rgba`, `hash12`
+- Generics: `template<typename T> T f(T x)` monomorphized per call-site type; `template<typename T> struct Pair { T a; T b; }` used as `Pair<float> p;`
 
 ### Textures
 

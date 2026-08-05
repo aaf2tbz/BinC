@@ -10,6 +10,39 @@ static void expect(TokStream *ts,TokKind k,const char *w){ if(peek(ts)->kind!=k)
 
 /* active template type parameter name while parsing a template function signature+body */
 static const char *g_tvar = NULL;
+/* Program under construction, so parse_type can instantiate template structs */
+static Program *g_parse_prog = NULL;
+/* known struct tags, for disambiguating `Dog d;` local declarations */
+static char **stags=NULL; static size_t nstags=0;
+
+/* "<tag>$<key>" for template struct instantiations; scalar/vector/matrix/struct keys */
+static void st_key(const Type *ty, char *buf, size_t n){
+    if(ty->kind==T_STRUCT) snprintf(buf,n,"s%s",ty->struct_name);
+    else if(ty->matn) snprintf(buf,n,"m%d",ty->matn);
+    else if(ty->vecn>1) snprintf(buf,n,"v%d%s",ty->vecn,ty->kind==T_HALF?"f16":"f32");
+    else snprintf(buf,n,"%s",ty->kind==T_INT32?"i32":ty->kind==T_UINT32?"u32":
+        ty->kind==T_FLOAT?"f32":ty->kind==T_HALF?"f16":ty->kind==T_BOOL?"b1":"?");
+}
+static StructDef *inst_struct(Program *prog, StructDef *tpl, const Type *concrete){
+    char key[64]; st_key(concrete,key,sizeof key);
+    char tag[96]; snprintf(tag,sizeof tag,"%s$%s",tpl->tag,key);
+    for(size_t i=0;i<prog->nstructs;i++) if(!strcmp(prog->structs[i].tag,tag)) return &prog->structs[i];
+    StructDef inst=*tpl;
+    inst.tag=strdup(tag);
+    inst.is_template=0; inst.tvar=NULL;
+    inst.fields=calloc(tpl->nfields,sizeof(Field));
+    for(size_t i=0;i<tpl->nfields;i++){
+        inst.fields[i].name=strdup(tpl->fields[i].name);
+        inst.fields[i].attr=tpl->fields[i].attr; inst.fields[i].attr_idx=tpl->fields[i].attr_idx;
+        inst.fields[i].ty=tpl->fields[i].ty;
+        if(inst.fields[i].ty.tvar) inst.fields[i].ty=*concrete;
+        inst.fields[i].ty.tvar=NULL;
+    }
+    prog->structs=realloc(prog->structs,(prog->nstructs+1)*sizeof(StructDef));
+    prog->structs[prog->nstructs++]=inst;
+    stags=realloc(stags,(nstags+1)*sizeof(char*)); stags[nstags++]=strdup(tag);
+    return &prog->structs[prog->nstructs-1];
+}
 
 static Type parse_type(TokStream *ts){
     Type t={0};
@@ -49,7 +82,21 @@ static Type parse_type(TokStream *ts){
     else if(accept(ts,TK_KW_SAMPLER)) t.kind=T_SAMPLER;
     else if(peek(ts)->kind==TK_IDENT){
         if(g_tvar && !strcmp(peek(ts)->text,g_tvar)){ advance(ts); t.kind=T_TVAR; t.tvar=strdup(g_tvar); }
-        else { t.kind=T_STRUCT; t.struct_name=strdup(advance(ts)->text); }
+        else {
+            char *tag=strdup(advance(ts)->text);
+            if(accept(ts,TK_LT)){
+                /* template struct instantiation: Pair<float> */
+                Type inner=parse_type(ts); expect(ts,TK_GT,">");
+                StructDef *tpl=NULL;
+                if(g_parse_prog) for(size_t i=0;i<g_parse_prog->nstructs;i++)
+                    if(!strcmp(g_parse_prog->structs[i].tag,tag)&&g_parse_prog->structs[i].is_template){ tpl=&g_parse_prog->structs[i]; break; }
+                if(!tpl) die(peek(ts)->line,"%s is not a template struct",tag);
+                if(inner.kind==T_TVAR||inner.tvar) die(peek(ts)->line,"template struct instantiation with a type variable is not supported");
+                if(inner.is_ptr) die(peek(ts)->line,"template struct instantiation with a pointer type is not supported");
+                StructDef *sd=inst_struct(g_parse_prog,tpl,&inner);
+                t.kind=T_STRUCT; t.struct_name=strdup(sd->tag);
+            } else { t.kind=T_STRUCT; t.struct_name=tag; }
+        }
     }
     else die(peek(ts)->line,"expected a type");
     if(accept(ts,TK_STAR)){ t.is_ptr=1; if(t.as==0)t.as=AS_DEVICE; }
@@ -63,7 +110,6 @@ static Expr *E(ExprKind k,int line,int col){ Expr *e=calloc(1,sizeof(Expr)); e->
 static Expr *parse_expr(TokStream *ts);
 
 /* known struct tags, for disambiguating `Dog d;` local declarations */
-static char **stags=NULL; static size_t nstags=0;
 static int is_stag(const char *s){ for(size_t i=0;i<nstags;i++) if(!strcmp(stags[i],s)) return 1; return 0; }
 
 static Expr *parse_primary(TokStream *ts){
@@ -290,9 +336,9 @@ static Stmt parse_stmt(TokStream *ts){
         st.then_b=parse_block_or_stmt(ts); return st;
     }
     if(kt->kind==TK_LBRACE){ advance(ts); Block b=parse_braced(ts); Stmt st={0}; st.kind=S_BLOCK; st.line=kt->line; st.col=kt->col; st.then_b=b; return st; }
-    if(kt->kind==TK_IDENT&&is_stag(kt->text)&&ts->toks[ts->i+1].kind==TK_IDENT){
-        /* struct local: `Dog d;` / `Dog d = other;` */
-        Type ty={0}; ty.kind=T_STRUCT; ty.struct_name=strdup(advance(ts)->text);
+    if(kt->kind==TK_IDENT&&is_stag(kt->text)&&(ts->toks[ts->i+1].kind==TK_IDENT||ts->toks[ts->i+1].kind==TK_LT)){
+        /* struct local: `Dog d;` / `Dog d = other;` / `Pair<float> p;` */
+        Type ty=parse_type(ts);
         Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
         Expr *init=NULL; if(accept(ts,TK_EQ)) init=parse_expr(ts);
         expect(ts,TK_SEMI,";");
@@ -363,6 +409,15 @@ static void parse_function(TokStream *ts, Program *prog){
     prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,stage,ret,nm->line,tvar!=NULL,tvar?strdup(tvar):NULL,{0}};
 }
 static void parse_struct(TokStream *ts, Program *prog){
+    /* template<typename T> struct ... */
+    const char *tvar=NULL;
+    if(accept(ts,TK_KW_TEMPLATE)){
+        expect(ts,TK_LT,"<"); expect(ts,TK_KW_TYPENAME,"typename");
+        Token *tn=peek(ts); expect(ts,TK_IDENT,"type parameter name");
+        tvar=strdup(tn->text); expect(ts,TK_GT,">");
+    }
+    g_tvar=tvar;
+    expect(ts,TK_KW_STRUCT,"struct");
     Token *tag=peek(ts); expect(ts,TK_IDENT,"struct tag"); expect(ts,TK_LBRACE,"{");
     Field *f=NULL; size_t n=0,cap=0;
     while(peek(ts)->kind!=TK_RBRACE){
@@ -390,8 +445,9 @@ static void parse_struct(TokStream *ts, Program *prog){
         } while(accept(ts,TK_COMMA)); expect(ts,TK_SEMI,";");
     }
     expect(ts,TK_RBRACE,"}"); expect(ts,TK_SEMI,";");
+    g_tvar=NULL; /* template type parameter ends with the struct body */
     prog->structs=realloc(prog->structs,(prog->nstructs+1)*sizeof(StructDef));
-    prog->structs[prog->nstructs++]=(StructDef){strdup(tag->text),f,n};
+    prog->structs[prog->nstructs++]=(StructDef){strdup(tag->text),f,n,tvar!=NULL,tvar?strdup(tvar):NULL};
     stags=realloc(stags,(nstags+1)*sizeof(char*)); stags[nstags++]=prog->structs[prog->nstructs-1].tag;
 }
 /* tokens that may legally begin a statement or top-level construct; used by error recovery */
@@ -445,6 +501,7 @@ Program parse_program(TokStream *ts){
     /* static so the struct and stream survive the longjmp in die() with defined values */
     static Program prog;
     static TokStream *cur;
+    g_parse_prog=&prog;
     prog.structs=NULL; prog.nstructs=0; prog.funcs=NULL; prog.nfuncs=0;
     prog.consts=NULL; prog.nconsts=0;
     cur=ts;
@@ -452,8 +509,18 @@ Program parse_program(TokStream *ts){
     g_recover=&env;
     while(peek(cur)->kind!=TK_EOF){
         if(setjmp(env)==0){
-            if(peek(cur)->kind==TK_KW_STRUCT){ advance(cur); parse_struct(cur,&prog); }
+            if(peek(cur)->kind==TK_KW_STRUCT){ parse_struct(cur,&prog); }
             else if(peek(cur)->kind==TK_KW_CONSTANT){ parse_const(cur,&prog); }
+            else if(peek(cur)->kind==TK_KW_TEMPLATE){
+                /* template<typename T> struct ... vs template<typename T> T f(...) */
+                size_t save=cur->i;
+                advance(cur); expect(cur,TK_LT,"<"); expect(cur,TK_KW_TYPENAME,"typename");
+                advance(cur); expect(cur,TK_GT,">");
+                int is_struct = peek(cur)->kind==TK_KW_STRUCT;
+                cur->i=save;
+                if(is_struct) parse_struct(cur,&prog);
+                else parse_function(cur,&prog);
+            }
             else parse_function(cur,&prog);
         } else {
             recover_skip(cur);
