@@ -173,7 +173,19 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-i")) interpret = 1;
         else if (!strcmp(argv[i], "-fsyntax-only")) syntax_only = 1;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { fputs(usage_text, stdout); return 0; }
-        else if (!strcmp(argv[i], "--version")) { printf("binc %s\n", BINC_VERSION); return 0; }
+        else if (!strcmp(argv[i], "--version")) {
+            /* prefer the VERSION file (next to the binary, then cwd) */
+            char vpath[640]={0}; int have=0;
+            const char *slash=strrchr(argv[0],'/');
+            if(slash){ size_t l=(size_t)(slash-argv[0]); if(l>500)l=500;
+                snprintf(vpath,sizeof vpath,"%.*s/VERSION",(int)l,argv[0]);
+                if(!access(vpath,R_OK)) have=1; }
+            if(!have && !access("VERSION",R_OK)){ snprintf(vpath,sizeof vpath,"VERSION"); have=1; }
+            if(have){ FILE *vf=fopen(vpath,"r"); char vb[64]={0};
+                if(vf){ if(fgets(vb,sizeof vb,vf)){ char *nl=strchr(vb,'\n'); if(nl)*nl='\0'; } fclose(vf); }
+                if(vb[0]){ printf("binc %s\n",vb); return 0; } }
+            printf("binc %s\n", BINC_VERSION); return 0;
+        }
         else if (argv[i][0] != '-') infile = argv[i];
         else { fprintf(stderr, "binc: unknown option %s\n", argv[i]); fputs(usage_text, stderr); return 2; }
     }

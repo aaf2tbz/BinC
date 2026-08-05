@@ -1,0 +1,16 @@
+/* bench/fractal.binc — mandelbrot-style escape-time kernel.
+ * The hand-written MSL twin lives in fractal.metal. Both compile to a
+ * .metallib and are dispatched through the same harness (see run.sh). */
+kernel void fractal(device float* out, coord2D p) {
+    float2 c = (float2((float)p.global.x, (float)p.global.y) - float2(128.0f, 128.0f)) * 0.008f;
+    float2 z = float2(0.0f, 0.0f);
+    int iter = 0;
+    float m = 0.0f;
+    while (iter < 64) {
+        z = float2(z.x * z.x - z.y * z.y, 2.0f * z.x * z.y) + c;
+        m = dot(z, z);
+        if (m > 4.0f) break;
+        iter++;
+    }
+    out[p.global.y * 256 + p.global.x] = (float)iter / 64.0f;
+}

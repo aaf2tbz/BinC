@@ -1,0 +1,37 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build compiler
+        run: make binc
+        working-directory: binc
+
+      - name: Smoke-test the binary
+        run: |
+          ./binc --version
+          ./binc -fsyntax-only ../examples/bitops.binc
+          ./binc -i ../tests/interp/math.binc
+        working-directory: binc
+
+      - name: Package (binary + prelude + license)
+        run: |
+          mkdir -p dist
+          cp binc/binc dist/
+          cp binc/prelude.binc dist/
+          cp VERSION dist/
+          cp LICENSE dist/ 2>/dev/null || true
+          cp README.md dist/ 2>/dev/null || true
+          cd dist && zip -r "../binc-${GITHUB_REF_NAME}.zip" .
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: binc-${{ github.ref_name }}.zip
