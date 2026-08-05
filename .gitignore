@@ -13,3 +13,6 @@ build/
 !/proof/*.ll
 !/proof/*.metallib
 !/reference/*.ll
+
+# local workspace
+.hermes/
