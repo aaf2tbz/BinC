@@ -1,0 +1,5 @@
+kernel void k(device float* data, coord1D i) {
+    if (i % 2 == 0) {
+        sync();
+    }
+}

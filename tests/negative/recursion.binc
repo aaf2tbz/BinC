@@ -1,0 +1,7 @@
+void recurse(device float* p) {
+    recurse(p);
+}
+
+kernel void k(device float* p, coord1D i) {
+    recurse(p);
+}

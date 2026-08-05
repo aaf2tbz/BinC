@@ -1,0 +1,3 @@
+kernel float k(device float* p, coord1D i) {
+    return 1.0f;
+}

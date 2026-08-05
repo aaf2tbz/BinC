@@ -29,7 +29,16 @@ verify: binc harness examples
 	@for ex in $(EXAMPLES); do ./harness build/$$ex.metallib ../examples/$$ex.spec || exit 1; done
 	@echo "ALL EXAMPLES VERIFIED ON GPU"
 
+# Compile-error suite: every tests/negative/*.binc must fail with expected messages
+test-negative: binc
+	chmod +x check_negative.sh
+	./check_negative.sh
+
+# GPU-free CI pipeline: build, negative tests, fuzz, compile all examples
+ci: binc test-negative test-fuzz examples
+	@echo "CI OK"
+
 clean:
 	rm -f binc harness pong_host binc_runtime.o build/*.metallib build/*.h *.ll *.air
 
-.PHONY: binc harness runtime examples pong verify clean
+.PHONY: binc harness runtime examples pong verify test-negative test-fuzz ci clean

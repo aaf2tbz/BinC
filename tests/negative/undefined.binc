@@ -1,0 +1,3 @@
+kernel void k(device float* p, coord1D i) {
+    p[i] = missing_identifier + 1.0f;
+}

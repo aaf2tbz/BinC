@@ -1,0 +1,8 @@
+struct S { float x, y; };
+
+void take_struct(S s) {
+}
+
+kernel void k(device float* p, coord1D i) {
+    p[i] = 0.0f;
+}
