@@ -73,7 +73,8 @@ typedef enum { ST_NONE, ST_VERTEX, ST_FRAGMENT } Stage;
 typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; int line; } Function;
 typedef struct { char *name; Type ty; } Field;
 typedef struct { char *tag; Field *fields; size_t nfields; } StructDef;
-typedef struct { StructDef *structs; size_t nstructs; Function *funcs; size_t nfuncs; } Program;
+typedef struct { char *name; Type ty; int is_int; long ival; double fval; int line; } ConstDef;
+typedef struct { StructDef *structs; size_t nstructs; Function *funcs; size_t nfuncs; ConstDef *consts; size_t nconsts; } Program;
 
 /* ---- lexer ---- */
 typedef enum {

@@ -349,17 +349,38 @@ static void recover_skip(TokStream *ts){
         advance(ts); consumed=1;
     }
 }
+/* module-level constant: `constant <scalar-type> NAME = <literal>;` */
+static void parse_const(TokStream *ts, Program *prog){
+    Token *kt=peek(ts); advance(ts); /* 'constant' */
+    Type ty=parse_type(ts);
+    if(ty.is_ptr) die(kt->line,"constant globals cannot be pointers");
+    if(ty.kind!=T_FLOAT&&ty.kind!=T_HALF&&ty.kind!=T_INT32&&ty.kind!=T_UINT32&&ty.kind!=T_BOOL)
+        die(kt->line,"constant globals must be scalar numeric types");
+    Token *nm=peek(ts); expect(ts,TK_IDENT,"constant name");
+    expect(ts,TK_EQ,"=");
+    Expr *init=parse_expr(ts); expect(ts,TK_SEMI,";");
+    ConstDef cd={0}; cd.name=strdup(nm->text); cd.ty=ty; cd.line=nm->line;
+    if(init->kind==E_ICONST){ cd.is_int=1; cd.ival=init->ival; }
+    else if(init->kind==E_FCONST){ cd.is_int=0; cd.fval=init->fval; }
+    else if(init->kind==E_BOOL){ cd.is_int=1; cd.ival=init->bval; cd.ty.kind=T_BOOL; }
+    else die(nm->line,"constant initializer must be a literal");
+    prog->consts=realloc(prog->consts,(prog->nconsts+1)*sizeof(ConstDef));
+    prog->consts[prog->nconsts++]=cd;
+}
 Program parse_program(TokStream *ts){
     /* static so the struct and stream survive the longjmp in die() with defined values */
     static Program prog;
     static TokStream *cur;
     prog.structs=NULL; prog.nstructs=0; prog.funcs=NULL; prog.nfuncs=0;
+    prog.consts=NULL; prog.nconsts=0;
     cur=ts;
     jmp_buf env;
     g_recover=&env;
     while(peek(cur)->kind!=TK_EOF){
         if(setjmp(env)==0){
-            if(peek(cur)->kind==TK_KW_STRUCT){ advance(cur); parse_struct(cur,&prog); } else parse_function(cur,&prog);
+            if(peek(cur)->kind==TK_KW_STRUCT){ advance(cur); parse_struct(cur,&prog); }
+            else if(peek(cur)->kind==TK_KW_CONSTANT){ parse_const(cur,&prog); }
+            else parse_function(cur,&prog);
         } else {
             recover_skip(cur);
             /* swallow stray closers/semicolons left by the failed construct */
