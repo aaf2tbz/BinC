@@ -15,6 +15,7 @@ static Type parse_type(TokStream *ts){
     Token *pt=peek(ts);
     if(accept(ts,TK_KW_COORD)){ t.kind=T_COORD; t.coordn=(int)pt->ival; return t; }
     if(accept(ts,TK_KW_GRID_EXTENT)){ t.kind=T_GRID_EXTENT; return t; }
+    if(accept(ts,TK_KW_VERTEX_ID)){ t.kind=T_UINT32; t.vecn=0; t.as=AS_THREAD; return t; }
     if(accept(ts,TK_KW_ATOMIC)){
         expect(ts,TK_LT,"<");
         Token *bt=peek(ts); t.kind=T_ATOMIC;
@@ -192,8 +193,10 @@ static Stmt parse_stmt(TokStream *ts){
 }
 
 static void parse_function(TokStream *ts, Program *prog){
+    Stage stage=ST_NONE; if(accept(ts,TK_KW_VERTEX))stage=ST_VERTEX; else if(accept(ts,TK_KW_FRAGMENT))stage=ST_FRAGMENT;
     int is_kernel=accept(ts,TK_KW_KERNEL);
     Type ret=parse_type(ts);
+    if(stage!=ST_NONE&&is_kernel) die(peek(ts)->line,"render stages cannot also be kernels");
     if(is_kernel&&ret.kind!=T_VOID) die(peek(ts)->line,"kernel functions must return void");
     if(ret.kind==T_STRUCT) die(peek(ts)->line,"struct-by-value return not supported");
     Token *nm=peek(ts); expect(ts,TK_IDENT,"function name"); expect(ts,TK_LPAREN,"(");
@@ -219,7 +222,7 @@ static void parse_function(TokStream *ts, Program *prog){
     if(coords>1) die(peek(ts)->line,"a kernel may have only one coordinate domain parameter");
     if(coords) is_kernel=1;
     prog->funcs=realloc(prog->funcs,(prog->nfuncs+1)*sizeof(Function));
-    prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,ret};
+    prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,stage,ret};
 }
 static void parse_struct(TokStream *ts, Program *prog){
     Token *tag=peek(ts); expect(ts,TK_IDENT,"struct tag"); expect(ts,TK_LBRACE,"{");

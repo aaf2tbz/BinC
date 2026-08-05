@@ -19,6 +19,10 @@ void binc_runtime_close(BincRuntime *r){ if(r) free(r); }
 BincBuffer *binc_buffer_new(BincRuntime *r,const void *p,size_t n){ BincBuffer *b=calloc(1,sizeof *b); b->native=[r->device newBufferWithBytes:p length:n options:MTLResourceStorageModeShared]; return b; }
 BincBuffer *binc_buffer_alloc(BincRuntime *r,size_t n){ BincBuffer *b=calloc(1,sizeof *b); b->native=[r->device newBufferWithLength:n options:MTLResourceStorageModeShared]; return b; }
 void *binc_buffer_contents(BincBuffer *b){ return b?b->native.contents:NULL; }
+void *binc_buffer_native(BincBuffer *b){ return b?(__bridge void *)b->native:NULL; }
+void *binc_runtime_device(BincRuntime *r){ return r?(__bridge void *)r->device:NULL; }
+void *binc_runtime_queue(BincRuntime *r){ return r?(__bridge void *)r->queue:NULL; }
+void *binc_runtime_library(BincRuntime *r){ return r?(__bridge void *)r->library:NULL; }
 void binc_buffer_release(BincBuffer *b){ if(b) free(b); }
 BincDispatchArg binc_arg_buffer(int i,BincBuffer *b){ BincDispatchArg a={i,b,NULL,0}; return a; }
 BincDispatchArg binc_arg_bytes(int i,const void *p,size_t n){ BincDispatchArg a={i,NULL,p,n}; return a; }

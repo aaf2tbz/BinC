@@ -70,6 +70,7 @@ void lex(const char *src, Token **out, size_t *out_n){
             KW("thread",TK_KW_THREAD) KW("uniform",TK_KW_UNIFORM) KW("varying",TK_KW_VARYING)
             VW("coord1D",TK_KW_COORD,1) VW("coord2D",TK_KW_COORD,2) VW("coord3D",TK_KW_COORD,3)
             KW("grid_extent",TK_KW_GRID_EXTENT) KW("atomic",TK_KW_ATOMIC)
+            KW("vertex",TK_KW_VERTEX) KW("fragment",TK_KW_FRAGMENT) KW("vertex_id",TK_KW_VERTEX_ID)
             #undef KW
             Token x=tk(TK_IDENT,ln); x.text=dup_n(s,len); PUSH(x);
             done:; continue;

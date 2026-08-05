@@ -623,6 +623,12 @@ static void fn_ptr_str(Function *fn,char *buf,size_t n){
         } else { if(emitted++)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"i32"); } }
     o+=snprintf(buf+o,n-o,")* @%s",fn->name);
 }
+static void stage_ptr_str(Function *fn,char *buf,size_t n){
+    size_t o=0; char rl[32]; ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn); o+=snprintf(buf+o,n-o,"%s (",rl);
+    for(size_t i=0;i<fn->nparams;i++){ if(i)o+=snprintf(buf+o,n-o,", "); Param *p=&fn->params[i]; char pl[64];
+        type_ll(pl,sizeof pl,p->ty.kind,p->ty.struct_name,p->ty.vecn); o+=snprintf(buf+o,n-o,"%s%s",p->ty.is_ptr?"": "",pl); if(p->ty.is_ptr) o+=snprintf(buf+o,n-o," addrspace(%d)*",p->ty.as); }
+    o+=snprintf(buf+o,n-o,")* @%s",fn->name);
+}
 
 void emit_air(FILE *out, const Program *prog){
     memset(builtin_used,0,sizeof builtin_used); memset(atomic_add_used,0,sizeof atomic_add_used);
@@ -660,8 +666,8 @@ void emit_air(FILE *out, const Program *prog){
          * implicit kernels retain the historical hidden scalar thread id. */
         char sig[2048]; size_t so=0;
         if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,"define void @%s(",fn->name);
-        else { char rl[32]; ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
-            so+=snprintf(sig+so,sizeof sig-so,"define internal %s @%s(",rl,fn->name); }
+        else { char rl[32]; if(fn->ret.kind==T_VOID) snprintf(rl,sizeof rl,"void"); else ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
+            so+=snprintf(sig+so,sizeof sig-so,"define %s%s @%s(",fn->stage==ST_NONE?"internal ":"",rl,fn->name); }
         int emitted=0;
         for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i];
             if(p->ty.array_n) continue; /* shared arrays are module globals, not ABI args */
@@ -715,6 +721,12 @@ void emit_air(FILE *out, const Program *prog){
     size_t nk=0; for(size_t fi=0;fi<prog->nfuncs;fi++) if(prog->funcs[fi].is_kernel) nk++;
     int next=13; int *knode=calloc(nk?nk:1,sizeof(int)),*empty=calloc(nk?nk:1,sizeof(int)),
         *arglist=calloc(nk?nk:1,sizeof(int)),**argnode=calloc(nk?nk:1,sizeof(int*)),**structnode=calloc(nk?nk:1,sizeof(int*));
+    int *vnode=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int)), *fnode=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int));
+    int *vempty=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int)), *fempty=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int));
+    int *vouts=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int)), *fouts=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int));
+    int *vleaf=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int)), *fleaf=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int));
+    int *vargs=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int)), *fargs=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int));
+    int **vargnode=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int*)), **fargnode=calloc(prog->nfuncs?prog->nfuncs:1,sizeof(int*));
     size_t ki=0;
     for(size_t fi=0;fi<prog->nfuncs;fi++){ if(!prog->funcs[fi].is_kernel) continue;
         knode[ki]=next++; empty[ki]=next++; arglist[ki]=next++;
@@ -722,8 +734,17 @@ void emit_air(FILE *out, const Program *prog){
         structnode[ki]=malloc((kf[fi].np?kf[fi].np:1)*sizeof(int)); for(int a=0;a<kf[fi].np;a++) structnode[ki][a]=-1;
         for(int a=0;a<kf[fi].np;a++) if(prog->funcs[fi].params[a].ty.kind==T_ATOMIC) structnode[ki][a]=next++;
         ki++; }
+    size_t vi=0, fgi=0;
+    for(size_t fi=0;fi<prog->nfuncs;fi++) if(prog->funcs[fi].stage==ST_VERTEX||prog->funcs[fi].stage==ST_FRAGMENT){
+        int *node=prog->funcs[fi].stage==ST_VERTEX?vnode:fnode, *emp=prog->funcs[fi].stage==ST_VERTEX?vempty:fempty;
+        int *outs=prog->funcs[fi].stage==ST_VERTEX?vouts:fouts, *args=prog->funcs[fi].stage==ST_VERTEX?vargs:fargs; int **an=prog->funcs[fi].stage==ST_VERTEX?vargnode:fargnode; size_t ix=prog->funcs[fi].stage==ST_VERTEX?vi++:fgi++;
+        node[ix]=next++; emp[ix]=next++; outs[ix]=next++; int *leaf=prog->funcs[fi].stage==ST_VERTEX?vleaf:fleaf; leaf[ix]=next++; args[ix]=next++; an[ix]=malloc((prog->funcs[fi].nparams?prog->funcs[fi].nparams:1)*sizeof(int));
+        for(size_t a=0;a<prog->funcs[fi].nparams;a++)an[ix][a]=next++;
+    }
     fprintf(out,"!llvm.module.flags = !{!0, !1, !2, !3, !4, !5, !6}\n");
     fprintf(out,"!air.kernel = !{"); for(size_t k=0;k<nk;k++){ if(k)fprintf(out,", "); fprintf(out,"!%d",knode[k]); } fprintf(out,"}\n");
+    fprintf(out,"!air.vertex = !{"); for(size_t k=0;k<vi;k++){ if(k)fprintf(out,", "); fprintf(out,"!%d",vnode[k]); } fprintf(out,"}\n");
+    fprintf(out,"!air.fragment = !{"); for(size_t k=0;k<fgi;k++){ if(k)fprintf(out,", "); fprintf(out,"!%d",fnode[k]); } fprintf(out,"}\n");
     fprintf(out,"!air.compile_options = !{!7, !8}\n!llvm.ident = !{!9}\n!air.version = !{!10}\n!air.language_version = !{!11}\n!air.source_file_name = !{!12}\n\n");
     fprintf(out,"!0 = !{i32 2, !\"SDK Version\", [2 x i32] [i32 27, i32 0]}\n!1 = !{i32 1, !\"wchar_size\", i32 4}\n!2 = !{i32 7, !\"air.max_device_buffers\", i32 31}\n!3 = !{i32 7, !\"air.max_constant_buffers\", i32 31}\n!4 = !{i32 7, !\"air.max_threadgroup_buffers\", i32 31}\n!5 = !{i32 7, !\"air.max_textures\", i32 128}\n!6 = !{i32 7, !\"air.max_samplers\", i32 16}\n!7 = !{!\"air.compile.denorms_disable\"}\n!8 = !{!\"air.compile.fast_math_enable\"}\n!9 = !{!\"BinC compiler v0.0.1 (bootstrap, in C)\"}\n!10 = !{i32 2, i32 9, i32 0}\n!11 = !{!\"Metal\", i32 4, i32 1, i32 0}\n!12 = !{!\"binc\"}\n");
     ki=0;
@@ -758,5 +779,22 @@ void emit_air(FILE *out, const Program *prog){
             fprintf(out,"!%d = !{i32 %d, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"id\"}\n",argnode[ki][ai++],(int)fn->nparams);
         }
         ki++;
+    }
+    vi=0; fgi=0;
+    for(size_t fi=0;fi<prog->nfuncs;fi++) if(prog->funcs[fi].stage==ST_VERTEX||prog->funcs[fi].stage==ST_FRAGMENT){
+        Function *fn=&prog->funcs[fi]; int ix=fn->stage==ST_VERTEX?(int)vi++:(int)fgi++; int node=fn->stage==ST_VERTEX?vnode[ix]:fnode[ix];
+        int emp=fn->stage==ST_VERTEX?vempty[ix]:fempty[ix], outs=fn->stage==ST_VERTEX?vouts[ix]:fouts[ix], leaf=fn->stage==ST_VERTEX?vleaf[ix]:fleaf[ix];
+        int args=fn->stage==ST_VERTEX?vargs[ix]:fargs[ix]; int *an=fn->stage==ST_VERTEX?vargnode[ix]:fargnode[ix]; char fp[2048]; stage_ptr_str(fn,fp,sizeof fp);
+        fprintf(out,"!%d = !{}\n",emp);
+        fprintf(out,"!%d = !{!%d}\n",outs,leaf);
+        if(fn->stage==ST_VERTEX) fprintf(out,"!%d = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n",leaf);
+        else fprintf(out,"!%d = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\"}\n",leaf);
+        fprintf(out,"!%d = !{",args); for(size_t a=0;a<fn->nparams;a++){if(a)fprintf(out,", ");fprintf(out,"!%d",an[a]);} fprintf(out,"}\n");
+        fprintf(out,"!%d = !{%s, !%d, !%d}\n",node,fp,outs,args);
+        for(size_t a=0;a<fn->nparams;a++){ Param *p=&fn->params[a]; char tn[64]; tn_of(tn,sizeof tn,p->ty.kind,p->ty.vecn);
+            if(fn->stage==ST_VERTEX && p->ty.as==AS_THREAD){ fprintf(out,"!%d = !{i32 %d, !\"air.vertex_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",an[a],(int)a,p->name); }
+            else if(p->ty.is_ptr) fprintf(out,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an[a],(int)a,(int)a,p->ty.as,type_size(p->ty.kind,p->ty.vecn),type_align(p->ty.kind,p->ty.vecn),tn,p->name);
+            else fprintf(out,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an[a],(int)a,type_size(p->ty.kind,p->ty.vecn),(int)a,type_size(p->ty.kind,p->ty.vecn),type_align(p->ty.kind,p->ty.vecn),tn,p->name);
+        }
     }
 }

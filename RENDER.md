@@ -85,6 +85,24 @@ void emit_triangle(coord3D gid) {
 
 ---
 
+## BinC render stages implemented
+
+The compiler accepts:
+
+```c
+vertex float4 pong_vs(device float4* vertices, vertex_id vid) { return vertices[vid]; }
+fragment float4 pong_fs() { return float4(1, 1, 1, 1); }
+```
+
+`vertex` and `fragment` are emitted as externally visible AIR functions, with `!air.vertex`/
+`!air.fragment` metadata. A vertex `float4` return is tagged `air.position`; a fragment `float4` return is
+an `air.render_target` at index 0. `vertex_id` lowers to the `air.vertex_id` built-in. This intentionally starts
+with the smallest useful stage-I/O contract: position-only vertices and a constant fragment color are sufficient
+for the Pong sample, while varying vertex outputs and `stage_in` remain future work.
+
+`examples/pong.binc` contains the GPU update kernel, geometry generation helper, vertex shader, and fragment
+shader. `examples/pong_host.m` is only the window/input/Metal command-loop seam.
+
 ## Coverage & what's left
 
 **Verified & mapped (BinC can target these today):** compute kernels (1D/2D/3D, buffers, textures, threadgroup,

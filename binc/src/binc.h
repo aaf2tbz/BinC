@@ -62,7 +62,8 @@ struct Stmt {
 };
 
 typedef struct { char *name; Type ty; Uniformity un; } Param;
-typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Type ret; } Function;
+typedef enum { ST_NONE, ST_VERTEX, ST_FRAGMENT } Stage;
+typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; } Function;
 typedef struct { char *name; Type ty; } Field;
 typedef struct { char *tag; Field *fields; size_t nfields; } StructDef;
 typedef struct { StructDef *structs; size_t nstructs; Function *funcs; size_t nfuncs; } Program;
@@ -79,7 +80,7 @@ typedef enum {
     TK_KW_RETURN, TK_KW_IF, TK_KW_ELSE, TK_KW_FOR, TK_KW_WHILE, TK_KW_TRUE, TK_KW_FALSE,
     TK_KW_BREAK, TK_KW_CONTINUE,
     TK_KW_DEVICE, TK_KW_CONSTANT, TK_KW_THREADGROUP, TK_KW_THREAD, TK_KW_UNIFORM, TK_KW_VARYING,
-    TK_KW_COORD, TK_KW_GRID_EXTENT, TK_KW_ATOMIC
+    TK_KW_COORD, TK_KW_GRID_EXTENT, TK_KW_ATOMIC, TK_KW_VERTEX, TK_KW_FRAGMENT, TK_KW_VERTEX_ID
 } TokKind;
 typedef struct { TokKind kind; char *text; double fval; long ival; int line; } Token;
 typedef struct { Token *toks; size_t n; size_t i; } TokStream;

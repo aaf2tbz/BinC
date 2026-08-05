@@ -52,7 +52,8 @@ data-dependent branches and loop bounds are flagged at compile time (live today)
 (`TYPES.md`) extends this to barrier-in-divergent-flow and shared-memory race prevention as hard errors.
 
 The full function-by-function map of the compiler, every BinC→AIR mapping, and the metadata contract:
-**[`ARCHITECTURE.md`](ARCHITECTURE.md)**.
+**[`ARCHITECTURE.md`](ARCHITECTURE.md)**. The end-to-end playable sample is `examples/pong.binc` plus
+`examples/pong_host.m`; run `cd binc && make pong`, then `./pong_host` (W/S or A/Z moves the left paddle).
 
 ## Status: ✅ WORKING — compiles & runs on the GPU
 
@@ -88,6 +89,7 @@ top of `binc/harness.m`.
 - **Implicit coercion:** int ↔ uint ↔ float on assignment
 - **Implicit element-wise parallelism:** a function over a `device` buffer runs as a Metal grid (one thread per element)
 - **Divergence awareness:** the compiler warns on data-dependent branches/loop bounds and rejects barriers in divergent control flow
+- **Render stages:** `vertex` + `fragment` stage keywords emit external AIR entry points with position/render-target metadata; `vertex_id` is a typed built-in
 - **Host seam v1:** every compiled metallib gets a sibling generated binding header; `binc_runtime.h/.m` provides device, buffer, dispatch, and completion primitives
 
 ## The project
