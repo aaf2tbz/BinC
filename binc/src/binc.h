@@ -82,7 +82,7 @@ typedef enum {
     TK_KW_DEVICE, TK_KW_CONSTANT, TK_KW_THREADGROUP, TK_KW_THREAD, TK_KW_UNIFORM, TK_KW_VARYING,
     TK_KW_COORD, TK_KW_GRID_EXTENT, TK_KW_ATOMIC, TK_KW_VERTEX, TK_KW_FRAGMENT, TK_KW_VERTEX_ID
 } TokKind;
-typedef struct { TokKind kind; char *text; double fval; long ival; int line; } Token;
+typedef struct { TokKind kind; char *text; double fval; long ival; int line, col; } Token;
 typedef struct { Token *toks; size_t n; size_t i; } TokStream;
 
 void lex(const char *src, Token **out, size_t *out_n);
