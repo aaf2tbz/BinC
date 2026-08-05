@@ -83,8 +83,20 @@ static Expr *parse_postfix(TokStream *ts){
     }
     return e;
 }
+/* does the token AFTER '(' begin a scalar/vector numeric type usable as a cast target? */
+static int cast_type_start(TokStream *ts){
+    TokKind k=(ts->i+1<ts->n)?ts->toks[ts->i+1].kind:TK_EOF;
+    return k==TK_KW_FLOAT||k==TK_KW_HALF||k==TK_KW_INT||k==TK_KW_UINT||k==TK_KW_BOOL;
+}
 static Expr *parse_unary(TokStream *ts){
     Token *ut=peek(ts);
+    if(ut->kind==TK_LPAREN&&cast_type_start(ts)){
+        advance(ts); Type ty=parse_type(ts);
+        if(ty.is_ptr) die(ut->line,"pointer casts are not supported");
+        if(ty.kind==T_VOID) die(ut->line,"cannot cast to void");
+        expect(ts,TK_RPAREN,")");
+        Expr *o=parse_unary(ts); Expr *e=E(E_CAST,ut->line,ut->col); e->cty=ty; e->operand=o; return e;
+    }
     if(ut->kind==TK_MINUS){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_NEG,ut->line,ut->col); e->operand=o; return e; }
     if(ut->kind==TK_BANG){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_NOT,ut->line,ut->col); e->operand=o; return e; }
     if(ut->kind==TK_TILDE){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_COMPL,ut->line,ut->col); e->operand=o; return e; }

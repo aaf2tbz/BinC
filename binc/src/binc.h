@@ -31,7 +31,7 @@ typedef enum { VK_F32, VK_I32, VK_U32, VK_I1, VK_PTR } ValKind;
 typedef struct Expr Expr;
 typedef enum {
     E_FCONST, E_ICONST, E_BOOL, E_IDENT, E_DEREF, E_FIELD, E_INDEX,
-    E_BIN, E_CMP, E_LOG, E_NOT, E_NEG, E_COMPL, E_ASSIGN, E_CALL
+    E_BIN, E_CMP, E_LOG, E_NOT, E_NEG, E_COMPL, E_ASSIGN, E_CALL, E_CAST
 } ExprKind;
 
 typedef enum { B_ADD, B_SUB, B_MUL, B_DIV, B_MOD, B_AND, B_OR, B_XOR, B_SHL, B_SHR } BinOp;
@@ -46,6 +46,7 @@ struct Expr {
     double   fval; long ival; int bval;
     char    *name, *field;
     BinOp    bop; CmpOp cmp; LogOp log; AssignOp aop;
+    Type     cty; /* E_CAST target type */
     Expr    *operand, *lhs, *rhs;
     Expr   **args; size_t nargs; /* E_CALL */
     Expr   *callee; /* non-identifier call target, currently atomic methods */

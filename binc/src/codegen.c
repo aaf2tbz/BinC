@@ -64,6 +64,15 @@ static char *newtmp(CG *c){ char *s=malloc(16); snprintf(s,16,"%%t%d",c->tmp++);
 static int newlbl(CG *c){ return c->lblc++; }
 static void emit(CG *c,const char *fmt,...){ va_list a; va_start(a,fmt); char b[1024]; vsnprintf(b,sizeof b,fmt,a); va_end(a); sb_put(c->body,b); }
 static void lbl(CG *c,int n){ char b[32]; snprintf(b,sizeof b,"bb%d:\n",n); sb_put(c->body,b); c->term=0; }
+/* materialize a float constant as a register. AIR rejects floating-point
+ * literals as instruction operands, so every FP constant is carried as
+ * bitcast(i32) — same bits, always a valid SSA operand. */
+static const char *fconst(CG *c, double v){
+    float fv=(float)v; unsigned bits; memcpy(&bits,&fv,4);
+    const char *r=newtmp(c);
+    emit(c,"  %s = bitcast i32 %u to float\n",r,bits);
+    return r;
+}
 /* implicit numeric coercion (int/uint<->float/bool) for assignments/inits */
 static const char *coerce(CG *c, const char *v, ValKind from, ValKind to){
     if(from==to) return v;
@@ -252,7 +261,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
     g_last_line=e->line; g_last_col=e->col;
     c->rvw=0; /* cases set this to the vector width of their result, if any */
     switch(e->kind){
-    case E_FCONST:{ *k=VK_F32; char *s=malloc(32); snprintf(s,32,"%e",e->fval); return s; }
+    case E_FCONST:{ *k=VK_F32; return fconst(c,e->fval); }
     case E_ICONST:{ *k=VK_I32; char *s=malloc(16); snprintf(s,16,"%ld",e->ival); return s; }
     case E_BOOL:{ *k=VK_I1; return e->bval?"true":"false"; }
     case E_IDENT:{
@@ -331,6 +340,24 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             emit(c,"  %s = xor %s %s, %s\n",r,ty,v,ones); }
         else emit(c,"  %s = xor %s %s, -1\n",r,ty,v);
         return r; }
+    case E_CAST:{ ValKind lk; const char *v=gen_rval(c,e->operand,&lk); int vw=c->rvw;
+        Type *t=&e->cty; TypeKind tk=t->kind; int tv=t->vecn>1?t->vecn:0;
+        if(tk==T_BOOL){
+            if(vw) die(0,"cannot cast a vector to bool");
+            const char *r=newtmp(c); *k=VK_I1; c->rvw=0;
+            if(lk==VK_F32) emit(c,"  %s = fcmp one float %s, 0.000000e+00\n",r,v);
+            else emit(c,"  %s = icmp ne i32 %s, 0\n",r,v);
+            return r;
+        }
+        ValKind want=scalar_vk(tk);
+        if(tv){ /* to vector: same-width conversion, or scalar splat */
+            if(vw&&vw!=tv) die(0,"vector width mismatch in cast");
+            if(!vw){ const char *s=coerce(c,v,lk,want); *k=want; c->rvw=tv; return splat(c,s,scalar_ll(tk),tv); }
+            if(lk!=want) return vconv(c,v,tv,lk,want);
+            *k=want; c->rvw=tv; return v;
+        }
+        if(vw) die(0,"cannot cast a vector to a scalar");
+        const char *r=coerce(c,v,lk,want); *k=want; c->rvw=0; return r; }
     case E_NOT:{ ValKind lk; const char *v=gen_rval(c,e->operand,&lk); if(lk!=VK_I1) die(0,"! on non-bool");
         const char *r=newtmp(c); *k=VK_I1; emit(c,"  %s = xor i1 %s, true\n",r,v); return r; }
     case E_BIN:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw;
@@ -542,7 +569,8 @@ static const char *gen_cond(CG *c, Expr *e){
     if(c->rvw) die(0,"vector value in a condition");
     if(k==VK_I1) return v;
     const char *r=newtmp(c);
-    emit(c,"  %s = %s %s %s %s, %s\n",r,k==VK_F32?"fcmp":"icmp",k==VK_F32?"one":"ne",k==VK_F32?"float":"i32",v,k==VK_F32?"0.000000e+00":"0");
+    if(k==VK_F32) emit(c,"  %s = fcmp one float %s, %s\n",r,v,fconst(c,0.0));
+    else emit(c,"  %s = icmp ne i32 %s, 0\n",r,v);
     return r;
 }
 /* divergence heuristic: does expr touch device/constant element data (=> varying)? */
