@@ -1,0 +1,23 @@
+/* generic.binc — monomorphized template functions.
+ * gmin/gmax instantiate per call-site type: float, int, uint. */
+template<typename T> T gmin(T a, T b) { return a < b ? a : b; }
+template<typename T> T gmax(T a, T b) { return a < b ? b : a; }
+
+/* a template with a T local and cast */
+template<typename T> T scale(T x, float s) {
+    T r = x;
+    r = (T)((float)r * s);
+    return r;
+}
+
+kernel void k(device float* fout, device int* iout, device uint* uout, coord1D i) {
+    fout[i]     = gmin(3.0f, 7.0f);          /* 3 */
+    fout[i + 8] = gmax(3.0f, 7.0f);          /* 7 */
+    fout[i + 16] = scale(2.0f, 2.5f);        /* 5 */
+    iout[i]     = gmin(5, 2);                /* 2 */
+    iout[i + 8] = gmax(5, 2);                /* 5 */
+    iout[i + 16] = scale(4, 3);              /* 12 */
+    uout[i]     = gmin(9u, 4u);              /* 4 */
+    uout[i + 8] = gmax(9u, 4u);              /* 9 */
+    uout[i + 16] = scale(100u, 0.25f);       /* 25 */
+}

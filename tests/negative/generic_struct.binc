@@ -1,0 +1,7 @@
+struct S { float x; };
+template<typename T> T gmin(T a, T b) { return a < b ? a : b; }
+kernel void k(device float* out, coord1D i) {
+    S a;
+    S b;
+    out[i] = gmin(a, b);
+}

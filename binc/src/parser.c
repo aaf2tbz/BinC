@@ -8,6 +8,9 @@ static Token *advance(TokStream *ts){ return &ts->toks[ts->i++]; }
 static int accept(TokStream *ts,TokKind k){ if(peek(ts)->kind==k){ts->i++;return 1;} return 0; }
 static void expect(TokStream *ts,TokKind k,const char *w){ if(peek(ts)->kind!=k) die(peek(ts)->line,"expected %s",w); ts->i++; }
 
+/* active template type parameter name while parsing a template function signature+body */
+static const char *g_tvar = NULL;
+
 static Type parse_type(TokStream *ts){
     Type t={0};
     if(accept(ts,TK_KW_DEVICE))t.as=AS_DEVICE; else if(accept(ts,TK_KW_CONSTANT))t.as=AS_CONSTANT;
@@ -44,7 +47,10 @@ static Type parse_type(TokStream *ts){
         expect(ts,TK_GT,">");
     }
     else if(accept(ts,TK_KW_SAMPLER)) t.kind=T_SAMPLER;
-    else if(peek(ts)->kind==TK_IDENT){ t.kind=T_STRUCT; t.struct_name=strdup(advance(ts)->text); }
+    else if(peek(ts)->kind==TK_IDENT){
+        if(g_tvar && !strcmp(peek(ts)->text,g_tvar)){ advance(ts); t.kind=T_TVAR; t.tvar=strdup(g_tvar); }
+        else { t.kind=T_STRUCT; t.struct_name=strdup(advance(ts)->text); }
+    }
     else die(peek(ts)->line,"expected a type");
     if(accept(ts,TK_STAR)){ t.is_ptr=1; if(t.as==0)t.as=AS_DEVICE; }
     return t;
@@ -109,6 +115,7 @@ static Expr *parse_postfix(TokStream *ts){
 /* does the token AFTER '(' begin a scalar/vector numeric type usable as a cast target? */
 static int cast_type_start(TokStream *ts){
     TokKind k=(ts->i+1<ts->n)?ts->toks[ts->i+1].kind:TK_EOF;
+    if(k==TK_IDENT&&g_tvar&&!strcmp(ts->toks[ts->i+1].text,g_tvar)) return 1; /* (T) in a template body */
     return k==TK_KW_FLOAT||k==TK_KW_HALF||k==TK_KW_INT||k==TK_KW_UINT||k==TK_KW_BOOL;
 }
 static Expr *parse_unary(TokStream *ts){
@@ -297,7 +304,7 @@ static Stmt parse_stmt(TokStream *ts){
         if(nk==TK_KW_FLOAT||nk==TK_KW_HALF||nk==TK_KW_INT||nk==TK_KW_UINT||nk==TK_KW_BOOL||nk==TK_KW_MAT)
             advance(ts); /* consume 'const', the type follows */
     }
-    if(starts_scalar_type(ts)){
+    if(starts_scalar_type(ts)||(peek(ts)->kind==TK_IDENT&&g_tvar&&!strcmp(peek(ts)->text,g_tvar))){
         Type ty=parse_type(ts); Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
         if(accept(ts,TK_LBRACK)){ Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
             if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); } }
@@ -311,9 +318,18 @@ static Stmt parse_stmt(TokStream *ts){
 static void parse_function(TokStream *ts, Program *prog){
     Stage stage=ST_NONE; if(accept(ts,TK_KW_VERTEX))stage=ST_VERTEX; else if(accept(ts,TK_KW_FRAGMENT))stage=ST_FRAGMENT;
     int is_kernel=accept(ts,TK_KW_KERNEL);
+    /* template<typename T> — single type parameter, active for the signature and body */
+    const char *tvar=NULL;
+    if(accept(ts,TK_KW_TEMPLATE)){
+        expect(ts,TK_LT,"<"); expect(ts,TK_KW_TYPENAME,"typename");
+        Token *tn=peek(ts); expect(ts,TK_IDENT,"type parameter name");
+        tvar=strdup(tn->text); expect(ts,TK_GT,">");
+    }
+    g_tvar=tvar;
     Type ret=parse_type(ts);
     if(stage!=ST_NONE&&is_kernel) die(peek(ts)->line,"render stages cannot also be kernels");
     if(is_kernel&&ret.kind!=T_VOID) die(peek(ts)->line,"kernel functions must return void");
+    if(is_kernel&&tvar) die(peek(ts)->line,"kernels cannot be templates");
     if(ret.kind==T_STRUCT) { /* struct-by-value returns: plain + stage functions; kernels keep void */ }
     if(ret.matn) die(peek(ts)->line,"matrix-by-value return not supported");
     Token *nm=peek(ts); expect(ts,TK_IDENT,"function name"); expect(ts,TK_LPAREN,"(");
@@ -342,8 +358,9 @@ static void parse_function(TokStream *ts, Program *prog){
     int coords=0; for(size_t i=0;i<np;i++) if(params[i].ty.kind==T_COORD) coords++;
     if(coords>1) die(peek(ts)->line,"a kernel may have only one coordinate domain parameter");
     if(coords) is_kernel=1;
+    g_tvar=NULL; /* template type parameter ends with the function body */
     prog->funcs=realloc(prog->funcs,(prog->nfuncs+1)*sizeof(Function));
-    prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,stage,ret,nm->line};
+    prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,stage,ret,nm->line,tvar!=NULL,tvar?strdup(tvar):NULL,{0}};
 }
 static void parse_struct(TokStream *ts, Program *prog){
     Token *tag=peek(ts); expect(ts,TK_IDENT,"struct tag"); expect(ts,TK_LBRACE,"{");

@@ -11,11 +11,12 @@ typedef enum { AS_DEVICE=1, AS_CONSTANT=2, AS_THREADGROUP=3, AS_THREAD=0 } AddrS
 typedef enum { UN_UNIFORM=0, UN_VARYING=1 } Uniformity;
 
 typedef enum { T_VOID, T_FLOAT, T_HALF, T_INT32, T_UINT32, T_BOOL, T_STRUCT,
-               T_COORD, T_GRID_EXTENT, T_ATOMIC, T_TEXTURE, T_SAMPLER } TypeKind;
+               T_COORD, T_GRID_EXTENT, T_ATOMIC, T_TEXTURE, T_SAMPLER, T_TVAR } TypeKind;
 
 typedef struct {
     TypeKind kind;
     char    *struct_name;
+    char    *tvar;   /* template type variable name, or NULL */
     int      is_ptr;
     AddrSpace as;
     int      vecn; /* 0/1 = scalar; 2/3/4 = vector width */
@@ -72,7 +73,8 @@ struct Stmt {
 
 typedef struct { char *name; Type ty; Uniformity un; } Param;
 typedef enum { ST_NONE, ST_VERTEX, ST_FRAGMENT } Stage;
-typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; int line; } Function;
+typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; int line;
+    int is_template; char *tvar; Type tvar_ty; } Function;
 typedef struct { char *name; Type ty; int attr; int attr_idx; } Field; /* attr: 0 none, 1 position, 2 flat, 3 color(N), 4 depth, 5 user(locnN) */
 typedef struct { char *tag; Field *fields; size_t nfields; } StructDef;
 typedef struct { char *name; Type ty; int is_int; long ival; double fval; int line; } ConstDef;
@@ -93,7 +95,7 @@ typedef enum {
     TK_KW_BREAK, TK_KW_CONTINUE, TK_KW_SWITCH, TK_KW_CASE, TK_KW_DEFAULT,
     TK_KW_DEVICE, TK_KW_CONSTANT, TK_KW_THREADGROUP, TK_KW_THREAD, TK_KW_UNIFORM, TK_KW_VARYING,
     TK_KW_COORD, TK_KW_GRID_EXTENT, TK_KW_ATOMIC, TK_KW_VERTEX, TK_KW_FRAGMENT, TK_KW_VERTEX_ID,
-    TK_KW_MAT, TK_KW_TEXTURE2D, TK_KW_SAMPLER
+    TK_KW_MAT, TK_KW_TEXTURE2D, TK_KW_SAMPLER, TK_KW_TEMPLATE, TK_KW_TYPENAME
 } TokKind;
 typedef struct { TokKind kind; char *text; double fval; long ival; int line, col; } Token;
 typedef struct { Token *toks; size_t n; size_t i; } TokStream;
@@ -106,6 +108,6 @@ extern int g_last_line, g_last_col, g_err_count;
 /* when set, die() reports and longjmps to the recovery point instead of exiting */
 extern jmp_buf *g_recover;
 Program parse_program(TokStream *ts);
-void emit_air(FILE *out, const Program *prog);
+void emit_air(FILE *out, Program *prog);
 void binc_set_air(const char *triple, int sdk, int minor);
 #endif

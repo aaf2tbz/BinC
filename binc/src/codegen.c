@@ -64,7 +64,7 @@ static int struct_layout(StructDef *s, int *al){
 
 typedef struct { char *name; char *slot; TypeKind kind; char *sname; int vecn; int matn; int is_const; int an, am; } Loc;
 typedef struct {
-    SB *pre,*body; const Program *prog; Function *fn;
+    SB *pre,*body; const Program *prog; Function *fn; size_t fidx; /* fidx: fn's slot in prog->funcs (re-fetch fn after realloc) */
     int tmp; char *idx; int explicit_domain; int coord_param; int grid_extent_param;
     int uses_local_coord, uses_group_coord; int *read,*written; char **scalar_load;
     Loc *locs; size_t nlocs;
@@ -157,6 +157,91 @@ static char *element_ptr_idx(CG *c,int pi,const char *ix){
 static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark);
 static const char *gen_cond(CG *c, Expr *e);
 static const char *gen_rval(CG *c, Expr *e, ValKind *k);
+
+/* ---- template (monomorphized) functions ----
+ * A template<T> function is skipped at emission; each call site with a concrete
+ * T instantiates a copy whose name is "<fn>.<typekey>", appended to prog->funcs
+ * (the emit loop re-reads nfuncs, so instantiations made while codegen'ing a
+ * body are picked up). The instantiated function shares the template's body AST;
+ * type variables inside it (S_DECL / E_CAST) resolve via fn->tvar_ty. */
+static Type bind_ty(const Function *fn, Type ty){
+    if(ty.tvar){ if(!fn->tvar) die(0,"unbound type variable %s",ty.tvar); return fn->tvar_ty; }
+    return ty;
+}
+static void type_key(const Type *ty, char *buf, size_t n){
+    if(ty->kind==T_STRUCT) snprintf(buf,n,"s%s",ty->struct_name);
+    else if(ty->kind==T_TVAR) snprintf(buf,n,"tvar");
+    else if(ty->matn) snprintf(buf,n,"m%d",ty->matn);
+    else if(ty->vecn>1) snprintf(buf,n,"v%d%s",ty->vecn,ty->kind==T_HALF?"f16":"f32");
+    else snprintf(buf,n,"%s",ty->kind==T_INT32?"i32":ty->kind==T_UINT32?"u32":
+        ty->kind==T_FLOAT?"f32":ty->kind==T_HALF?"f16":ty->kind==T_BOOL?"b1":"?");
+}
+typedef struct { char *key; size_t fidx; } InstRec;
+static InstRec *insts=NULL; static size_t ninsts=0;
+static size_t inst_lookup(const char *key){ for(size_t i=0;i<ninsts;i++) if(!strcmp(insts[i].key,key)) return insts[i].fidx; return (size_t)-1; }
+
+/* static type of an expression, for template argument inference */
+static void expr_type_of(CG *c, Expr *e, Type *out){
+    memset(out,0,sizeof *out);
+    switch(e->kind){
+    case E_ICONST: out->kind=T_INT32; break;
+    case E_FCONST: out->kind=T_FLOAT; break;
+    case E_BOOL: out->kind=T_BOOL; break;
+    case E_IDENT:{ int idx; RKind r=resolve(c,e->name,&idx);
+        if(r==R_LOCAL){ out->kind=c->locs[idx].kind; out->struct_name=c->locs[idx].sname;
+            out->vecn=c->locs[idx].vecn; out->matn=c->locs[idx].matn; }
+        else if(r==R_CONST){ out->kind=c->prog->consts[idx].ty.kind; }
+        else if(r==R_PTR||r==R_SCALAR){ Type t=c->fn->params[idx].ty; t.tvar=NULL; *out=t; }
+        else { out->kind=T_INT32; }
+        break; }
+    case E_CAST: { Type t=e->cty; t.tvar=NULL; *out=t; break; }
+    case E_FIELD:{ Type base; expr_type_of(c,e->operand,&base);
+        if(base.kind==T_STRUCT){ for(size_t i=0;i<c->prog->nstructs;i++)
+            if(!strcmp(c->prog->structs[i].tag,base.struct_name)){
+                StructDef *sd=&c->prog->structs[i];
+                for(size_t j=0;j<sd->nfields;j++) if(!strcmp(sd->fields[j].name,e->field)){ Type t=sd->fields[j].ty; t.tvar=NULL; *out=t; return; }
+                break; } }
+        break; }
+    case E_CALL:{ for(size_t i=0;i<c->prog->nfuncs;i++)
+            if(!strcmp(c->prog->funcs[i].name,e->name)){ Type t=c->prog->funcs[i].ret; t.tvar=NULL; *out=t; return; }
+        out->kind=T_INT32; break; }
+    case E_INDEX:{ Type base; expr_type_of(c,e->operand,&base); base.vecn=0; base.matn=0; base.array_n=0; base.array_m=0; *out=base; break; }
+    case E_DEREF:{ Type base; expr_type_of(c,e->operand,&base); base.is_ptr=0; *out=base; break; }
+    case E_ASSIGN: expr_type_of(c,e->rhs,out); break;
+    case E_TERNARY: expr_type_of(c,e->rhs,out); break;
+    case E_INCDEC: case E_NEG: case E_NOT: case E_COMPL: expr_type_of(c,e->operand,out); break;
+    case E_BIN: expr_type_of(c,e->lhs,out); break;
+    case E_CMP: case E_LOG: out->kind=T_BOOL; break;
+    default: out->kind=T_INT32; break;
+    }
+}
+static Type expr_type(CG *c, Expr *e){ Type t={0}; expr_type_of(c,e,&t); return t; }
+
+static size_t instantiate(Program *prog, Function *tpl, const Type *concrete){
+    char key[128]; type_key(concrete,key,sizeof key);
+    Function inst=*tpl;
+    inst.name=malloc(strlen(tpl->name)+strlen(key)+2);
+    sprintf(inst.name,"%s.%s",tpl->name,key);
+    inst.is_template=0;
+    inst.tvar=tpl->tvar?strdup(tpl->tvar):NULL;
+    inst.tvar_ty=*concrete; inst.tvar_ty.tvar=NULL;
+    inst.params=calloc(tpl->nparams,sizeof(Param));
+    for(size_t i=0;i<tpl->nparams;i++){
+        inst.params[i].name=strdup(tpl->params[i].name);
+        inst.params[i].un=tpl->params[i].un;
+        inst.params[i].ty=tpl->params[i].ty;
+        if(inst.params[i].ty.tvar) inst.params[i].ty=*concrete;
+        inst.params[i].ty.tvar=NULL;
+    }
+    inst.ret=tpl->ret;
+    if(inst.ret.tvar) inst.ret=*concrete;
+    inst.ret.tvar=NULL;
+    prog->funcs=realloc(prog->funcs,(prog->nfuncs+1)*sizeof(Function));
+    size_t fi=prog->nfuncs; prog->funcs[fi]=inst; prog->nfuncs++;
+    insts=realloc(insts,(ninsts+1)*sizeof(InstRec));
+    insts[ninsts].key=strdup(inst.name); insts[ninsts].fidx=fi; ninsts++;
+    return fi;
+}
 
 /* matrix width of a name/field expression, 0 if not a matrix */
 static int matrix_n(CG *c, Expr *e){
@@ -749,7 +834,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         else emit(c,"  %s = xor %s %s, -1\n",r,ty,v);
         return r; }
     case E_CAST:{ ValKind lk; const char *v=gen_rval(c,e->operand,&lk); int vw=c->rvw;
-        Type *t=&e->cty; TypeKind tk=t->kind; int tv=t->vecn>1?t->vecn:0;
+        Type bt=bind_ty(c->fn,e->cty); Type *t=&bt; TypeKind tk=t->kind; int tv=t->vecn>1?t->vecn:0;
         if(tk==T_BOOL){
             if(vw) die(0,"cannot cast a vector to bool");
             const char *r=newtmp(c); *k=VK_I1; c->rvw=0;
@@ -911,8 +996,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         if(isf){ l=coerce(c,l,lk,VK_F32); r=coerce(c,r,rk,VK_F32); }
         const char *v=newtmp(c); *k=ok;
         emit(c,"  %s = %s %s %s, %s\n",v,op,isf?"float":"i32",l,r); return v; }
-    case E_CMP:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw;
-        const char *r=gen_rval(c,e->rhs,&rk); int rw=c->rvw;
+    case E_CMP:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw; int lm=c->rmat;
+        const char *r=gen_rval(c,e->rhs,&rk); int rw=c->rvw; int rm=c->rmat;
+        if(c->rstruct||lm||rm) die(0,"cannot compare struct or matrix values");
         int vw=lw?lw:rw;
         if(lw&&rw&&lw!=rw) die(0,"vector width mismatch in comparison");
         int isf=(lk==VK_F32||rk==VK_F32);
@@ -1223,6 +1309,24 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         Function *f=NULL; for(size_t i=0;i<c->prog->nfuncs;i++)
             if(!strcmp(c->prog->funcs[i].name,e->name)){ f=&c->prog->funcs[i]; break; }
         if(f){
+            if(f->is_template){
+                /* instantiate for the concrete type of the first T-typed argument */
+                size_t bp=(size_t)-1;
+                for(size_t i=0;i<f->nparams;i++) if(f->params[i].ty.tvar){ bp=i; break; }
+                if(bp==(size_t)-1) die(0,"cannot infer template arguments for %s (no type parameter in the parameters)",e->name);
+                if(bp>=e->nargs) die(0,"%s: not enough arguments to infer the template type",e->name);
+                Type concrete=expr_type(c,e->args[bp]);
+                if(concrete.kind==T_TVAR||concrete.kind==T_VOID||concrete.kind==T_COORD||concrete.kind==T_GRID_EXTENT||
+                   concrete.kind==T_ATOMIC||concrete.kind==T_TEXTURE||concrete.kind==T_SAMPLER||concrete.is_ptr)
+                    die(0,"unsupported template argument type for %s",e->name);
+                char key[128]; type_key(&concrete,key,sizeof key);
+                char fullkey[192]; snprintf(fullkey,sizeof fullkey,"%s.%s",f->name,key);
+                size_t fi=inst_lookup(fullkey);
+                if(fi==(size_t)-1) fi=instantiate((Program*)c->prog,f,&concrete);
+                f=&c->prog->funcs[fi];
+                /* instantiate() reallocs prog->funcs; refresh the caller's context */
+                c->fn=&c->prog->funcs[c->fidx];
+            }
             if(f->is_kernel) die(0,"cannot call kernel function %s",e->name);
             if(f==c->fn) die(0,"recursion is not supported on the GPU (%s calls itself)",e->name);
             if(e->nargs!=f->nparams) die(0,"%s expects %d argument(s), got %d",e->name,(int)f->nparams,(int)e->nargs);
@@ -1477,47 +1581,47 @@ static void gen_stmt(CG *c, Stmt *s){
     g_last_line=s->line; g_last_col=s->col;
     switch(s->kind){
     case S_EXPR:{ ValKind k; if(s->expr) gen_rval(c,s->expr,&k); break; }
-    case S_DECL:{ TypeKind kk=s->ty.kind;
-        if(kk==T_STRUCT){ StructDef *sd=find_struct(c->prog,s->ty.struct_name);
-            if(!sd) die(0,"unknown struct %s",s->ty.struct_name);
-            if(s->ty.array_n) die(0,"arrays of structs are not supported as locals");
+    case S_DECL:{ Type bty=bind_ty(c->fn,s->ty); TypeKind kk=bty.kind;
+        if(kk==T_STRUCT){ StructDef *sd=find_struct(c->prog,bty.struct_name);
+            if(!sd) die(0,"unknown struct %s",bty.struct_name);
+            if(bty.array_n) die(0,"arrays of structs are not supported as locals");
             int sal; struct_layout(sd,&sal);
-            char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %%struct.%s, align %d\n",slot,s->ty.struct_name,sal);
+            char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %%struct.%s, align %d\n",slot,bty.struct_name,sal);
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,s->ty.struct_name,0,0,0,0,0};
+            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,bty.struct_name,0,0,0,0,0};
             if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
-                if(!c->rstruct||strcmp(c->rstruct,s->ty.struct_name)) die(0,"struct type mismatch in initializer");
-                char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",s->ty.struct_name);
+                if(!c->rstruct||strcmp(c->rstruct,bty.struct_name)) die(0,"struct type mismatch in initializer");
+                char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",bty.struct_name);
                 emit(c,"  store %s %s, %s* %s, align %d\n",sn,v,sn,slot,sal); }
             break; }
-        if(s->ty.matn){
-            char mty[32]; mll_of(mty,sizeof mty,s->ty.matn);
-            char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,mty,mat_align(s->ty.matn));
+        if(bty.matn){
+            char mty[32]; mll_of(mty,sizeof mty,bty.matn);
+            char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,mty,mat_align(bty.matn));
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,0,s->ty.matn,s->is_const,0,0};
+            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,0,bty.matn,s->is_const,0,0};
             if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
-                if(c->rmat!=s->ty.matn) die(0,"matrix width mismatch in initializer");
-                emit(c,"  store %s %s, %s* %s, align %d\n",mty,v,mty,slot,mat_align(s->ty.matn)); }
+                if(c->rmat!=bty.matn) die(0,"matrix width mismatch in initializer");
+                emit(c,"  store %s %s, %s* %s, align %d\n",mty,v,mty,slot,mat_align(bty.matn)); }
             break; }
-        if(s->ty.array_n){
+        if(bty.array_n){
             /* local fixed-size array: alloca [N x T] / [N x [M x T]] */
-            char elt[32]; ll_of(elt,sizeof elt,kk,s->ty.vecn);
+            char elt[32]; ll_of(elt,sizeof elt,kk,bty.vecn);
             char arrty[64];
-            if(s->ty.array_m) snprintf(arrty,sizeof arrty,"[%d x [%d x %s]]",s->ty.array_n,s->ty.array_m,elt);
-            else snprintf(arrty,sizeof arrty,"[%d x %s]",s->ty.array_n,elt);
+            if(bty.array_m) snprintf(arrty,sizeof arrty,"[%d x [%d x %s]]",bty.array_n,bty.array_m,elt);
+            else snprintf(arrty,sizeof arrty,"[%d x %s]",bty.array_n,elt);
             if(s->init) die(0,"array initializers are not supported; assign elements instead");
-            char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,arrty,type_align(kk,s->ty.vecn));
+            char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,arrty,type_align(kk,bty.vecn));
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,s->ty.vecn,0,s->is_const,s->ty.array_n,s->ty.array_m};
+            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,bty.vecn,0,s->is_const,bty.array_n,bty.array_m};
             break; }
-        char ll[32]; ll_of(ll,sizeof ll,kk,s->ty.vecn);
-        char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,ll,type_align(kk,s->ty.vecn));
+        char ll[32]; ll_of(ll,sizeof ll,kk,bty.vecn);
+        char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,ll,type_align(kk,bty.vecn));
         c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-        c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,s->ty.vecn,0,s->is_const,0,0};
+        c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,bty.vecn,0,s->is_const,0,0};
         if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
-            warn_implicit(c,s->init,k,kk,s->ty.vecn);
-            const char *sv=to_storage(c,v,k,c->rvw,kk,s->ty.vecn);
-            emit(c,"  store %s %s, %s* %s, align %d\n",ll,sv,ll,slot,type_align(kk,s->ty.vecn)); }
+            warn_implicit(c,s->init,k,kk,bty.vecn);
+            const char *sv=to_storage(c,v,k,c->rvw,kk,bty.vecn);
+            emit(c,"  store %s %s, %s* %s, align %d\n",ll,sv,ll,slot,type_align(kk,bty.vecn)); }
         break; }
     case S_RETURN:{ TypeKind rk=c->fn->ret.kind;
         if(s->expr){ if(rk==T_VOID) die(0,"return with a value in void function");
@@ -1824,7 +1928,7 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
     }
 }
 
-void emit_air(FILE *out, const Program *prog){
+void emit_air(FILE *out, Program *prog){
     g_curprog=prog;
     memset(builtin_used,0,sizeof builtin_used); memset(atomic_add_used,0,sizeof atomic_add_used);
     fprintf(out,"; generated by binc — works as C, acts as Metal\n");
@@ -1867,10 +1971,14 @@ void emit_air(FILE *out, const Program *prog){
     if(atomic_base>=0) fprintf(out,"%%\"struct.metal::_atomic\" = type { %s }\n",scalar_ll((TypeKind)atomic_base));
     fprintf(out,"\n");
 
-    typedef struct { int *read,*written; int np, nmeta; } KF; KF *kf=calloc(prog->nfuncs,sizeof(KF));
+    typedef struct { int *read,*written; int np, nmeta; } KF;
+    size_t kf_cap=prog->nfuncs?prog->nfuncs:1;
+    KF *kf=calloc(kf_cap,sizeof(KF));
     for(volatile size_t fi=0;fi<prog->nfuncs;fi++){
+        if(fi>=kf_cap){ kf_cap*=2; kf=realloc(kf,kf_cap*sizeof(KF)); memset(kf+(kf_cap/2),0,(kf_cap/2)*sizeof(KF)); }
         Function *fn=&prog->funcs[fi]; CG c={0};
-        SB pr={0},bd={0}; c.pre=&pr; c.body=&bd; c.prog=prog; c.fn=fn; c.tmp=0;
+        if(fn->is_template) continue; /* templates emit nothing; call sites instantiate */
+        SB pr={0},bd={0}; c.pre=&pr; c.body=&bd; c.prog=prog; c.fn=fn; c.fidx=fi; c.tmp=0;
         c.read=calloc(fn->nparams,sizeof(int)); c.written=calloc(fn->nparams,sizeof(int));
         c.scalar_load=calloc(fn->nparams,sizeof(char*)); c.coord_param=-1; c.grid_extent_param=-1;
         for(size_t i=0;i<fn->nparams;i++){
@@ -1961,13 +2069,16 @@ void emit_air(FILE *out, const Program *prog){
             c.locs=realloc(c.locs,(c.nlocs+1)*sizeof(Loc));
             c.locs[c.nlocs++]=(Loc){p->name,slot,T_STRUCT,p->ty.struct_name,0,0,0,0,0};
         }
-        gen_block(&c,&fn->body);
-        if(!c.term){ if(fn->ret.kind==T_VOID) emit(&c,"  ret void\n");
-            else if(fn->ret.kind==T_STRUCT){ StructDef *sd=find_struct(prog,fn->ret.struct_name);
+        /* top-level body: re-derive the Block after every statement, because a
+         * template instantiation reallocs prog->funcs and moves the Function's
+         * body field (nested blocks live in the heap-stable stmts array) */
+        for(size_t si=0;;si++){ Block *b=&c.fn->body; if(si>=b->n) break; gen_stmt(&c,&b->stmts[si]); }
+        if(!c.term){ if(c.fn->ret.kind==T_VOID) emit(&c,"  ret void\n");
+            else if(c.fn->ret.kind==T_STRUCT){ StructDef *sd=find_struct(prog,c.fn->ret.struct_name);
                 char lt[256]; stage_lit_type(lt,sizeof lt,sd); emit(&c,"  ret %s undef\n",lt); }
-            else { char rl[32]; ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
-                emit(&c,"  ret %s %s\n",rl,fn->ret.vecn>1?"zeroinitializer":
-                    fn->ret.kind==T_FLOAT||fn->ret.kind==T_HALF?"0.000000e+00":fn->ret.kind==T_BOOL?"false":"0"); } }
+            else { char rl[32]; ll_of(rl,sizeof rl,c.fn->ret.kind,c.fn->ret.vecn);
+                emit(&c,"  ret %s %s\n",rl,c.fn->ret.vecn>1?"zeroinitializer":
+                    c.fn->ret.kind==T_FLOAT||c.fn->ret.kind==T_HALF?"0.000000e+00":c.fn->ret.kind==T_BOOL?"false":"0"); } }
         /* a body containing a barrier must be convergent and cannot be nosync (#1); else #0 */
         fprintf(out,"%s #%d {\n",sig,c.uses_sync?1:0);
         fwrite(pr.p,1,pr.n,out); fwrite(bd.p,1,bd.n,out);
