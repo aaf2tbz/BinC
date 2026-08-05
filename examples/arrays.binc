@@ -1,0 +1,19 @@
+struct Row {
+    float v[4];
+    float sum;
+};
+
+kernel void k(device float* out, device Row* rows, coord1D i) {
+    float local[4];                 /* local fixed-size array */
+    local[0] = 1.0f;
+    local[1] = 2.0f;
+    local[2] = 3.0f;
+    local[3] = 4.0f;
+    float s = 0.0f;
+    for (int j = 0; j < 4; j++) {
+        s += local[j];
+        rows[i].v[j] = local[j] * 2.0f;   /* array field inside a device struct: write */
+    }
+    rows[i].sum = s;                /* 10 */
+    out[i] = rows[i].v[0] + rows[i].v[1] + rows[i].v[2] + rows[i].v[3] + rows[i].sum;  /* 30 */
+}

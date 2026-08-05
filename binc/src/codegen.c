@@ -56,11 +56,13 @@ static void ptn_of(char *buf,size_t n,TypeKind k,int vecn,int matn){
 static int struct_layout(StructDef *s, int *al){
     int off=0,m=1;
     for(size_t i=0;i<s->nfields;i++){ int fa=tal(s->fields[i].ty.kind,s->fields[i].ty.vecn,s->fields[i].ty.matn);
-        off=(off+fa-1)&~(fa-1); off+=tsz(s->fields[i].ty.kind,s->fields[i].ty.vecn,s->fields[i].ty.matn); if(fa>m)m=fa; }
+        int fs=tsz(s->fields[i].ty.kind,s->fields[i].ty.vecn,s->fields[i].ty.matn);
+        if(s->fields[i].ty.array_n) fs *= s->fields[i].ty.array_n*(s->fields[i].ty.array_m?s->fields[i].ty.array_m:1);
+        if(fa>m)m=fa; off=(off+fa-1)&~(fa-1); off+=fs; }
     *al=m; return (off+m-1)&~(m-1);
 }
 
-typedef struct { char *name; char *slot; TypeKind kind; char *sname; int vecn; int matn; int is_const; } Loc;
+typedef struct { char *name; char *slot; TypeKind kind; char *sname; int vecn; int matn; int is_const; int an, am; } Loc;
 typedef struct {
     SB *pre,*body; const Program *prog; Function *fn;
     int tmp; char *idx; int explicit_domain; int coord_param; int grid_extent_param;
@@ -135,7 +137,7 @@ static const char *coord_value(CG *c, Type *t, const char *raw){
 }
 
 /* lvalue description: element type + where the address lives */
-typedef struct { TypeKind tk; char *sname; int as; int pi; int is_local; int vecn; int matn; } LInfo;
+typedef struct { TypeKind tk; char *sname; int as; int pi; int is_local; int vecn; int matn; int an, am; } LInfo;
 static void shared_name(CG *c, int pi, char *buf, size_t n){
     snprintf(buf,n,"@_binc_smem_%s_%s",c->fn->name,c->fn->params[pi].name);
 }
@@ -602,6 +604,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
     case E_IDENT:{
         int idx; RKind r=resolve(c,e->name,&idx);
         if(r==R_LOCAL){
+            if(c->locs[idx].an>0) die(0,"cannot use an array as a value");
             if(c->locs[idx].matn){
                 /* whole matrix value: aggregate load */
                 char mty[32]; mll_of(mty,sizeof mty,c->locs[idx].matn);
@@ -609,7 +612,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 emit(c,"  %s = load %s, %s* %s, align %d\n",v,mty,mty,c->locs[idx].slot,mat_align(c->locs[idx].matn));
                 *k=VK_F32; c->rvw=0; c->rmat=c->locs[idx].matn; return v;
             }
-            LInfo li={c->locs[idx].kind,c->locs[idx].sname,0,-1,1,c->locs[idx].vecn,c->locs[idx].matn};
+            LInfo li={c->locs[idx].kind,c->locs[idx].sname,0,-1,1,c->locs[idx].vecn,c->locs[idx].matn,0,0};
             return emit_load_t(c,&li,c->locs[idx].slot,k); }
         if(r==R_COORD){
             Param *p=&c->fn->params[idx]; char nm[32]; snprintf(nm,sizeof nm,"%%_%s",p->name);
@@ -681,7 +684,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     if(nc<0) die(0,"invalid vector component .%s",e->field);
                     for(int i=0;i<nc;i++) if(idxs[i]>=c->locs[vi].vecn) die(0,"invalid vector component .%s",e->field);
                     if(nc>1){
-                        LInfo li={c->locs[vi].kind,c->locs[vi].sname,0,-1,1,c->locs[vi].vecn,c->locs[vi].matn};
+                        LInfo li={c->locs[vi].kind,c->locs[vi].sname,0,-1,1,c->locs[vi].vecn,c->locs[vi].matn,0,0};
                         ValKind lk; const char *lv=emit_load_t(c,&li,c->locs[vi].slot,&lk);
                         const char *elt = c->locs[vi].kind==T_HALF?"float":scalar_ll(c->locs[vi].kind);
                         char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",c->locs[vi].vecn,elt);
@@ -930,6 +933,20 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
     case E_LOG:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw;
         const char *r=gen_rval(c,e->rhs,&rk); if(lw||c->rvw) die(0,"vector operand in logical operator");
         const char *v=newtmp(c); *k=VK_I1; emit(c,"  %s = %s i1 %s, %s\n",v,e->log==L_AND?"and":"or",l,r); return v; }
+    case E_INCDEC:{ /* postfix ++/--: load, add/sub 1, store; value = the old value */
+        ValKind ck;
+        LInfo li; char *addr=gen_lval(c,e->operand,&li,1);
+        if(li.vecn||li.an||li.matn||li.tk==T_STRUCT) die(0,"cannot increment/decrement this value");
+        const char *cur=emit_load_t(c,&li,addr,&ck);
+        if(li.pi>=0) c->read[li.pi]=1;
+        const char *one = ck==VK_F32?fconst(c,1.0):"1";
+        const char *nv=newtmp(c);
+        emit(c,"  %s = %s %s %s, %s\n",nv,ck==VK_F32?"fadd fast":"add",ck==VK_F32?"float":"i32",cur,one);
+        const char *sv=store_val(c,nv,ck,li.tk,&nv);
+        char pty[96]; pty_str(pty,sizeof pty,li.tk,li.sname,li.as,li.is_local,li.vecn,li.matn);
+        char ll[32]; ll_of(ll,sizeof ll,li.tk,li.vecn);
+        emit(c,"  store %s %s, %s %s, align %d\n",ll,sv,pty,addr,type_align(li.tk,li.vecn));
+        *k=ck; c->rvw=0; return cur; }
     case E_ASSIGN:{
         /* swizzle assignment: v.xy = rhs — write each named component */
         if(e->aop==A_ASSIGN && e->operand->kind==E_FIELD && e->operand->operand->kind==E_IDENT){
@@ -1298,11 +1315,12 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
 }
 static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
     g_last_line=e->line; g_last_col=e->col;
-    li->matn=0; /* every path must set vecn/matn explicitly; start clean */
+    li->matn=0; li->an=0; li->am=0; /* every path must set vecn/matn/an/am explicitly; start clean */
     if(e->kind==E_IDENT){
         int idx; RKind r=resolve(c,e->name,&idx);
         if(r==R_LOCAL){ li->tk=c->locs[idx].kind; li->sname=c->locs[idx].sname; li->as=0; li->pi=-1;
             li->is_local=1; li->vecn=c->locs[idx].vecn; li->matn=c->locs[idx].matn;
+            li->an=c->locs[idx].an; li->am=c->locs[idx].am;
             if(mark && c->locs[idx].is_const) die(0,"cannot write to const local %s",e->name);
             return c->locs[idx].slot; }
         die(0,"%s is not a mutable local",e->name);
@@ -1338,6 +1356,39 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
                 emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 0, i64 %s\n",colptr,mty,mty,base,iv);
                 li->tk=T_FLOAT; li->sname=NULL; li->vecn=mn2; li->matn=0;
                 return colptr;
+            }
+        }
+        /* local and struct-field arrays: a[i], s.v[i], buf[i].v[j] */
+        {
+            int is_arr = (e->operand->kind==E_FIELD||e->operand->kind==E_INDEX);
+            if(e->operand->kind==E_IDENT){ int oi; is_arr = resolve(c,e->operand->name,&oi)==R_LOCAL; }
+            if(is_arr){
+                LInfo li2; char *base2=gen_lval(c,e->operand,&li2,mark);
+                if(li2.an>0){
+                    ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
+                    if(ik!=VK_I32&&ik!=VK_U32) die(0,"array index must be an integer");
+                    const char *ix=newtmp(c);
+                    emit(c,"  %s = sext i32 %s to i64\n",ix,iv);
+                    char elt[32]; ll_of(elt,sizeof elt,li2.tk,li2.vecn);
+                    const char *asp = li2.as? " addrspace(1)" : ""; int asn = li2.as;
+                    (void)asn;
+                    if(li2.am>0){
+                        /* two-dimensional: [N x [M x T]]* -> row [M x T]* */
+                        char ty[64]; snprintf(ty,sizeof ty,"[%d x [%d x %s]]",li2.an,li2.am,elt);
+                        char *p=newtmp(c);
+                        emit(c,"  %s = getelementptr inbounds %s, %s%s* %s, i64 0, i64 %s\n",p,ty,ty,asp,base2,ix);
+                        li->tk=li2.tk; li->sname=li2.sname; li->as=li2.as; li->pi=li2.pi; li->is_local=li2.is_local;
+                        li->vecn=li2.vecn; li->matn=0; li->an=li2.am; li->am=0;
+                        return p;
+                    }
+                    char ty[64]; snprintf(ty,sizeof ty,"[%d x %s]",li2.an,elt);
+                    char *p=newtmp(c);
+                    emit(c,"  %s = getelementptr inbounds %s, %s%s* %s, i64 0, i64 %s\n",p,ty,ty,asp,base2,ix);
+                    li->tk=li2.tk; li->sname=li2.sname; li->as=li2.as; li->pi=li2.pi; li->is_local=li2.is_local;
+                    li->vecn=li2.vecn; li->matn=0; li->an=0; li->am=0;
+                    if(li2.pi>=0){ if(mark) c->written[li2.pi]=1; else c->read[li2.pi]=1; }
+                    return p;
+                }
             }
         }
         int pi; const char *base=NULL;
@@ -1380,6 +1431,7 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             char *fp=newtmp(c);
             emit(c,"  %s = getelementptr inbounds %%struct.%s, %s %s, i64 0, i32 %d\n",fp,li->sname,pty,addr,fi);
             li->tk=s->fields[fi].ty.kind; li->sname=s->fields[fi].ty.struct_name; li->vecn=s->fields[fi].ty.vecn; li->matn=s->fields[fi].ty.matn;
+            li->an=s->fields[fi].ty.array_n; li->am=s->fields[fi].ty.array_m;
             return fp; }
         if(li->vecn>1){ /* vector component: bitcast the vector address to element pointer + gep */
             int ci=comp_idx(e->field);
@@ -1428,10 +1480,11 @@ static void gen_stmt(CG *c, Stmt *s){
     case S_DECL:{ TypeKind kk=s->ty.kind;
         if(kk==T_STRUCT){ StructDef *sd=find_struct(c->prog,s->ty.struct_name);
             if(!sd) die(0,"unknown struct %s",s->ty.struct_name);
+            if(s->ty.array_n) die(0,"arrays of structs are not supported as locals");
             int sal; struct_layout(sd,&sal);
             char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %%struct.%s, align %d\n",slot,s->ty.struct_name,sal);
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,s->ty.struct_name,0,0,0};
+            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,s->ty.struct_name,0,0,0,0,0};
             if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
                 if(!c->rstruct||strcmp(c->rstruct,s->ty.struct_name)) die(0,"struct type mismatch in initializer");
                 char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",s->ty.struct_name);
@@ -1441,15 +1494,26 @@ static void gen_stmt(CG *c, Stmt *s){
             char mty[32]; mll_of(mty,sizeof mty,s->ty.matn);
             char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,mty,mat_align(s->ty.matn));
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,0,s->ty.matn,s->is_const};
+            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,0,s->ty.matn,s->is_const,0,0};
             if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
                 if(c->rmat!=s->ty.matn) die(0,"matrix width mismatch in initializer");
                 emit(c,"  store %s %s, %s* %s, align %d\n",mty,v,mty,slot,mat_align(s->ty.matn)); }
             break; }
+        if(s->ty.array_n){
+            /* local fixed-size array: alloca [N x T] / [N x [M x T]] */
+            char elt[32]; ll_of(elt,sizeof elt,kk,s->ty.vecn);
+            char arrty[64];
+            if(s->ty.array_m) snprintf(arrty,sizeof arrty,"[%d x [%d x %s]]",s->ty.array_n,s->ty.array_m,elt);
+            else snprintf(arrty,sizeof arrty,"[%d x %s]",s->ty.array_n,elt);
+            if(s->init) die(0,"array initializers are not supported; assign elements instead");
+            char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,arrty,type_align(kk,s->ty.vecn));
+            c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
+            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,s->ty.vecn,0,s->is_const,s->ty.array_n,s->ty.array_m};
+            break; }
         char ll[32]; ll_of(ll,sizeof ll,kk,s->ty.vecn);
         char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,ll,type_align(kk,s->ty.vecn));
         c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-        c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,s->ty.vecn,0,s->is_const};
+        c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,s->ty.vecn,0,s->is_const,0,0};
         if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
             warn_implicit(c,s->init,k,kk,s->ty.vecn);
             const char *sv=to_storage(c,v,k,c->rvw,kk,s->ty.vecn);
@@ -1783,8 +1847,13 @@ void emit_air(FILE *out, const Program *prog){
     if(prog->nconsts) fprintf(out,"\n");
     for(size_t i=0;i<prog->nstructs;i++){ StructDef *s=&prog->structs[i];
         fprintf(out,"%%struct.%s = type { ",s->tag);
-        for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[32];
-            ll_of(fl,sizeof fl,s->fields[j].ty.kind,s->fields[j].ty.vecn); fprintf(out,"%s",fl); }
+        for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[64];
+            char elt[32]; ll_of(elt,sizeof elt,s->fields[j].ty.kind,s->fields[j].ty.vecn);
+            if(s->fields[j].ty.array_n){
+                if(s->fields[j].ty.array_m) snprintf(fl,sizeof fl,"[%d x [%d x %s]]",s->fields[j].ty.array_n,s->fields[j].ty.array_m,elt);
+                else snprintf(fl,sizeof fl,"[%d x %s]",s->fields[j].ty.array_n,elt);
+            } else snprintf(fl,sizeof fl,"%s",elt);
+            fprintf(out,"%s",fl); }
         fprintf(out," }\n"); }
     for(size_t fi=0;fi<prog->nfuncs;fi++) for(size_t pi=0;pi<prog->funcs[fi].nparams;pi++){
         Param *p=&prog->funcs[fi].params[pi]; if(!p->ty.array_n)continue;
@@ -1871,7 +1940,7 @@ void emit_air(FILE *out, const Program *prog){
             char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",p->ty.struct_name);
             emit(&c,"  store %s %s, %s* %s, align %d\n",sn,an,sn,slot,sal);
             c.locs=realloc(c.locs,(c.nlocs+1)*sizeof(Loc));
-            c.locs[c.nlocs++]=(Loc){p->name,slot,T_STRUCT,p->ty.struct_name,0,0,0};
+            c.locs[c.nlocs++]=(Loc){p->name,slot,T_STRUCT,p->ty.struct_name,0,0,0,0,0};
         }
         /* fragment stage-in struct: unpack the argument registers into a struct local */
         if(fn->stage==ST_FRAGMENT) for(size_t pi2=0;pi2<fn->nparams;pi2++){ Param *p=&fn->params[pi2];
@@ -1889,7 +1958,7 @@ void emit_air(FILE *out, const Program *prog){
                 emit(&c,"  store %s %s, %s %s, align %d\n",ll,an,pty,fp,type_align(sd->fields[f].ty.kind,sd->fields[f].ty.vecn));
             }
             c.locs=realloc(c.locs,(c.nlocs+1)*sizeof(Loc));
-            c.locs[c.nlocs++]=(Loc){p->name,slot,T_STRUCT,p->ty.struct_name,0,0,0};
+            c.locs[c.nlocs++]=(Loc){p->name,slot,T_STRUCT,p->ty.struct_name,0,0,0,0,0};
         }
         gen_block(&c,&fn->body);
         if(!c.term){ if(fn->ret.kind==T_VOID) emit(&c,"  ret void\n");

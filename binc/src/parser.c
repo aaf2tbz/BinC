@@ -100,6 +100,8 @@ static Expr *parse_postfix(TokStream *ts){
         else if(ot->kind==TK_ARROW){ advance(ts); Token *f=peek(ts); expect(ts,TK_IDENT,"field after ->");
             Expr *d=E(E_DEREF,ot->line,ot->col); d->operand=e; /* p->f == (*p).f == p[id].f */
             Expr *n=E(E_FIELD,ot->line,ot->col); n->operand=d; n->field=strdup(f->text); e=n; }
+        else if(ot->kind==TK_INC||ot->kind==TK_DEC){ advance(ts);
+            Expr *n=E(E_INCDEC,ot->line,ot->col); n->operand=e; n->bval = ot->kind==TK_DEC; e=n; }
         else break;
     }
     return e;
@@ -297,6 +299,8 @@ static Stmt parse_stmt(TokStream *ts){
     }
     if(starts_scalar_type(ts)){
         Type ty=parse_type(ts); Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
+        if(accept(ts,TK_LBRACK)){ Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
+            if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); } }
         Expr *init=NULL; if(accept(ts,TK_EQ))init=parse_expr(ts); expect(ts,TK_SEMI,";");
         Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init;
         st.is_const = (kt->kind==TK_KW_CONSTANT); return st;
@@ -363,6 +367,8 @@ static void parse_struct(TokStream *ts, Program *prog){
                 else die(at->line,"unknown field attribute [[%s]]",at->text);
                 expect(ts,TK_DBL_RBRACK,"]]");
             }
+            if(accept(ts,TK_LBRACK)){ Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
+                if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); } }
             if(n==cap){cap=cap?cap*2:8;f=realloc(f,cap*sizeof(Field));} f[n++]=(Field){strdup(fn->text),ty,attr,attr_idx};
         } while(accept(ts,TK_COMMA)); expect(ts,TK_SEMI,";");
     }

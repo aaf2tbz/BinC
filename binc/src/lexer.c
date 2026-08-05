@@ -47,8 +47,8 @@ void lex(const char *src, Token **out, size_t *out_n){
         if(c=='.'){l.p++;PUSH(tk(TK_DOT,ln,col));continue;}
         if(c=='?'){l.p++;PUSH(tk(TK_QUESTION,ln,col));continue;}
         if(c==':'){l.p++;PUSH(tk(TK_COLON,ln,col));continue;}
-        if(c=='+'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_PLUSEQ,ln,col));}else{PUSH(tk(TK_PLUS,ln,col));} continue;}
-        if(c=='-'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_MINUSEQ,ln,col));}
+        if(c=='+'){l.p++; if(*l.p=='+'){l.p++;PUSH(tk(TK_INC,ln,col));} else if(*l.p=='='){l.p++;PUSH(tk(TK_PLUSEQ,ln,col));}else{PUSH(tk(TK_PLUS,ln,col));} continue;}
+        if(c=='-'){l.p++; if(*l.p=='-'){l.p++;PUSH(tk(TK_DEC,ln,col));} else if(*l.p=='='){l.p++;PUSH(tk(TK_MINUSEQ,ln,col));}
                    else if(*l.p=='>'){l.p++;PUSH(tk(TK_ARROW,ln,col));} else {PUSH(tk(TK_MINUS,ln,col));} continue;}
         if(c=='*'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_STAREQ,ln,col));}else{PUSH(tk(TK_STAR,ln,col));} continue;}
         if(c=='/'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_SLASHEQ,ln,col));}else{PUSH(tk(TK_SLASH,ln,col));} continue;}
