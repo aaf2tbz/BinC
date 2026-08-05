@@ -101,6 +101,7 @@ void lex(const char *src, Token **out, size_t *out_n){
             VW("mat2",TK_KW_MAT,2) VW("mat3",TK_KW_MAT,3) VW("mat4",TK_KW_MAT,4)
             KW("grid_extent",TK_KW_GRID_EXTENT) KW("atomic",TK_KW_ATOMIC)
             KW("vertex",TK_KW_VERTEX) KW("fragment",TK_KW_FRAGMENT) KW("vertex_id",TK_KW_VERTEX_ID)
+            KW("texture2d",TK_KW_TEXTURE2D) KW("sampler",TK_KW_SAMPLER)
             #undef KW
             Token x=tk(TK_IDENT,ln,col); x.text=dup_n(s,len); PUSH(x);
             done:; continue;

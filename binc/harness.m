@@ -45,10 +45,12 @@ int main(int argc, char **argv){
     NSString *kernel=nil;
     long gx=-1, gy=1, gz=1, tx=-1, ty=1, tz=1;
     id<MTLBuffer> bufs[31]; memset(bufs,0,sizeof bufs);
+    id<MTLTexture> texs[31]; memset(texs,0,sizeof texs);
     NSMutableDictionary<NSNumber*,NSArray<NSString*>*> *bufSpec=[NSMutableDictionary dictionary];
     NSMutableArray<NSNumber*> *expectIdx=[NSMutableArray array];
     NSMutableArray<NSArray<NSString*>*> *expectVals=[NSMutableArray array];
     NSMutableArray<NSNumber*> *expectHex=[NSMutableArray array];
+    NSMutableDictionary<NSNumber*,NSArray<NSString*>*> *expectTexVals=[NSMutableDictionary dictionary];
 
     NSCharacterSet *ws=[NSCharacterSet whitespaceAndNewlineCharacterSet];
     for(NSString *line in [spec componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]){
@@ -68,6 +70,17 @@ int main(int argc, char **argv){
             int idx=toks[1].intValue;
             if(idx<0||idx>30) die(@"buffer index out of range");
             bufSpec[@(idx)]=toks; // contents applied after device creation
+        }
+        else if([d isEqualToString:@"tex"]){
+            /* tex <idx> <w> <h>: RGBA32Float texture bound at arg index, filled with
+             * texel(x,y) = (x+1, y+1, x+y+1, 1) — deterministic, integer-exact floats */
+            int idx=toks[1].intValue;
+            if(idx<0||idx>30) die(@"texture index out of range");
+            bufSpec[@(idx)]=toks; // applied after device creation
+        }
+        else if([d isEqualToString:@"expecttex"]){
+            /* expecttex <idx> <r> <g> <b> <a>: every texel must equal these 4 values */
+            expectTexVals[@(toks[1].intValue)]=[toks subarrayWithRange:NSMakeRange(2,toks.count-2)];
         }
         else if([d isEqualToString:@"expect"]||[d isEqualToString:@"expecth"]){
             [expectIdx addObject:@(toks[1].intValue)];
@@ -89,6 +102,20 @@ int main(int argc, char **argv){
 
     for(NSNumber *k in bufSpec){
         NSArray<NSString*> *toks=bufSpec[k]; int idx=k.intValue;
+        if([toks[0] isEqualToString:@"tex"]){
+            int w=(int)toks[2].integerValue, h=(int)toks[3].integerValue;
+            MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:w height:h mipmapped:NO];
+            td.usage=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;
+            id<MTLTexture> t=[dev newTextureWithDescriptor:td];
+            float *px=malloc((size_t)w*h*16);
+            for(int y=0;y<h;y++) for(int x=0;x<w;x++){
+                px[(y*w+x)*4+0]=(float)(x+1); px[(y*w+x)*4+1]=(float)(y+1);
+                px[(y*w+x)*4+2]=(float)(x+y+1); px[(y*w+x)*4+3]=1.0f; }
+            [t replaceRegion:MTLRegionMake2D(0,0,(NSUInteger)w,(NSUInteger)h) mipmapLevel:0 withBytes:px bytesPerRow:(NSUInteger)w*16];
+            free(px);
+            texs[idx]=t;
+            continue;
+        }
         if([toks[0] isEqualToString:@"buf"]){
             NSUInteger nw=toks.count-2; uint32_t *w=malloc(nw*4);
             for(NSUInteger i=0;i<nw;i++) w[i]=parse_word(toks[i+2]).bits;
@@ -110,6 +137,13 @@ int main(int argc, char **argv){
     id<MTLComputeCommandEncoder> enc=[cb computeCommandEncoder];
     [enc setComputePipelineState:cps];
     for(int i=0;i<31;i++) if(bufs[i]) [enc setBuffer:bufs[i] offset:0 atIndex:i];
+    for(int i=0;i<31;i++) if(texs[i]) [enc setTexture:texs[i] atIndex:i];
+    /* bind a default nearest/clamp sampler at every index that isn't a buffer or texture */
+    MTLSamplerDescriptor *sd=[MTLSamplerDescriptor new];
+    sd.minFilter=MTLSamplerMinMagFilterNearest; sd.magFilter=MTLSamplerMinMagFilterNearest;
+    sd.sAddressMode=MTLSamplerAddressModeClampToEdge; sd.tAddressMode=MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> defsamp=[dev newSamplerStateWithDescriptor:sd];
+    for(int i=0;i<31;i++) if(!bufs[i]&&!texs[i]) [enc setSamplerState:defsamp atIndex:i];
     [enc dispatchThreads:MTLSizeMake((NSUInteger)gx,(NSUInteger)gy,(NSUInteger)gz)
        threadsPerThreadgroup:MTLSizeMake((NSUInteger)tx,(NSUInteger)ty,(NSUInteger)tz)];
     [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
@@ -145,6 +179,29 @@ int main(int argc, char **argv){
             }
             if(!pass)ok=0;
         }
+    }
+    /* texture readback verification: every texel must equal the 4 expected values */
+    for(NSNumber *k in expectTexVals){
+        int idx=k.intValue;
+        if(!texs[idx]) die([NSString stringWithFormat:@"expecttex on unbound texture %d",idx]);
+        id<MTLTexture> t=texs[idx];
+        NSUInteger w=t.width, h=t.height;
+        float *px=malloc(w*h*16);
+        [t getBytes:px bytesPerRow:w*16 fromRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0];
+        NSArray<NSString*> *vals=expectTexVals[k];
+        Word expw[4]; for(int c=0;c<4&&c<(int)vals.count;c++) expw[c]=parse_word(vals[c]);
+        for(NSUInteger y=0;y<h;y++) for(NSUInteger x=0;x<w;x++){
+            for(int c=0;c<4&&c<(int)vals.count;c++){
+                float gotf=px[(y*w+x)*4+c], expf; memcpy(&expf,&expw[c].bits,4);
+                float tol=1e-4f*(fabsf(expf)+1.0f);
+                if(fabsf(gotf-expf)>tol){
+                    printf("  tex%d[%lu,%lu].%c=%g exp %s X\n",idx,(unsigned long)x,(unsigned long)y,"xyzw"[c],(double)gotf,[vals[c] UTF8String]);
+                    ok=0;
+                }
+            }
+        }
+        free(px);
+        printf("  tex%d readback %lux%lu verified\n",idx,(unsigned long)w,(unsigned long)h);
     }
     printf(ok?"\n✅ %s correct on GPU\n":"\n❌ %s mismatch\n",[kernel UTF8String]);
     return ok?0:1;

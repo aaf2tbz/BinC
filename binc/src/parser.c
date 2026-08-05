@@ -28,6 +28,22 @@ static Type parse_type(TokStream *ts){
     else if(accept(ts,TK_KW_INT)){t.kind=T_INT32;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_UINT)){t.kind=T_UINT32;t.vecn=(int)pt->ival;}
     else if(accept(ts,TK_KW_BOOL))t.kind=T_BOOL; else if(accept(ts,TK_KW_VOID))t.kind=T_VOID;
     else if(accept(ts,TK_KW_MAT)){ t.kind=T_FLOAT; t.matn=(int)pt->ival; }
+    else if(accept(ts,TK_KW_TEXTURE2D)){
+        t.kind=T_TEXTURE;
+        expect(ts,TK_LT,"<");
+        Token *et=peek(ts);
+        if(!(et->kind==TK_IDENT||et->kind==TK_KW_FLOAT||et->kind==TK_KW_HALF||et->kind==TK_KW_INT||et->kind==TK_KW_UINT))
+            die(et->line,"expected a texture element type");
+        advance(ts);
+        if(et->kind==TK_KW_FLOAT) t.tex_elt=T_FLOAT;
+        else if(et->kind==TK_KW_HALF) t.tex_elt=T_HALF;
+        else if(et->kind==TK_KW_INT) t.tex_elt=T_INT32;
+        else if(et->kind==TK_KW_UINT) t.tex_elt=T_UINT32;
+        else if(et->kind==TK_IDENT&&!strcmp(et->text,"float")) t.tex_elt=T_FLOAT;
+        else die(et->line,"unsupported texture element type %s (use float, half, int, uint)",et->kind==TK_IDENT?et->text:"?");
+        expect(ts,TK_GT,">");
+    }
+    else if(accept(ts,TK_KW_SAMPLER)) t.kind=T_SAMPLER;
     else if(peek(ts)->kind==TK_IDENT){ t.kind=T_STRUCT; t.struct_name=strdup(advance(ts)->text); }
     else die(peek(ts)->line,"expected a type");
     if(accept(ts,TK_STAR)){ t.is_ptr=1; if(t.as==0)t.as=AS_DEVICE; }

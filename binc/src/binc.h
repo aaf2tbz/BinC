@@ -11,7 +11,7 @@ typedef enum { AS_DEVICE=1, AS_CONSTANT=2, AS_THREADGROUP=3, AS_THREAD=0 } AddrS
 typedef enum { UN_UNIFORM=0, UN_VARYING=1 } Uniformity;
 
 typedef enum { T_VOID, T_FLOAT, T_HALF, T_INT32, T_UINT32, T_BOOL, T_STRUCT,
-               T_COORD, T_GRID_EXTENT, T_ATOMIC } TypeKind;
+               T_COORD, T_GRID_EXTENT, T_ATOMIC, T_TEXTURE, T_SAMPLER } TypeKind;
 
 typedef struct {
     TypeKind kind;
@@ -22,6 +22,7 @@ typedef struct {
     int      matn; /* 2/3/4 = column-major float matrix; 0 = not a matrix */
     int      coordn; /* T_COORD dimensionality: 1, 2, or 3 */
     TypeKind atomic_base; /* T_ATOMIC's scalar payload */
+    TypeKind tex_elt; /* T_TEXTURE's texel scalar type */
     int      array_n, array_m; /* threadgroup array extents, if declared */
 } Type;
 
@@ -93,7 +94,7 @@ typedef enum {
     TK_KW_BREAK, TK_KW_CONTINUE, TK_KW_SWITCH, TK_KW_CASE, TK_KW_DEFAULT,
     TK_KW_DEVICE, TK_KW_CONSTANT, TK_KW_THREADGROUP, TK_KW_THREAD, TK_KW_UNIFORM, TK_KW_VARYING,
     TK_KW_COORD, TK_KW_GRID_EXTENT, TK_KW_ATOMIC, TK_KW_VERTEX, TK_KW_FRAGMENT, TK_KW_VERTEX_ID,
-    TK_KW_MAT
+    TK_KW_MAT, TK_KW_TEXTURE2D, TK_KW_SAMPLER
 } TokKind;
 typedef struct { TokKind kind; char *text; double fval; long ival; int line, col; } Token;
 typedef struct { Token *toks; size_t n; size_t i; } TokStream;

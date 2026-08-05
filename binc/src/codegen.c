@@ -105,14 +105,16 @@ static const char *coerce(CG *c, const char *v, ValKind from, ValKind to){
     return v;
 }
 
-/* resolve a name to: local | pointer param idx | scalar param idx | module constant */
-typedef enum { R_NONE,R_LOCAL,R_PTR,R_SCALAR,R_COORD,R_EXTENT,R_CONST } RKind;
+/* resolve a name to: local | pointer param idx | scalar param idx | module constant | texture/sampler */
+typedef enum { R_NONE,R_LOCAL,R_PTR,R_SCALAR,R_COORD,R_EXTENT,R_CONST,R_TEXTURE,R_SAMPLER } RKind;
 static RKind resolve(CG *c, const char *name, int *out){
     for(size_t i=0;i<c->nlocs;i++) if(!strcmp(c->locs[i].name,name)){ *out=(int)i; return R_LOCAL; }
     for(size_t i=0;i<c->fn->nparams;i++) if(!strcmp(c->fn->params[i].name,name)){
         *out=(int)i;
         if(c->fn->params[i].ty.kind==T_COORD) return R_COORD;
         if(c->fn->params[i].ty.kind==T_GRID_EXTENT) return R_EXTENT;
+        if(c->fn->params[i].ty.kind==T_TEXTURE) return R_TEXTURE;
+        if(c->fn->params[i].ty.kind==T_SAMPLER) return R_SAMPLER;
         return c->fn->params[i].ty.is_ptr||c->fn->params[i].ty.array_n?R_PTR:R_SCALAR; }
     for(size_t i=0;i<c->prog->nconsts;i++) if(!strcmp(c->prog->consts[i].name,name)){ *out=(int)i; return R_CONST; }
     return R_NONE;
@@ -327,6 +329,13 @@ static Builtin builtins[]={
 static int builtin_used[sizeof builtins/sizeof *builtins];
 static void mark_builtin(const char *name){ for(size_t i=0;i<sizeof builtins/sizeof *builtins;i++) if(!strcmp(builtins[i].name,name)){ builtin_used[i]=1; return; } }
 static int atomic_add_used[3];
+static int tex_read_used[4], tex_write_used[4], tex_sample_used[4], get_samp_used;
+static void tex_kinds(TypeKind et, const char **elt, const char **vec, const char **suf, const char **an){
+    if(et==T_HALF){ *elt="half"; *vec="<4 x half>"; *suf="v4f16"; *an="half4"; }
+    else if(et==T_INT32){ *elt="i32"; *vec="<4 x i32>"; *suf="v4i32"; *an="int4"; }
+    else if(et==T_UINT32){ *elt="i32"; *vec="<4 x i32>"; *suf="v4u32"; *an="uint4"; }
+    else { *elt="float"; *vec="<4 x float>"; *suf="v4f32"; *an="float4"; }
+}
 
 /* ---- composite math builtins ----
  * dot/cross/length/... are composed from elementwise intrinsics and vector
@@ -597,6 +606,8 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             *k=VK_U32; c->rvw=coord_width(&p->ty); return coord_value(c,&p->ty,nm);
         }
         if(r==R_EXTENT){ *k=VK_U32; c->rvw=0; char *nm=malloc(strlen(e->name)+3);
+            snprintf(nm,strlen(e->name)+3,"%%_%s",e->name); return nm; }
+        if(r==R_TEXTURE||r==R_SAMPLER){ *k=VK_I32; c->rvw=0; char *nm=malloc(strlen(e->name)+3);
             snprintf(nm,strlen(e->name)+3,"%%_%s",e->name); return nm; }
         if(r==R_CONST){ ConstDef *cd=&c->prog->consts[idx];
             *k = cd->ty.kind==T_BOOL?VK_I1:(cd->ty.kind==T_FLOAT||cd->ty.kind==T_HALF)?VK_F32:(cd->ty.kind==T_UINT32?VK_U32:VK_I32);
@@ -963,6 +974,59 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         return r; }
     case E_CALL:{
         if(e->callee && e->callee->kind==E_FIELD){
+            /* texture methods: tex.read(c), tex.write(v, c), tex.sample(smp, uv) */
+            if(e->callee->operand->kind==E_IDENT){
+                int ti; RKind tr=resolve(c,e->callee->operand->name,&ti);
+                if(tr==R_TEXTURE){
+                    Param *tp=&c->fn->params[ti];
+                    const char *elt,*vec,*suf,*an; tex_kinds(tp->ty.tex_elt,&elt,&vec,&suf,&an);
+                    (void)elt; (void)an;
+                    char tname[64]; snprintf(tname,sizeof tname,"%%_%s",tp->name);
+                    if(!strcmp(e->name,"read")){
+                        if(e->nargs!=1) die(0,"texture read expects 1 argument (the coordinate)");
+                        ValKind ck; const char *cv=gen_rval(c,e->args[0],&ck);
+                        if(c->rvw!=2) die(0,"texture read coordinate must be an int2");
+                        get_samp_used=1; tex_read_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
+                        const char *samp=newtmp(c);
+                        emit(c,"  %s = call %%struct._sampler_t addrspace(2)* @air.get_read_sampler()\n",samp);
+                        const char *r=newtmp(c);
+                        emit(c,"  %s = call { %s, i8 } @air.read_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x i32> %s, <2 x i32> zeroinitializer, i32 0, i32 0)\n",r,vec,suf,tname,samp,cv);
+                        const char *v=newtmp(c);
+                        emit(c,"  %s = extractvalue { %s, i8 } %s, 0\n",v,vec,r);
+                        if(tp->ty.tex_elt==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext <4 x half> %s to <4 x float>\n",w,v); v=w; }
+                        *k=VK_F32; c->rvw=4; return v;
+                    }
+                    if(!strcmp(e->name,"write")){
+                        if(e->nargs!=2) die(0,"texture write expects 2 arguments (value, coordinate)");
+                        ValKind vk; const char *vv=gen_rval(c,e->args[0],&vk); int vw=c->rvw;
+                        ValKind ck; const char *cv=gen_rval(c,e->args[1],&ck);
+                        if(vw!=4) die(0,"texture write value must be a float4");
+                        if(c->rvw!=2) die(0,"texture write coordinate must be an int2");
+                        tex_write_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
+                        const char *sv=vv;
+                        if(tp->ty.tex_elt==T_HALF){ const char *h=newtmp(c); emit(c,"  %s = fptrunc <4 x float> %s to <4 x half>\n",h,vv); sv=h; }
+                        else if(tp->ty.tex_elt==T_INT32||tp->ty.tex_elt==T_UINT32) sv=vconv(c,vv,4,VK_F32,tp->ty.tex_elt==T_INT32?VK_I32:VK_U32);
+                        emit(c,"  call void @air.write_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, <2 x i32> %s, %s %s, i32 0, i32 2)\n",suf,tname,cv,vec,sv);
+                        *k=VK_I32; c->rvw=0; return "0";
+                    }
+                    if(!strcmp(e->name,"sample")){
+                        if(e->nargs!=2) die(0,"texture sample expects 2 arguments (sampler, uv)");
+                        int si; if(e->args[0]->kind!=E_IDENT||resolve(c,e->args[0]->name,&si)!=R_SAMPLER)
+                            die(0,"texture sample's first argument must be a sampler parameter");
+                        ValKind uk; const char *uv=gen_rval(c,e->args[1],&uk);
+                        if(c->rvw!=2) die(0,"texture sample uv must be a float2");
+                        tex_sample_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
+                        char sname[64]; snprintf(sname,sizeof sname,"%%_%s",e->args[0]->name);
+                        const char *r=newtmp(c);
+                        emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i1 true, <2 x i32> zeroinitializer, i1 false, float %s, float %s, i32 0)\n",r,vec,suf,tname,sname,uv,fconst(c,0.0),fconst(c,0.0));
+                        const char *v=newtmp(c);
+                        emit(c,"  %s = extractvalue { %s, i8 } %s, 0\n",v,vec,r);
+                        if(tp->ty.tex_elt==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext <4 x half> %s to <4 x float>\n",w,v); v=w; }
+                        *k=VK_F32; c->rvw=4; return v;
+                    }
+                    die(0,"unknown texture method .%s (use read, write, sample)",e->name);
+                }
+            }
             if(strcmp(e->name,"add")) die(0,"unsupported atomic method %s",e->name);
             if(e->nargs!=1) die(0,"atomic add expects one argument");
             Expr *base=e->callee->operand; if(base->kind!=E_DEREF||base->operand->kind!=E_IDENT) die(0,"atomic methods require an atomic buffer");
@@ -1420,6 +1484,8 @@ static void fn_ptr_str(Function *fn,char *buf,size_t n){
     for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i]; if(p->ty.array_n)continue; if(emitted++)o+=snprintf(buf+o,n-o,", ");
         if(p->ty.kind==T_COORD){ char cl[32]; coord_ll(&p->ty,cl,sizeof cl); o+=snprintf(buf+o,n-o,"%s",cl); }
         else if(p->ty.kind==T_GRID_EXTENT) o+=snprintf(buf+o,n-o,"i32");
+        else if(p->ty.kind==T_TEXTURE) o+=snprintf(buf+o,n-o,"%%struct._texture_2d_t addrspace(1)*");
+        else if(p->ty.kind==T_SAMPLER) o+=snprintf(buf+o,n-o,"%%struct._sampler_t addrspace(2)*");
         else if(p->ty.is_ptr){ char elt[64]; if(p->ty.matn) mll_of(elt,sizeof elt,p->ty.matn); else type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
             o+=snprintf(buf+o,n-o,"%s addrspace(%d)*",elt,p->ty.as); }
         else if(fn->is_kernel){ char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn); o+=snprintf(buf+o,n-o,"%s addrspace(2)*",ll); }
@@ -1465,6 +1531,10 @@ static void emit_kernel_meta(Meta *m, const Program *prog, Function *fn, KernelM
         if(p->ty.kind==T_COORD){ char cn[32]; snprintf(cn,sizeof cn,p->ty.coordn==1?"uint":p->ty.coordn==2?"ushort2":"ushort3");
             meta_emit(m,"!%d = !{i32 %d, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,cn,p->name); continue; }
         if(p->ty.kind==T_GRID_EXTENT){ meta_emit(m,"!%d = !{i32 %d, !\"air.threads_per_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,p->name); continue; }
+        if(p->ty.kind==T_TEXTURE){ const char *elt,*vec,*suf,*an; tex_kinds(p->ty.tex_elt,&elt,&vec,&suf,&an);
+            meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"air.read_write\", !\"air.arg_type_name\", !\"texture2d<%s, read_write>\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,a,elt,p->name); continue; }
+        if(p->ty.kind==T_SAMPLER){
+            meta_emit(m,"!%d = !{i32 %d, !\"air.sampler\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,a,p->name); continue; }
         if(p->ty.is_ptr){ int r=read[a],w=written[a]; const char *acc=(r&&w)?"air.read_write":w?"air.write":"air.read";
             int sz=tsz(p->ty.kind,p->ty.vecn,p->ty.matn),al=tal(p->ty.kind,p->ty.vecn,p->ty.matn); char tnb[64];
             ptn_of(tnb,sizeof tnb,p->ty.kind,p->ty.vecn,p->ty.matn); const char *tn=tnb;
@@ -1570,6 +1640,8 @@ void emit_air(FILE *out, const Program *prog){
             if(p->ty.kind==T_COORD){ char cl[32]; coord_ll(&p->ty,cl,sizeof cl);
                 so+=snprintf(sig+so,sizeof sig-so,"%s noundef %%_%s",cl,p->name); }
             else if(p->ty.kind==T_GRID_EXTENT){ so+=snprintf(sig+so,sizeof sig-so,"i32 noundef %%_%s",p->name); }
+            else if(p->ty.kind==T_TEXTURE){ so+=snprintf(sig+so,sizeof sig-so,"%%struct._texture_2d_t addrspace(1)* nocapture %%_%s",p->name); }
+            else if(p->ty.kind==T_SAMPLER){ so+=snprintf(sig+so,sizeof sig-so,"%%struct._sampler_t addrspace(2)* nocapture %%_%s",p->name); }
             else if(p->ty.is_ptr){ char elt[64]; type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
                 so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(%d)* nocapture noundef %%_%s",elt,p->ty.as,p->name); }
             else if(fn->is_kernel){ char ll[32]; pll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn,p->ty.matn);
@@ -1601,6 +1673,20 @@ void emit_air(FILE *out, const Program *prog){
     g_recover=NULL;
     if(atomic_add_used[0]) fprintf(out,"declare float @air.atomic.global.add.f32(float addrspace(1)*, float, i32, i32, i32, i1) local_unnamed_addr\n");
     if(atomic_add_used[1]) fprintf(out,"declare i32 @air.atomic.global.add.i32(i32 addrspace(1)*, i32, i32, i32, i32, i1) local_unnamed_addr\n");
+    /* texture intrinsics + the opaque texture/sampler types */
+    if(get_samp_used||tex_read_used[0]||tex_read_used[1]||tex_read_used[2]||tex_read_used[3]||
+       tex_write_used[0]||tex_write_used[1]||tex_write_used[2]||tex_write_used[3]||
+       tex_sample_used[0]||tex_sample_used[1]||tex_sample_used[2]||tex_sample_used[3]){
+        fprintf(out,"%%struct._texture_2d_t = type opaque\n%%struct._sampler_t = type opaque\n");
+        if(get_samp_used) fprintf(out,"declare %%struct._sampler_t addrspace(2)* @air.get_read_sampler() local_unnamed_addr\n");
+        static const char *sufs[4]={"v4f32","v4f16","v4i32","v4u32"};
+        static const char *vecs[4]={"<4 x float>","<4 x half>","<4 x i32>","<4 x i32>"};
+        for(int i=0;i<4;i++){
+            if(tex_read_used[i]) fprintf(out,"declare { %s, i8 } @air.read_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)*, <2 x i32>, <2 x i32>, i32, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
+            if(tex_write_used[i]) fprintf(out,"declare void @air.write_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture, <2 x i32>, %s, i32, i32) local_unnamed_addr\n",sufs[i],vecs[i]);
+            if(tex_sample_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, i1, <2 x i32>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
+        }
+    }
     /* declares for the builtins that were actually used */
     for(size_t b=0;b<sizeof builtins/sizeof *builtins;b++){ if(!builtin_used[b]) continue; Builtin *bi=&builtins[b];
         if(bi->ret==T_VOID){ fprintf(out,"declare void @%s(i32, i32, i32) local_unnamed_addr #3\n",bi->ll); continue; }
