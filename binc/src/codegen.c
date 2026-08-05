@@ -664,6 +664,20 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     }
                 }
             }
+            /* general multi-component swizzle on any vector lvalue (e.g. verts[vid].xy) */
+            {
+                int idxs[4]; int nc=swizzle_idx(e->field,idxs);
+                if(nc>1){
+                    LInfo li; char *addr=gen_lval(c,e->operand,&li,0);
+                    if(li.vecn<=1) die(0,"swizzle on a non-vector value");
+                    for(int i=0;i<nc;i++) if(idxs[i]>=li.vecn) die(0,"invalid vector component .%s",e->field);
+                    ValKind lk; const char *lv=emit_load_t(c,&li,addr,&lk);
+                    const char *elt = li.tk==T_HALF?"float":scalar_ll(li.tk);
+                    char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",li.vecn,elt);
+                    *k=scalar_vk(li.tk); c->rvw=nc;
+                    return swizzle_read(c,lv,vty,elt,idxs,nc);
+                }
+            }
             if(e->operand->kind==E_IDENT){
             int ci; RKind cr=resolve(c,e->operand->name,&ci);
             if(cr==R_COORD && (!strcmp(e->field,"global")||!strcmp(e->field,"local")||!strcmp(e->field,"group"))){
@@ -1090,17 +1104,41 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 die(0,"mat%d expects 1 scalar, %d scalars, or %d column vectors",mn,mn,mn);
             }
         }
-        /* vector constructor? float4(...)/int3(...)/uint2(...), incl. single-scalar splat */
+        /* vector constructor? float4(...)/int3(...)/uint2(...): 1 scalar (splat),
+         * N scalars, or mixed scalars/vectors totalling N components (float3(v2, s), ...) */
         TypeKind cb; int cn;
         if(vec_name(e->name,&cb,&cn)){
-            if(e->nargs!=1&&(int)e->nargs!=cn) die(0,"%s expects 1 or %d argument(s)",e->name,cn);
+            if(e->nargs!=1&&(int)e->nargs>cn) die(0,"%s expects 1 to %d argument(s)",e->name,cn);
             const char *elt=scalar_ll(cb); const char *acc="undef";
-            for(int i=0;i<cn;i++){
-                ValKind ak; const char *v=gen_rval(c,e->args[e->nargs==1?0:i],&ak);
+            if((int)e->nargs==1){
+                ValKind ak; const char *v=gen_rval(c,e->args[0],&ak);
                 if(c->rvw) die(0,"vector argument in %s constructor",e->name);
                 v=coerce(c,v,ak,scalar_vk(cb));
-                const char *r=newtmp(c);
-                emit(c,"  %s = insertelement <%d x %s> %s, %s %s, i32 %d\n",r,cn,elt,acc,elt,v,i); acc=r; }
+                for(int i=0;i<cn;i++){ const char *r=newtmp(c);
+                    emit(c,"  %s = insertelement <%d x %s> %s, %s %s, i32 %d\n",r,cn,elt,acc,elt,v,i); acc=r; }
+                *k=scalar_vk(cb); c->rvw=cn; return acc;
+            }
+            /* N scalars or mixed scalars+vectors: total components must equal cn */
+            int comp=0;
+            for(size_t i=0;i<e->nargs;i++){
+                ValKind ak; const char *v=gen_rval(c,e->args[i],&ak); int w=c->rvw;
+                if(!w){
+                    v=coerce(c,v,ak,scalar_vk(cb));
+                    const char *r=newtmp(c);
+                    emit(c,"  %s = insertelement <%d x %s> %s, %s %s, i32 %d\n",r,cn,elt,acc,elt,v,comp); acc=r; comp++;
+                } else {
+                    if(w+comp>cn) die(0,"%s: argument %zu has too many components",e->name,i+1);
+                    const char *sv=v;
+                    for(int j=0;j<w;j++){
+                        const char *ev=newtmp(c);
+                        emit(c,"  %s = extractelement <%d x %s> %s, i32 %d\n",ev,w,scalar_ll(ak==VK_F32?T_FLOAT:ak==VK_U32?T_UINT32:T_INT32),sv,j);
+                        const char *cv2=coerce(c,ev,ak,scalar_vk(cb));
+                        const char *r=newtmp(c);
+                        emit(c,"  %s = insertelement <%d x %s> %s, %s %s, i32 %d\n",r,cn,elt,acc,elt,cv2,comp); acc=r; comp++;
+                    }
+                }
+            }
+            if(comp!=cn) die(0,"%s: components total %d, expected %d",e->name,comp,cn);
             *k=scalar_vk(cb); c->rvw=cn; return acc;
         }
         /* select(a, b, mask): per-element pick, scalar or vector */
@@ -1333,6 +1371,7 @@ static int is_varying(CG *c, Expr *e){
 }
 
 static void gen_block(CG *c, Block *b);
+static void stage_lit_type(char *buf, size_t n, StructDef *sd);
 static void gen_stmt(CG *c, Stmt *s){
     g_last_line=s->line; g_last_col=s->col;
     switch(s->kind){
@@ -1366,10 +1405,34 @@ static void gen_stmt(CG *c, Stmt *s){
         break; }
     case S_RETURN:{ TypeKind rk=c->fn->ret.kind;
         if(s->expr){ if(rk==T_VOID) die(0,"return with a value in void function");
-            ValKind k; const char *v=gen_rval(c,s->expr,&k);
-            const char *sv=to_storage(c,v,k,c->rvw,rk,c->fn->ret.vecn);
-            char ll[32]; ll_of(ll,sizeof ll,rk,c->fn->ret.vecn);
-            emit(c,"  ret %s %s\n",ll,sv); }
+            if(rk==T_STRUCT){
+                /* stage struct return: build the literal output struct from a struct local */
+                if(c->fn->stage==ST_NONE) die(0,"struct-by-value return is only supported in vertex/fragment functions");
+                if(s->expr->kind!=E_IDENT) die(0,"stage struct returns must name a struct local");
+                int li; if(resolve(c,s->expr->name,&li)!=R_LOCAL||c->locs[li].kind!=T_STRUCT)
+                    die(0,"stage struct returns must name a struct local");
+                StructDef *sd=find_struct(c->prog,c->locs[li].sname);
+                int sal; struct_layout(sd,&sal);
+                const char *v=newtmp(c);
+                emit(c,"  %s = load %%struct.%s, %%struct.%s* %s, align %d\n",v,c->locs[li].sname,c->locs[li].sname,c->locs[li].slot,sal);
+                const char *lit="undef";
+                for(size_t f=0;f<sd->nfields;f++){
+                    const char *ev=newtmp(c);
+                    emit(c,"  %s = extractvalue %%struct.%s %s, %zu\n",ev,c->locs[li].sname,v,f);
+                    char fl[32]; ll_of(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.vecn);
+                    char lt[256]; stage_lit_type(lt,sizeof lt,sd);
+                    const char *ins=newtmp(c);
+                    emit(c,"  %s = insertvalue %s undef, %s %s, %zu\n",ins,lt,fl,ev,f);
+                    lit=ins;
+                }
+                char lt[256]; stage_lit_type(lt,sizeof lt,sd);
+                emit(c,"  ret %s %s\n",lt,lit);
+            } else {
+                ValKind k; const char *v=gen_rval(c,s->expr,&k);
+                const char *sv=to_storage(c,v,k,c->rvw,rk,c->fn->ret.vecn);
+                char ll[32]; ll_of(ll,sizeof ll,rk,c->fn->ret.vecn);
+                emit(c,"  ret %s %s\n",ll,sv);
+            } }
         else { if(rk!=T_VOID) die(0,"return without a value in non-void function");
             emit(c,"  ret void\n"); }
         c->term=1; break; }
@@ -1496,10 +1559,27 @@ static void fn_ptr_str(Function *fn,char *buf,size_t n){
         } else { if(emitted++)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"i32"); } }
     o+=snprintf(buf+o,n-o,")* @%s",fn->name);
 }
+static const Program *g_curprog; /* set by emit_air; used by stage string helpers */
+static void stage_lit_type(char *buf, size_t n, StructDef *sd);
 static void stage_ptr_str(Function *fn,char *buf,size_t n){
-    size_t o=0; char rl[32]; ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn); o+=snprintf(buf+o,n-o,"%s (",rl);
-    for(size_t i=0;i<fn->nparams;i++){ if(i)o+=snprintf(buf+o,n-o,", "); Param *p=&fn->params[i]; char pl[64];
-        type_ll(pl,sizeof pl,p->ty.kind,p->ty.struct_name,p->ty.vecn); o+=snprintf(buf+o,n-o,"%s%s",p->ty.is_ptr?"": "",pl); if(p->ty.is_ptr) o+=snprintf(buf+o,n-o," addrspace(%d)*",p->ty.as); }
+    size_t o=0;
+    if(fn->ret.kind==T_STRUCT){ StructDef *sd=find_struct(g_curprog,fn->ret.struct_name);
+        char lt[256]; stage_lit_type(lt,sizeof lt,sd); o+=snprintf(buf+o,n-o,"%s (",lt); }
+    else { char rl[32]; ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn); o+=snprintf(buf+o,n-o,"%s (",rl); }
+    int emitted=0;
+    for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i];
+        if(p->ty.kind==T_STRUCT && !p->ty.is_ptr && fn->stage==ST_FRAGMENT){
+            /* stage-in struct: unpacked as separate args */
+            StructDef *sd=find_struct(g_curprog,p->ty.struct_name);
+            for(size_t f=0;f<sd->nfields;f++){ char fl[64]; type_ll(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.struct_name,sd->fields[f].ty.vecn);
+                if(emitted++)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"%s",fl); }
+            continue;
+        }
+        char pl[64]; type_ll(pl,sizeof pl,p->ty.kind,p->ty.struct_name,p->ty.vecn);
+        if(emitted++)o+=snprintf(buf+o,n-o,", ");
+        if(p->ty.is_ptr) o+=snprintf(buf+o,n-o,"%s addrspace(%d)*",pl,p->ty.as);
+        else o+=snprintf(buf+o,n-o,"%s",pl);
+    }
     o+=snprintf(buf+o,n-o,")* @%s",fn->name);
 }
 
@@ -1515,7 +1595,15 @@ static void meta_emit(Meta *m, const char *fmt, ...){
     vsnprintf(b,sizeof b,fmt,ap); va_end(ap); sb_put(&m->sb,b);
 }
 typedef struct { int knode, empty, arglist; int *argnode; int *structnode; } KernelMeta;
-typedef struct { Function *fn; int node, empty, outs, leaf, args; int *argnode; } StageMeta;
+typedef struct { Function *fn; int node, empty, outs, leaf, args; int *argnode; int *outnode; int nin, nout; } StageMeta;
+
+/* literal stage-output struct type: <{ <4 x float>, <3 x float> }> */
+static void stage_lit_type(char *buf, size_t n, StructDef *sd){
+    size_t o=0; o+=snprintf(buf+o,n-o,"<{");
+    for(size_t f=0;f<sd->nfields;f++){ char fl[32]; ll_of(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.vecn);
+        if(f)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"%s",fl); }
+    snprintf(buf+o,n-o,"}>");
+}
 
 /* per-kernel !air.kernel metadata (argnode/structnode arrays are builder-allocated) */
 static void emit_kernel_meta(Meta *m, const Program *prog, Function *fn, KernelMeta *km,
@@ -1558,23 +1646,59 @@ static void emit_kernel_meta(Meta *m, const Program *prog, Function *fn, KernelM
 }
 
 /* per-stage !air.vertex / !air.fragment metadata */
-static void emit_stage_meta(Meta *m, Function *fn, StageMeta *sm){
+static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMeta *sm){
     char fp[2048]; stage_ptr_str(fn,fp,sizeof fp);
     meta_emit(m,"!%d = !{}\n",sm->empty);
-    meta_emit(m,"!%d = !{!%d}\n",sm->outs,sm->leaf);
-    if(fn->stage==ST_VERTEX) meta_emit(m,"!%d = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n",sm->leaf);
-    else meta_emit(m,"!%d = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\"}\n",sm->leaf);
-    meta_emit(m,"!%d = !{",sm->args); for(size_t a=0;a<fn->nparams;a++){ if(a)meta_emit(m,", "); meta_emit(m,"!%d",sm->argnode[a]); } meta_emit(m,"}\n");
+    /* output fields: vertex struct -> position + vertex_output user(locnN);
+     * fragment struct -> render_target color(N) + depth; scalar -> single node */
+    if(fn->ret.kind==T_STRUCT){
+        StructDef *sd=find_struct(prog,fn->ret.struct_name);
+        meta_emit(m,"!%d = !{",sm->outs); for(size_t f=0;f<sd->nfields;f++){ if(f)meta_emit(m,", "); meta_emit(m,"!%d",sm->outnode[f]); } meta_emit(m,"}\n");
+        int locn=0;
+        for(size_t f=0;f<sd->nfields;f++){
+            Field *fd=&sd->fields[f]; char tn[64]; ptn_of(tn,sizeof tn,fd->ty.kind,fd->ty.vecn,0);
+            if(fn->stage==ST_VERTEX){
+                if(fd->attr==1) meta_emit(m,"!%d = !{!\"air.position\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->outnode[f],tn,fd->name);
+                else { int ln=fd->attr==5?fd->attr_idx:locn; locn++;
+                    meta_emit(m,"!%d = !{!\"air.vertex_output\", !\"user(locn%d)\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->outnode[f],ln,tn,fd->name); }
+            } else {
+                if(fd->attr==3) meta_emit(m,"!%d = !{!\"air.render_target\", i32 %d, i32 0, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->outnode[f],fd->attr_idx,tn,fd->name);
+                else if(fd->attr==4) meta_emit(m,"!%d = !{!\"air.depth\", !\"air.depth_qualifier\", !\"air.any\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->outnode[f],tn,fd->name);
+                else die(0,"fragment output fields need [[color(N)]] or [[depth(any)]]");
+            }
+        }
+    } else {
+        meta_emit(m,"!%d = !{!%d}\n",sm->outs,sm->leaf);
+        if(fn->stage==ST_VERTEX) meta_emit(m,"!%d = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n",sm->leaf);
+        else meta_emit(m,"!%d = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\"}\n",sm->leaf);
+    }
+    meta_emit(m,"!%d = !{",sm->args); for(int a=0;a<sm->nin;a++){ if(a)meta_emit(m,", "); meta_emit(m,"!%d",sm->argnode[a]); } meta_emit(m,"}\n");
     meta_emit(m,"!%d = !{%s, !%d, !%d}\n",sm->node,fp,sm->outs,sm->args);
+    int argi=0;
     for(size_t a=0;a<fn->nparams;a++){ Param *p=&fn->params[a]; char tn[64]; ptn_of(tn,sizeof tn,p->ty.kind,p->ty.vecn,p->ty.matn);
-        if(fn->stage==ST_VERTEX && p->ty.as==AS_THREAD){ meta_emit(m,"!%d = !{i32 %d, !\"air.vertex_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[a],(int)a,p->name); }
-        else if(fn->stage==ST_FRAGMENT && p->ty.kind==T_FLOAT && p->ty.vecn==4){ meta_emit(m,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[a],(int)a,p->name); }
-        else if(p->ty.is_ptr) meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[a],(int)a,(int)a,p->ty.as,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),tal(p->ty.kind,p->ty.vecn,p->ty.matn),tn,p->name);
-        else meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[a],(int)a,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),(int)a,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),tal(p->ty.kind,p->ty.vecn,p->ty.matn),tn,p->name);
+        if(fn->stage==ST_FRAGMENT && p->ty.kind==T_STRUCT && !p->ty.is_ptr){
+            /* stage-in struct: one metadata node per unpacked field */
+            StructDef *sd=find_struct(prog,p->ty.struct_name);
+            int locn=0;
+            for(size_t f=0;f<sd->nfields;f++){
+                Field *fd=&sd->fields[f]; char ftn[64]; ptn_of(ftn,sizeof ftn,fd->ty.kind,fd->ty.vecn,0);
+                if(fd->attr==1) meta_emit(m,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,ftn,fd->name);
+                else { int ln=fd->attr==5?fd->attr_idx:locn; locn++;
+                    meta_emit(m,"!%d = !{i32 %d, !\"air.fragment_input\", !\"user(locn%d)\", !\"air.center\", !\"%s\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,ln,fd->attr==2?"air.flat":"air.perspective",ftn,fd->name); }
+                argi++;
+            }
+            continue;
+        }
+        if(fn->stage==ST_VERTEX && p->ty.as==AS_THREAD){ meta_emit(m,"!%d = !{i32 %d, !\"air.vertex_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
+        else if(fn->stage==ST_FRAGMENT && p->ty.kind==T_FLOAT && p->ty.vecn==4){ meta_emit(m,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
+        else if(p->ty.is_ptr) meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->ty.as,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),tal(p->ty.kind,p->ty.vecn,p->ty.matn),tn,p->name);
+        else meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),argi,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),tal(p->ty.kind,p->ty.vecn,p->ty.matn),tn,p->name);
+        argi++;
     }
 }
 
 void emit_air(FILE *out, const Program *prog){
+    g_curprog=prog;
     memset(builtin_used,0,sizeof builtin_used); memset(atomic_add_used,0,sizeof atomic_add_used);
     fprintf(out,"; generated by binc — works as C, acts as Metal\n");
     fprintf(out,"target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32\"\n");
@@ -1631,11 +1755,22 @@ void emit_air(FILE *out, const Program *prog){
         g_last_line=fn->line; g_last_col=0;
         char sig[2048]; size_t so=0;
         if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,"define void @%s(",fn->name);
-        else { char rl[32]; if(fn->ret.kind==T_VOID) snprintf(rl,sizeof rl,"void"); else ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
+        else { char rl[64];
+            if(fn->ret.kind==T_VOID) snprintf(rl,sizeof rl,"void");
+            else if(fn->ret.kind==T_STRUCT){ StructDef *sd=find_struct(prog,fn->ret.struct_name); stage_lit_type(rl,sizeof rl,sd); }
+            else ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
             so+=snprintf(sig+so,sizeof sig-so,"define %s%s @%s(",fn->stage==ST_NONE?"internal ":"",rl,fn->name); }
         int emitted=0;
         for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i];
             if(p->ty.array_n) continue; /* shared arrays are module globals, not ABI args */
+            if(fn->stage==ST_FRAGMENT && p->ty.kind==T_STRUCT && !p->ty.is_ptr){
+                /* stage-in struct: unpacked as separate arguments */
+                StructDef *sd=find_struct(prog,p->ty.struct_name);
+                for(size_t f=0;f<sd->nfields;f++){ char fl[64]; type_ll(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.struct_name,sd->fields[f].ty.vecn);
+                    if(emitted++)so+=snprintf(sig+so,sizeof sig-so,", ");
+                    so+=snprintf(sig+so,sizeof sig-so,"%s noundef %%_%s.%zu",fl,p->name,f); }
+                continue;
+            }
             if(emitted++)so+=snprintf(sig+so,sizeof sig-so,", ");
             if(p->ty.kind==T_COORD){ char cl[32]; coord_ll(&p->ty,cl,sizeof cl);
                 so+=snprintf(sig+so,sizeof sig-so,"%s noundef %%_%s",cl,p->name); }
@@ -1660,8 +1795,28 @@ void emit_air(FILE *out, const Program *prog){
             c.idx=malloc(32); snprintf(c.idx,32,"%%_%s",fn->params[c.coord_param].name);
             const char *z=newtmp(&c); sb_printf(c.pre,"  %s = zext i32 %s to i64\n",z,c.idx); c.idx=(char*)z;
         }
+        /* fragment stage-in struct: unpack the argument registers into a struct local */
+        if(fn->stage==ST_FRAGMENT) for(size_t pi2=0;pi2<fn->nparams;pi2++){ Param *p=&fn->params[pi2];
+            if(p->ty.kind!=T_STRUCT||p->ty.is_ptr) continue;
+            StructDef *sd=find_struct(prog,p->ty.struct_name);
+            int sal; struct_layout(sd,&sal);
+            char *slot=newtmp(&c); sb_printf(c.pre,"  %s = alloca %%struct.%s, align %d\n",slot,p->ty.struct_name,sal);
+            for(size_t f=0;f<sd->nfields;f++){
+                char pty[96]; pty_str(pty,sizeof pty,sd->fields[f].ty.kind,sd->fields[f].ty.struct_name,0,1,sd->fields[f].ty.vecn,0);
+                char ll[32]; ll_of(ll,sizeof ll,sd->fields[f].ty.kind,sd->fields[f].ty.vecn);
+                char sp[64]; snprintf(sp,sizeof sp,"%%struct.%s*",p->ty.struct_name);
+                const char *fp=newtmp(&c);
+                emit(&c,"  %s = getelementptr inbounds %%struct.%s, %s %s, i64 0, i32 %zu\n",fp,p->ty.struct_name,sp,slot,f);
+                char an[64]; snprintf(an,sizeof an,"%%_%s.%zu",p->name,f);
+                emit(&c,"  store %s %s, %s %s, align %d\n",ll,an,pty,fp,type_align(sd->fields[f].ty.kind,sd->fields[f].ty.vecn));
+            }
+            c.locs=realloc(c.locs,(c.nlocs+1)*sizeof(Loc));
+            c.locs[c.nlocs++]=(Loc){p->name,slot,T_STRUCT,p->ty.struct_name,0,0,0};
+        }
         gen_block(&c,&fn->body);
         if(!c.term){ if(fn->ret.kind==T_VOID) emit(&c,"  ret void\n");
+            else if(fn->ret.kind==T_STRUCT){ StructDef *sd=find_struct(prog,fn->ret.struct_name);
+                char lt[256]; stage_lit_type(lt,sizeof lt,sd); emit(&c,"  ret %s undef\n",lt); }
             else { char rl[32]; ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
                 emit(&c,"  ret %s %s\n",rl,fn->ret.vecn>1?"zeroinitializer":
                     fn->ret.kind==T_FLOAT||fn->ret.kind==T_HALF?"0.000000e+00":fn->ret.kind==T_BOOL?"false":"0"); } }
@@ -1713,11 +1868,23 @@ void emit_air(FILE *out, const Program *prog){
         ki++; }
     size_t si=0;
     for(size_t fi=0;fi<prog->nfuncs;fi++) if(prog->funcs[fi].stage!=ST_NONE){
-        sm[si].fn=&prog->funcs[fi];
+        Function *sf=&prog->funcs[fi];
+        size_t nin=0;
+        for(size_t a=0;a<sf->nparams;a++){
+            if(sf->stage==ST_FRAGMENT && sf->params[a].ty.kind==T_STRUCT && !sf->params[a].ty.is_ptr){
+                StructDef *sd=find_struct(prog,sf->params[a].ty.struct_name);
+                nin += sd?sd->nfields:1;
+            } else nin++;
+        }
+        size_t nout = sf->ret.kind==T_STRUCT ? (find_struct(prog,sf->ret.struct_name)?find_struct(prog,sf->ret.struct_name)->nfields:1) : 1;
+        sm[si].fn=sf;
         sm[si].node=meta_alloc(&meta); sm[si].empty=meta_alloc(&meta); sm[si].outs=meta_alloc(&meta);
         sm[si].leaf=meta_alloc(&meta); sm[si].args=meta_alloc(&meta);
-        sm[si].argnode=malloc((prog->funcs[fi].nparams?prog->funcs[fi].nparams:1)*sizeof(int));
-        for(size_t a=0;a<prog->funcs[fi].nparams;a++)sm[si].argnode[a]=meta_alloc(&meta);
+        sm[si].nin=(int)nin; sm[si].nout=(int)nout;
+        sm[si].argnode=malloc((nin?nin:1)*sizeof(int));
+        for(size_t a=0;a<nin;a++)sm[si].argnode[a]=meta_alloc(&meta);
+        sm[si].outnode=malloc((nout?nout:1)*sizeof(int));
+        for(size_t o=0;o<nout;o++)sm[si].outnode[o]=meta_alloc(&meta);
         si++; }
     meta_emit(&meta,"!llvm.module.flags = !{!0, !1, !2, !3, !4, !5, !6}\n");
     meta_emit(&meta,"!air.kernel = !{"); for(size_t k=0;k<nk;k++){ if(k)meta_emit(&meta,", "); meta_emit(&meta,"!%d",km[k].knode); } meta_emit(&meta,"}\n");
@@ -1730,7 +1897,7 @@ void emit_air(FILE *out, const Program *prog){
         emit_kernel_meta(&meta,prog,&prog->funcs[fi],&km[ki],kf[fi].read,kf[fi].written,kf[fi].nmeta,kf[fi].np);
         ki++; }
     /* stage emission preserves the previous grouping: vertices first, then fragments */
-    for(size_t s=0;s<ns;s++) if(sm[s].fn->stage==ST_VERTEX) emit_stage_meta(&meta,sm[s].fn,&sm[s]);
-    for(size_t s=0;s<ns;s++) if(sm[s].fn->stage==ST_FRAGMENT) emit_stage_meta(&meta,sm[s].fn,&sm[s]);
+    for(size_t s=0;s<ns;s++) if(sm[s].fn->stage==ST_VERTEX) emit_stage_meta(&meta,prog,sm[s].fn,&sm[s]);
+    for(size_t s=0;s<ns;s++) if(sm[s].fn->stage==ST_FRAGMENT) emit_stage_meta(&meta,prog,sm[s].fn,&sm[s]);
     fwrite(meta.sb.p,1,meta.sb.n,out);
 }

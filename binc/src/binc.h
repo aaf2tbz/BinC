@@ -73,7 +73,7 @@ struct Stmt {
 typedef struct { char *name; Type ty; Uniformity un; } Param;
 typedef enum { ST_NONE, ST_VERTEX, ST_FRAGMENT } Stage;
 typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; int line; } Function;
-typedef struct { char *name; Type ty; } Field;
+typedef struct { char *name; Type ty; int attr; int attr_idx; } Field; /* attr: 0 none, 1 position, 2 flat, 3 color(N), 4 depth, 5 user(locnN) */
 typedef struct { char *tag; Field *fields; size_t nfields; } StructDef;
 typedef struct { char *name; Type ty; int is_int; long ival; double fval; int line; } ConstDef;
 typedef struct { StructDef *structs; size_t nstructs; Function *funcs; size_t nfuncs; ConstDef *consts; size_t nconsts; } Program;
@@ -81,7 +81,7 @@ typedef struct { StructDef *structs; size_t nstructs; Function *funcs; size_t nf
 /* ---- lexer ---- */
 typedef enum {
     TK_EOF, TK_IDENT, TK_FCONST, TK_ICONST,
-    TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE, TK_LBRACK, TK_RBRACK,
+    TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE, TK_LBRACK, TK_RBRACK, TK_DBL_LBRACK, TK_DBL_RBRACK,
     TK_STAR, TK_COMMA, TK_SEMI, TK_ARROW, TK_DOT,
     TK_PLUS, TK_MINUS, TK_SLASH, TK_PERCENT, TK_BANG,
     TK_EQ, TK_EQEQ, TK_NEQ, TK_LT, TK_LE, TK_GT, TK_GE, TK_AND, TK_OR,

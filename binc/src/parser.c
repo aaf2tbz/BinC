@@ -308,7 +308,7 @@ static void parse_function(TokStream *ts, Program *prog){
     Type ret=parse_type(ts);
     if(stage!=ST_NONE&&is_kernel) die(peek(ts)->line,"render stages cannot also be kernels");
     if(is_kernel&&ret.kind!=T_VOID) die(peek(ts)->line,"kernel functions must return void");
-    if(ret.kind==T_STRUCT) die(peek(ts)->line,"struct-by-value return not supported");
+    if(ret.kind==T_STRUCT) { if(stage==ST_NONE) die(peek(ts)->line,"struct-by-value return only in vertex/fragment functions"); }
     if(ret.matn) die(peek(ts)->line,"matrix-by-value return not supported");
     Token *nm=peek(ts); expect(ts,TK_IDENT,"function name"); expect(ts,TK_LPAREN,"(");
     Param *params=NULL; size_t np=0,cap=0;
@@ -320,7 +320,7 @@ static void parse_function(TokStream *ts, Program *prog){
             if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); }
             if(ty.as!=AS_THREADGROUP) die(pn->line,"only threadgroup parameters may be arrays");
         }
-        if(ty.kind==T_STRUCT&&!ty.is_ptr) die(pn->line,"struct-by-value parameter not supported");
+        if(ty.kind==T_STRUCT&&!ty.is_ptr){ if(stage!=ST_FRAGMENT) die(pn->line,"struct-by-value parameter only in fragment functions (stage-in)"); }
         if(ty.matn&&!ty.is_ptr) die(pn->line,"matrix-by-value parameter not supported");
         if(ty.kind==T_COORD&&ty.is_ptr) die(pn->line,"coordinates cannot be pointers");
         if(np==cap){cap=cap?cap*2:4;params=realloc(params,cap*sizeof(Param));}
@@ -342,7 +342,23 @@ static void parse_struct(TokStream *ts, Program *prog){
     while(peek(ts)->kind!=TK_RBRACE){
         Type ty=parse_type(ts); if(ty.is_ptr) die(peek(ts)->line,"pointer fields unsupported");
         do{ Token *fn=peek(ts); expect(ts,TK_IDENT,"field name");
-            if(n==cap){cap=cap?cap*2:8;f=realloc(f,cap*sizeof(Field));} f[n++]=(Field){strdup(fn->text),ty};
+            /* optional [[...]] attribute: position / flat / color(N) / depth(any) / user(locnN) */
+            int attr=0, attr_idx=0;
+            if(accept(ts,TK_DBL_LBRACK)){
+                Token *at=peek(ts); advance(ts);
+                if(at->kind!=TK_IDENT) die(at->line,"expected an attribute name");
+                if(!strcmp(at->text,"position")){ attr=1; }
+                else if(!strcmp(at->text,"flat")){ attr=2; }
+                else if(!strcmp(at->text,"depth")){ attr=4; expect(ts,TK_LPAREN,"("); Token *dq=peek(ts); (void)dq; advance(ts); expect(ts,TK_RPAREN,")"); }
+                else if(!strcmp(at->text,"color")||!strcmp(at->text,"user")){
+                    attr = !strcmp(at->text,"color")?3:5; expect(ts,TK_LPAREN,"(");
+                    Token *ix=peek(ts); if(ix->kind!=TK_ICONST) die(ix->line,"attribute index must be a constant");
+                    attr_idx=(int)ix->ival; advance(ts); expect(ts,TK_RPAREN,")");
+                }
+                else die(at->line,"unknown field attribute [[%s]]",at->text);
+                expect(ts,TK_DBL_RBRACK,"]]");
+            }
+            if(n==cap){cap=cap?cap*2:8;f=realloc(f,cap*sizeof(Field));} f[n++]=(Field){strdup(fn->text),ty,attr,attr_idx};
         } while(accept(ts,TK_COMMA)); expect(ts,TK_SEMI,";");
     }
     expect(ts,TK_RBRACE,"}"); expect(ts,TK_SEMI,";");

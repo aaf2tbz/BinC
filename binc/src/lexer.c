@@ -40,8 +40,8 @@ void lex(const char *src, Token **out, size_t *out_n){
         if(c==')'){l.p++;PUSH(tk(TK_RPAREN,ln,col));continue;}
         if(c=='{'){l.p++;PUSH(tk(TK_LBRACE,ln,col));continue;}
         if(c=='}'){l.p++;PUSH(tk(TK_RBRACE,ln,col));continue;}
-        if(c=='['){l.p++;PUSH(tk(TK_LBRACK,ln,col));continue;}
-        if(c==']'){l.p++;PUSH(tk(TK_RBRACK,ln,col));continue;}
+        if(c=='['){ if(l.p[1]=='['){l.p+=2;PUSH(tk(TK_DBL_LBRACK,ln,col));} else {l.p++;PUSH(tk(TK_LBRACK,ln,col));} continue;}
+        if(c==']'){ if(l.p[1]==']'){l.p+=2;PUSH(tk(TK_DBL_RBRACK,ln,col));} else {l.p++;PUSH(tk(TK_RBRACK,ln,col));} continue;}
         if(c==','){l.p++;PUSH(tk(TK_COMMA,ln,col));continue;}
         if(c==';'){l.p++;PUSH(tk(TK_SEMI,ln,col));continue;}
         if(c=='.'){l.p++;PUSH(tk(TK_DOT,ln,col));continue;}

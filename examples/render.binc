@@ -1,0 +1,30 @@
+/* Render pipeline: vertex stage-out struct with interpolated color,
+ * fragment stage-in, dual render targets, and a depth output. */
+struct VOut {
+    float4 pos [[position]];
+    float3 col;
+};
+struct FIn {
+    float4 pos [[position]];
+    float3 col;
+};
+struct FOut {
+    float4 color0 [[color(0)]];
+    float4 color1 [[color(1)]];
+    float depth [[depth(any)]];
+};
+
+vertex VOut vs(device float4* verts, vertex_id vid) {
+    VOut o;
+    o.pos = verts[vid];
+    o.col = float3(verts[vid].xy, 1.0f);
+    return o;
+}
+
+fragment FOut fs(FIn in) {
+    FOut o;
+    o.color0 = float4(in.col, 1.0f);       /* interpolated NDC position */
+    o.color1 = float4(in.pos.xy, 0.0f, 1.0f);
+    o.depth = in.pos.z * 0.5f + 0.5f;      /* NDC z=-1..1 -> 0..1 */
+    return o;
+}
