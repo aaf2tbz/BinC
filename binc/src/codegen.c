@@ -880,6 +880,32 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         const char *r=gen_rval(c,e->rhs,&rk); if(lw||c->rvw) die(0,"vector operand in logical operator");
         const char *v=newtmp(c); *k=VK_I1; emit(c,"  %s = %s i1 %s, %s\n",v,e->log==L_AND?"and":"or",l,r); return v; }
     case E_ASSIGN:{
+        /* swizzle assignment: v.xy = rhs — write each named component */
+        if(e->aop==A_ASSIGN && e->operand->kind==E_FIELD && e->operand->operand->kind==E_IDENT){
+            int wi; RKind wr=resolve(c,e->operand->operand->name,&wi);
+            if(wr==R_LOCAL && c->locs[wi].vecn>1){
+                int idxs[4]; int nc=swizzle_idx(e->operand->field,idxs);
+                if(nc>1){
+                    for(int i=0;i<nc;i++) if(idxs[i]>=c->locs[wi].vecn) die(0,"invalid vector component .%s",e->operand->field);
+                    ValKind rk; const char *rv=gen_rval(c,e->rhs,&rk); int rw=c->rvw;
+                    if(rw!=nc) die(0,"swizzle assignment width mismatch");
+                    char pty[96]; pty_str(pty,sizeof pty,c->locs[wi].kind,NULL,0,1,c->locs[wi].vecn,0);
+                    char *base=c->locs[wi].slot;
+                    char *bit=newtmp(c);
+                    emit(c,"  %s = bitcast %s %s to %s*\n",bit,pty,base,c->locs[wi].kind==T_HALF?"half":"float");
+                    for(int i=0;i<nc;i++){
+                        const char *p=newtmp(c);
+                        emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 %d\n",p,c->locs[wi].kind==T_HALF?"half":"float",c->locs[wi].kind==T_HALF?"half":"float",bit,idxs[i]);
+                        const char *ev=newtmp(c);
+                        emit(c,"  %s = extractelement <%d x float> %s, i32 %d\n",ev,nc,rv,i);
+                        const char *sv=ev;
+                        if(c->locs[wi].kind==T_HALF){ const char *h=newtmp(c); emit(c,"  %s = fptrunc float %s to half\n",h,ev); sv=h; }
+                        emit(c,"  store %s %s, %s* %s, align %d\n",c->locs[wi].kind==T_HALF?"half":"float",sv,c->locs[wi].kind==T_HALF?"half":"float",p,c->locs[wi].kind==T_HALF?2:4);
+                    }
+                    *k=scalar_vk(c->locs[wi].kind); c->rvw=nc; return rv;
+                }
+            }
+        }
         ValKind rk; const char *rhs=gen_rval(c,e->rhs,&rk); int rw=c->rvw; int rm=c->rmat;
         LInfo li; char *addr=gen_lval(c,e->operand,&li,1);
         if(rm){

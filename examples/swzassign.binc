@@ -1,0 +1,12 @@
+kernel void k(device float* out, coord1D i) {
+    float4 v = float4(1.0f, 2.0f, 3.0f, 4.0f);
+    v.xy = float2(9.0f, 8.0f);      /* swizzle write */
+    v.z = 7.0f;                     /* single component write */
+    out[i]     = v.x + v.y;         /* 17 */
+    out[i + 8] = v.z;               /* 7 */
+    float3 w = float3(0.0f);
+    w.yz = float2(5.0f, 6.0f);
+    out[i + 16] = w.x + w.y + w.z;  /* 11 */
+    v.wzyx = v;                     /* reverse in place: rhs read before writes */
+    out[i + 24] = v.x;              /* 4 */
+}
