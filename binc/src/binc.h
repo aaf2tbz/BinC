@@ -21,6 +21,7 @@ typedef struct {
     AddrSpace as;
     int      vecn; /* 0/1 = scalar; 2/3/4 = vector width */
     int      matn; /* 2/3/4 = column-major float matrix; 0 = not a matrix */
+    int      matm; /* 0 = square; else non-square column count (float4x3: matn=4, matm=3) */
     int      coordn; /* T_COORD dimensionality: 1, 2, or 3 */
     TypeKind atomic_base; /* T_ATOMIC's scalar payload */
     TypeKind tex_elt; /* T_TEXTURE's texel scalar type */
@@ -72,7 +73,7 @@ struct Stmt {
 };
 
 typedef struct { char *name; Type ty; Uniformity un; } Param;
-typedef enum { ST_NONE, ST_VERTEX, ST_FRAGMENT } Stage;
+typedef enum { ST_NONE, ST_VERTEX, ST_FRAGMENT, ST_GEOMETRY } Stage;
 typedef struct { char *name; char *link_name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; int line;
     int is_template; char *tvar; Type tvar_ty; } Function;
 typedef struct { char *name; Type ty; int attr; int attr_idx; char *sem; } Field; /* attr: 0 none, 1 position, 2 flat, 3 color(N), 4 depth, 5 user(locnN); sem: raw HLSL semantic */
@@ -100,7 +101,8 @@ typedef enum {
     TK_KW_CBUFFER, TK_KW_TBUFFER, TK_KW_GROUPSHARED, TK_KW_IN, TK_KW_OUT, TK_KW_INOUT, TK_KW_STATIC,
     TK_KW_REGISTER, TK_KW_PACKOFFSET, TK_KW_RWTEXTURE2D,
     TK_KW_STRUCTURED, TK_KW_RWSTRUCTURED, TK_KW_BYTEADDR, TK_KW_RWBYTEADDR,
-    TK_KW_LINEAR, TK_KW_NOPERSPECTIVE, TK_KW_CENTROID, TK_KW_SAMPLE
+    TK_KW_LINEAR, TK_KW_NOPERSPECTIVE, TK_KW_CENTROID, TK_KW_SAMPLE,
+    TK_KW_TECHNIQUE, TK_KW_PASS,
 } TokKind;
 typedef struct { TokKind kind; char *text; double fval; long ival; int line, col; } Token;
 typedef struct { Token *toks; size_t n; size_t i; } TokStream;
@@ -118,7 +120,7 @@ Token *peek(TokStream *ts); Token *advance(TokStream *ts);
 int accept(TokStream *ts, TokKind k); void expect(TokStream *ts, TokKind k, const char *w);
 void expect_name(TokStream *ts, const char *what);
 Expr *E(ExprKind k, int line, int col);
-Type parse_type(TokStream *ts); int starts_scalar_type(TokStream *ts);
+Type parse_type(TokStream *ts); int starts_scalar_type(TokStream *ts); int parse_array_extent(TokStream *ts);
 Expr *parse_expr(TokStream *ts); Stmt parse_stmt(TokStream *ts);
 Block parse_braced(TokStream *ts); Block parse_block_or_stmt(TokStream *ts);
 void blk_push(Block *b, Stmt s); int is_stag(const char *s);

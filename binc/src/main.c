@@ -208,11 +208,11 @@ int main(int argc, char **argv) {
         return 3;
     }
     if (is_hlsl) {
-        /* validate the target profile: vs_5_0 / ps_5_0 / cs_5_0 / *_3_0 ... */
+        /* validate the target profile: vs_5_0 / ps_5_0 / cs_5_0 / gs_4_0 / *_3_0 ... */
         int maj = -1, min = -1; char stage[4] = {0};
-        if (sscanf(profile, "%3[vspscs]_%d_%d", stage, &maj, &min) != 3 ||
-            (strcmp(stage, "vs") && strcmp(stage, "ps") && strcmp(stage, "cs")))
-            { fprintf(stderr, "binc: invalid target profile '%s' (expected vs/ps/cs_N_M)\n", profile); return 2; }
+        if (sscanf(profile, "%3[vspscsgs]_%d_%d", stage, &maj, &min) != 3 ||
+            (strcmp(stage, "vs") && strcmp(stage, "ps") && strcmp(stage, "cs") && strcmp(stage, "gs")))
+            { fprintf(stderr, "binc: invalid target profile '%s' (expected vs/ps/cs/gs_N_M)\n", profile); return 2; }
     }
 
     /* preprocess: for HLSL, raw file with #-directives stripped (no prelude);
@@ -230,15 +230,18 @@ int main(int argc, char **argv) {
         while(ls&&*ls){
             char *nl=strchr(ls,'\n');
             size_t len=nl?(size_t)(nl-ls):strlen(ls);
-            if(len&&ls[0]=='#'){ /* skip the directive line */
-                char *ln=strndup(ls,len);
+            char *first=ls; while(*first==' '||*first=='\t'||*first=='\r') first++;
+            if(len&&*first=='#'){ /* skip the directive line (allow leading whitespace) */
+                char *ln=strndup(first,len-(size_t)(first-ls));
                 char *p=ln+1; while(*p==' ') p++;
                 if(!strncmp(p,"define ",7)){
                     char *nm=p+7; char *sp=nm; while(*sp&&*sp!=' '&&*sp!='\t') sp++;
                     char *val=sp; while(*val==' '||*val=='\t') val++;
                     if(sp>nm&&*val&&ndefs<64){
                         *sp=0; char *ve=val+strlen(val);
-                        while(ve>val&&(ve[-1]==' '||ve[-1]=='\t')) *--ve=0;
+                        while(ve>val&&(ve[-1]==' '||ve[-1]=='\t'||ve[-1]=='\r')) *--ve=0;
+                        /* strip a trailing // comment from the value */
+                        char *cm=val; while((cm=strstr(cm,"//"))){ *cm=0; break; }
                         defs[ndefs].name=strdup(nm); defs[ndefs].val=strdup(val); ndefs++;
                     }
                 }

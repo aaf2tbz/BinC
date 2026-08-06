@@ -39,7 +39,7 @@ static void sem_to_attr(const char *sem, int *attr, int *idx, int vertex_input){
     if(sem_eq(sem,"SV_Position")){ *attr=1; return; }
     if(sem_pref(sem,"SV_Target")){ *attr=3; *idx=atoi(sem+9); return; }
     if(sem_eq(sem,"SV_Depth")){ *attr=4; return; }
-    if(sem_pref(sem,"TEXCOORD")){ *attr=5; *idx=atoi(sem+8); return; }
+    if(sem_pref(sem,"TEXCOORD")){ *attr=5; *idx=atoi(sem+8)+1; return; } /* +1: keep locn0 for POSITION (VS outputs / PS inputs) */
     if(sem_pref(sem,"COLOR")){ *attr=5; *idx=atoi(sem+5); return; }
     if(sem_eq(sem,"NORMAL")){ *attr=5; *idx=1; return; }
     if(sem_eq(sem,"TANGENT")){ *attr=5; *idx=2; return; }
@@ -255,7 +255,7 @@ static void prog_add_struct(StructDef sd){
  * coord3D param and rewrite body references to .global / .local */
 static void lower_compute(Function *fn, HLSLFunc *hf){
     const char *names[8]; size_t nn=0;
-    const char *coord_name=NULL; int coord_kind=0; /* 1=global, 2=local */
+    const char *coord_name=NULL; int coord_kind __attribute__((unused)) =0; /* 1=global, 2=local */
     for(size_t i=0;i<hf->np;i++){
         HLSLParam *p=&hf->params[i];
         if(!p->sem) continue;
@@ -431,6 +431,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
     memset(&g_prog,0,sizeof g_prog);
     int is_vs = strncmp(profile,"vs",2)==0;
     int is_ps = strncmp(profile,"ps",2)==0;
+    int is_gs = strncmp(profile,"gs",2)==0;
     /* module constants: static const globals -> ConstDef */
     for(size_t i=0;i<hp->nglobals;i++){
         HLSLGlobal *gg=&hp->globals[i];
@@ -572,10 +573,9 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                 }
             }
         }
-        if(is_entry||(stage_all&&(s_vs||s_ps))){
-            if(is_entry) entry_found=1;
+        if(is_entry||(stage_all&&(s_vs||s_ps))){            if(is_entry) entry_found=1;
             if(stage_all){ fn.stage=s_vs?ST_VERTEX:ST_FRAGMENT; }
-            else if(is_entry){ fn.stage=is_vs?ST_VERTEX:is_ps?ST_FRAGMENT:ST_NONE; }
+            else if(is_entry){ fn.stage=is_vs?ST_VERTEX:is_ps?ST_FRAGMENT:is_gs?ST_GEOMETRY:ST_NONE; }
             /* resources (cbuffers + typed globals) become params in register
              * order; cbuffer field references rewrite to struct-field access */
             for(size_t r=0;r<nres;r++){
@@ -592,7 +592,13 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             }
             if(fn.stage==ST_VERTEX) lower_vertex(&fn,hf);
             else if(fn.stage==ST_FRAGMENT) lower_fragment(&fn,hf);
-            if(is_entry&&!is_vs&&!is_ps&&!stage_all){
+            else if(fn.stage==ST_GEOMETRY){
+                /* GS lowering to the Metal mesh stage is the in-scope next chunk
+                 * (probed: this toolchain dropped air.amplification; the mesh
+                 * path exists via metal_mesh). Parse/classification land here. */
+                die(hf->line,"geometry shader lowering (Metal mesh) not yet wired — GS parses, stage classified");
+            }
+            if(is_entry&&!is_vs&&!is_ps&&!is_gs&&!stage_all){
                 fn.is_kernel=1;
                 if(fn.ret.kind!=T_VOID) die(hf->line,"compute entry must return void");
                 lower_compute(&fn,hf);

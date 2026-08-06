@@ -41,10 +41,10 @@ void lex(const char *src, Token **out, size_t *out_n, int first_line, int hlsl){
         if(c=='{'){l.p++;PUSH(tk(TK_LBRACE,ln,col));continue;}
         if(c=='}'){l.p++;PUSH(tk(TK_RBRACE,ln,col));continue;}
         if(c=='['){ if(l.p[1]=='['){l.p+=2;PUSH(tk(TK_DBL_LBRACK,ln,col));} else {l.p++;PUSH(tk(TK_LBRACK,ln,col));} continue;}
-        if(c==']'){ if(l.p[1]==']'){l.p+=2;PUSH(tk(TK_DBL_RBRACK,ln,col));} else {l.p++;PUSH(tk(TK_RBRACK,ln,col));} continue;}
+        if(c==']'){l.p++;PUSH(tk(TK_RBRACK,ln,col));continue;}
         if(c==','){l.p++;PUSH(tk(TK_COMMA,ln,col));continue;}
         if(c==';'){l.p++;PUSH(tk(TK_SEMI,ln,col));continue;}
-        if(c=='.'){l.p++;PUSH(tk(TK_DOT,ln,col));continue;}
+        if(c=='.'){ if(isdigit((unsigned char)l.p[1])){ goto numcase; } l.p++;PUSH(tk(TK_DOT,ln,col));continue;}
         if(c=='?'){l.p++;PUSH(tk(TK_QUESTION,ln,col));continue;}
         if(c==':'){l.p++;PUSH(tk(TK_COLON,ln,col));continue;}
         if(c=='+'){l.p++; if(*l.p=='+'){l.p++;PUSH(tk(TK_INC,ln,col));} else if(*l.p=='='){l.p++;PUSH(tk(TK_PLUSEQ,ln,col));}else{PUSH(tk(TK_PLUS,ln,col));} continue;}
@@ -72,8 +72,10 @@ void lex(const char *src, Token **out, size_t *out_n, int first_line, int hlsl){
             while(*l.p&&*l.p!='"'){ if(*l.p=='\\')l.p++; l.p++; }
             if(*l.p)l.p++;
             Token x=tk(TK_IDENT,ln,col); x.text=dup_n(s,(size_t)(l.p-s)); PUSH(x); continue; }
-        if(isdigit((unsigned char)c)){
+numcase:
+        if(isdigit((unsigned char)c)||(c=='.'&&isdigit((unsigned char)l.p[1]))){ /* numbers, incl. leading-dot floats (.3) */
             const char *s=l.p; int isint=1;
+            if(c=='.'){ isint=0; l.p++; } /* .3 — skip the leading dot */
             if(l.p[0]=='0'&&(l.p[1]=='x'||l.p[1]=='X')){
                 l.p+=2; while(*l.p&&isxdigit((unsigned char)*l.p))l.p++;
                 if(*l.p=='u'||*l.p=='U')l.p++;
@@ -135,6 +137,7 @@ void lex(const char *src, Token **out, size_t *out_n, int first_line, int hlsl){
             HLSLKW("register",TK_KW_REGISTER) HLSLKW("packoffset",TK_KW_PACKOFFSET)
             HLSLKW("linear",TK_KW_LINEAR) HLSLKW("noperspective",TK_KW_NOPERSPECTIVE)
             HLSLKW("centroid",TK_KW_CENTROID) HLSLKW("sample",TK_KW_SAMPLE)
+            HLSLKW("technique",TK_KW_TECHNIQUE) HLSLKW("technique10",TK_KW_TECHNIQUE) HLSLKW("technique11",TK_KW_TECHNIQUE) HLSLKW("pass",TK_KW_PASS)
             HLSLKW("Texture2D",TK_KW_TEXTURE2D) HLSLKW("RWTexture2D",TK_KW_RWTEXTURE2D)
             HLSLKW("SamplerState",TK_KW_SAMPLER) HLSLKW("SamplerComparisonState",TK_KW_SAMPLER)
             HLSLKW("StructuredBuffer",TK_KW_STRUCTURED) HLSLKW("RWStructuredBuffer",TK_KW_RWSTRUCTURED)

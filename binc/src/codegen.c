@@ -36,11 +36,13 @@ static int mat_size(int matn){ return matn==2?16:matn==3?48:64; }
 static int mat_align(int matn){ return matn==2?8:16; }
 static int tsz(TypeKind k,int vecn,int matn){ return matn?mat_size(matn):type_size(k,vecn); }
 static int tal(TypeKind k,int vecn,int matn){ return matn?mat_align(matn):type_align(k,vecn); }
-static void mll_of(char *buf,size_t n,int matn){ snprintf(buf,n,"[%d x <%d x float>]",matn,matn); }
+static void mll_of(char *buf,size_t n,int matn,int matm){
+    if(matm&&matm!=matn) die(0,"non-square matrix (%dx%d) not supported in codegen yet (Phase 6+)",matn,matm);
+    snprintf(buf,n,"[%d x <%d x float>]",matn,matn); }
 static void ll_of(char *buf,size_t n,TypeKind k,int vecn);
 /* matrix-aware value type: matrix -> [N x <N x float>], else scalar/vector */
-static void pll_of(char *buf,size_t n,TypeKind k,int vecn,int matn){
-    if(matn) mll_of(buf,n,matn); else ll_of(buf,n,k,vecn); }
+static void pll_of(char *buf,size_t n,TypeKind k,int vecn,int matn,int matm){
+    if(matn) mll_of(buf,n,matn,matm); else ll_of(buf,n,k,vecn); }
 static void ll_of(char *buf,size_t n,TypeKind k,int vecn){
     if(vecn>1) snprintf(buf,n,"<%d x %s>",vecn,scalar_ll(k)); else snprintf(buf,n,"%s",scalar_ll(k)); }
 static void type_ll(char *buf,size_t n,TypeKind k,char *sname,int vecn){
@@ -144,13 +146,13 @@ static void shared_name(CG *c, int pi, char *buf, size_t n){
 }
 static void pty_str(char *buf,size_t n,TypeKind tk,char *sname,int as,int is_local,int vecn,int matn){
     char elt[64];
-    if(matn) mll_of(elt,sizeof elt,matn); else type_ll(elt,sizeof elt,tk,sname,vecn);
+    if(matn) mll_of(elt,sizeof elt,matn,0); else type_ll(elt,sizeof elt,tk,sname,vecn);
     if(is_local) snprintf(buf,n,"%s*",elt); else snprintf(buf,n,"%s addrspace(%d)*",elt,as); }
 
 /* address of element p[ix] (i64 index value) for pointer param pi */
 static char *element_ptr_idx(CG *c,int pi,const char *ix){
     Param *pr=&c->fn->params[pi]; char elt[64];
-    if(pr->ty.matn) mll_of(elt,sizeof elt,pr->ty.matn); else type_ll(elt,sizeof elt,pr->ty.kind,pr->ty.struct_name,pr->ty.vecn);
+    if(pr->ty.matn) mll_of(elt,sizeof elt,pr->ty.matn,pr->ty.matm); else type_ll(elt,sizeof elt,pr->ty.kind,pr->ty.struct_name,pr->ty.vecn);
     char *s=newtmp(c);
     emit(c,"  %s = getelementptr inbounds %s, %s addrspace(%d)* %%_%s, i64 %s\n",s,elt,elt,pr->ty.as,pr->name,ix);
     return s;
@@ -280,14 +282,14 @@ static const char *mat_eval(CG *c, Expr *e, int *mn){
 }
 /* extract column `col` of a matrix register */
 static const char *mat_col(CG *c, const char *m, int mn, int col){
-    char mty[32]; mll_of(mty,sizeof mty,mn);
+    char mty[32]; mll_of(mty,sizeof mty,mn,0);
     const char *r=newtmp(c);
     emit(c,"  %s = extractvalue %s %s, %d\n",r,mty,m,col);
     return r;
 }
 /* insert column `col` into a matrix aggregate */
 static const char *mat_setcol(CG *c, const char *m, int mn, int col, const char *v){
-    char mty[32]; mll_of(mty,sizeof mty,mn);
+    char mty[32]; mll_of(mty,sizeof mty,mn,0);
     const char *r=newtmp(c);
     emit(c,"  %s = insertvalue %s %s, <%d x float> %s, %d\n",r,mty,m,mn,v,col);
     return r;
@@ -349,7 +351,7 @@ static const char *emit_load_t(CG *c, LInfo *li, const char *addr, ValKind *k){
         *k=VK_I32; c->rvw=0; c->rstruct=li->sname; return v;
     }
     if(li->matn){ /* matrix load: [N x <N x float>] */
-        char mty[32]; mll_of(mty,sizeof mty,li->matn);
+        char mty[32]; mll_of(mty,sizeof mty,li->matn,0);
         char pty[96]; pty_str(pty,sizeof pty,li->tk,li->sname,li->as,li->is_local,li->vecn,li->matn);
         const char *v=newtmp(c);
         emit(c,"  %s = load %s, %s %s, align %d\n",v,mty,pty,addr,mat_align(li->matn));
@@ -799,7 +801,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             if(c->locs[idx].an>0) die(0,"cannot use an array as a value");
             if(c->locs[idx].matn){
                 /* whole matrix value: aggregate load */
-                char mty[32]; mll_of(mty,sizeof mty,c->locs[idx].matn);
+                char mty[32]; mll_of(mty,sizeof mty,c->locs[idx].matn,0);
                 const char *v=newtmp(c);
                 emit(c,"  %s = load %s, %s* %s, align %d\n",v,mty,mty,c->locs[idx].slot,mat_align(c->locs[idx].matn));
                 *k=VK_F32; c->rvw=0; c->rmat=c->locs[idx].matn; return v;
@@ -959,6 +961,23 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         return r; }
     case E_CAST:{ ValKind lk; const char *v=gen_rval(c,e->operand,&lk); int vw=c->rvw;
         Type bt=bind_ty(c->fn,e->cty); Type *t=&bt; TypeKind tk=t->kind; int tv=t->vecn>1?t->vecn:0;
+        if(t->matn){ /* matrix cast: same-size identity, larger->smaller = top-left submatrix */
+            if(!c->rmat) die(0,"matrix cast requires a matrix operand");
+            if(c->rmat==t->matn){ *k=VK_F32; c->rvw=0; c->rmat=t->matn; return v; }
+            if(c->rmat<t->matn) die(0,"matrix cast cannot widen");
+            const char *res="undef";
+            for(int cc=0;cc<t->matn;cc++){
+                const char *colv="undef";
+                for(int rr=0;rr<t->matn;rr++){
+                    const char *me=mat_elem(c,v,c->rmat,cc,rr);
+                    const char *ins=newtmp(c);
+                    emit(c,"  %s = insertelement <%d x float> %s, float %s, i32 %d\n",ins,t->matn,colv,me,rr);
+                    colv=ins;
+                }
+                res=mat_setcol(c,res,t->matn,cc,colv);
+            }
+            *k=VK_F32; c->rvw=0; c->rmat=t->matn; return res;
+        }
         if(tk==T_BOOL){
             if(vw) die(0,"cannot cast a vector to bool");
             const char *r=newtmp(c); *k=VK_I1; c->rvw=0;
@@ -1221,7 +1240,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         if(rm){
             if(e->aop!=A_ASSIGN) die(0,"compound assignment on a matrix");
             if(li.matn!=rm) die(0,"matrix width mismatch in assignment");
-            char mty[32]; mll_of(mty,sizeof mty,rm);
+            char mty[32]; mll_of(mty,sizeof mty,rm,0);
             emit(c,"  store %s %s, %s %s, align %d\n",mty,rhs,mty,addr,mat_align(rm));
             *k=VK_F32; c->rvw=0; c->rmat=rm; return rhs;
         }
@@ -1555,7 +1574,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             if(f->ret.kind==T_VOID){ emit(c,"  call void @%s(%s)\n",f->link_name?f->link_name:f->name,args); *k=VK_I32; c->rvw=0; return "0"; }
             const char *r=newtmp(c);
             if(f->ret.matn){ /* matrix by-value return */
-                char mll[32]; mll_of(mll,sizeof mll,f->ret.matn);
+                char mll[32]; mll_of(mll,sizeof mll,f->ret.matn,f->ret.matm);
                 emit(c,"  %s = call %s @%s(%s)\n",r,mll,f->link_name?f->link_name:f->name,args);
                 *k=VK_F32; c->rvw=0; c->rmat=f->ret.matn; return r;
             }
@@ -1640,7 +1659,7 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             const char *rv=gen_rval(c,e->rhs,&rk);
             if((ck!=VK_I32&&ck!=VK_U32)||(rk!=VK_I32&&rk!=VK_U32)) die(0,"matrix indices must be integers");
             char *base=gen_lval(c,e->operand->operand,li,mark);
-            char mty[32]; mll_of(mty,sizeof mty,mn);
+            char mty[32]; mll_of(mty,sizeof mty,mn,0);
             char *colptr=newtmp(c);
             emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 0, i64 %s\n",colptr,mty,mty,base,cv);
             char *elt=newtmp(c);
@@ -1655,7 +1674,7 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
                 ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
                 if(ik!=VK_I32&&ik!=VK_U32) die(0,"matrix index must be an integer");
                 char *base=gen_lval(c,e->operand,li,mark);
-                char mty[32]; mll_of(mty,sizeof mty,mn2);
+                char mty[32]; mll_of(mty,sizeof mty,mn2,0);
                 char *colptr=newtmp(c);
                 emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 0, i64 %s\n",colptr,mty,mty,base,iv);
                 li->tk=T_FLOAT; li->sname=NULL; li->vecn=mn2; li->matn=0;
@@ -1829,7 +1848,7 @@ static void gen_stmt(CG *c, Stmt *s){
                 emit(c,"  store %s %s, %s* %s, align %d\n",sn,v,sn,slot,sal); }
             break; }
         if(bty.matn){
-            char mty[32]; mll_of(mty,sizeof mty,bty.matn);
+            char mty[32]; mll_of(mty,sizeof mty,bty.matn,bty.matm);
             char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,mty,mat_align(bty.matn));
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
             c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,0,bty.matn,s->is_const,0,0};
@@ -1890,7 +1909,7 @@ static void gen_stmt(CG *c, Stmt *s){
             } } else if(c->fn->ret.matn){
                 ValKind k; const char *v=gen_rval(c,s->expr,&k);
                 if(c->rmat!=c->fn->ret.matn) die(0,"matrix width mismatch in return");
-                char mll[32]; mll_of(mll,sizeof mll,c->fn->ret.matn);
+                char mll[32]; mll_of(mll,sizeof mll,c->fn->ret.matn,c->fn->ret.matm);
                 emit(c,"  ret %s %s\n",mll,v);
             } else {
                 ValKind k; const char *v=gen_rval(c,s->expr,&k);
@@ -2014,7 +2033,7 @@ static void fn_ptr_str(Function *fn,char *buf,size_t n){
         else if(p->ty.kind==T_GRID_EXTENT) o+=snprintf(buf+o,n-o,"i32");
         else if(p->ty.kind==T_TEXTURE) o+=snprintf(buf+o,n-o,"%%struct._texture_2d_t addrspace(1)*");
         else if(p->ty.kind==T_SAMPLER) o+=snprintf(buf+o,n-o,"%%struct._sampler_t addrspace(2)*");
-        else if(p->ty.is_ptr){ char elt[64]; if(p->ty.matn) mll_of(elt,sizeof elt,p->ty.matn); else type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
+        else if(p->ty.is_ptr){ char elt[64]; if(p->ty.matn) mll_of(elt,sizeof elt,p->ty.matn,p->ty.matm); else type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
             o+=snprintf(buf+o,n-o,"%s addrspace(%d)*",elt,p->ty.as); }
         else if(fn->is_kernel){ char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn); o+=snprintf(buf+o,n-o,"%s addrspace(2)*",ll); }
         else { char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn); o+=snprintf(buf+o,n-o,"%s",ll); }
@@ -2211,7 +2230,7 @@ void emit_air(FILE *out, Program *prog){
         fprintf(out,"%%struct.%s = type { ",s->tag);
         for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[64];
             char elt[32];
-            if(s->fields[j].ty.matn) mll_of(elt,sizeof elt,s->fields[j].ty.matn);
+            if(s->fields[j].ty.matn) mll_of(elt,sizeof elt,s->fields[j].ty.matn,s->fields[j].ty.matm);
             else ll_of(elt,sizeof elt,s->fields[j].ty.kind,s->fields[j].ty.vecn);
             if(s->fields[j].ty.array_n){
                 if(s->fields[j].ty.array_m) snprintf(fl,sizeof fl,"[%d x [%d x %s]]",s->fields[j].ty.array_n,s->fields[j].ty.array_m,elt);
@@ -2257,7 +2276,7 @@ void emit_air(FILE *out, Program *prog){
         if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,"define void @%s(",fn->link_name?fn->link_name:fn->name);
         else { char rl[64];
             if(fn->ret.kind==T_VOID) snprintf(rl,sizeof rl,"void");
-            else if(fn->ret.matn) mll_of(rl,sizeof rl,fn->ret.matn);
+            else if(fn->ret.matn) mll_of(rl,sizeof rl,fn->ret.matn,fn->ret.matm);
             else if(fn->ret.kind==T_STRUCT){ if(fn->stage==ST_NONE) snprintf(rl,sizeof rl,"%%struct.%s",fn->ret.struct_name);
                 else { StructDef *sd=find_struct(prog,fn->ret.struct_name); stage_lit_type(rl,sizeof rl,sd); } }
             else ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
@@ -2282,11 +2301,11 @@ void emit_air(FILE *out, Program *prog){
             else if(p->ty.kind==T_SAMPLER){ so+=snprintf(sig+so,sizeof sig-so,"%%struct._sampler_t addrspace(2)* nocapture %%_%s",p->name); }
             else if(p->ty.is_ptr){ char elt[64]; type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
                 so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(%d)* nocapture noundef %%_%s",elt,p->ty.as,p->name); }
-            else if(fn->is_kernel){ char ll[32]; pll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn,p->ty.matn);
+            else if(fn->is_kernel){ char ll[32]; pll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn,p->ty.matn,p->ty.matm);
                 so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(2)* nocapture noundef readonly align %d dereferenceable(%d) %%_%s",ll,tal(p->ty.kind,p->ty.vecn,p->ty.matn),tsz(p->ty.kind,p->ty.vecn,p->ty.matn),p->name); }
             else { char ll[32];
                 if(p->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",p->ty.struct_name);
-                else pll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn,p->ty.matn);
+                else pll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn,p->ty.matn,p->ty.matm);
                 so+=snprintf(sig+so,sizeof sig-so,"%s noundef %%_%s",ll,p->name); } }
         if(fn->is_kernel && c.explicit_domain && c.coord_param>=0){ Param *cp=&fn->params[c.coord_param]; char cl[32]; coord_ll(&cp->ty,cl,sizeof cl);
             so+=snprintf(sig+so,sizeof sig-so,", %s noundef %%_%s_local, %s noundef %%_%s_group",cl,cp->name,cl,cp->name); }

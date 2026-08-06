@@ -110,15 +110,15 @@ static int skip_register_suffix(TokStream *ts){
         if(accept(ts,TK_KW_PACKOFFSET)){ expect(ts,TK_LPAREN,"(");
             while(peek(ts)->kind!=TK_RPAREN&&peek(ts)->kind!=TK_EOF) advance(ts);
             expect(ts,TK_RPAREN,")"); continue; }
-        /* bare semantic-ish ident: consume it */
+        /* bare semantic-ish ident: consume it; loop for `: SEMANTIC : register(c0)` */
         if(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_EOF) advance(ts);
-        return reg;
+        continue;
     }
 }
 
 /* fold a constant global-initializer expression (binops/unary on literals and
- * earlier-declared const globals); returns the float value, sets *is_int/*ival
- * for integer-only results */
+ * earlier-declared const globals); returns the float value, sets *is_int and
+ * *ival (the out params) for integer-only results */
 static double fold_init(Expr *e, int *is_int, long *ival, HLSLGlobal *gs, size_t ngs){
     if(!e) return 0;
     switch(e->kind){
@@ -150,14 +150,123 @@ static void hpush(void **arr, size_t *n, size_t *cap, void *item, size_t sz){   
     memcpy((char*)*arr+(*n)*sz,item,sz); (*n)++;
 }
 
+/* skip a `technique ... { ... }` block (the .fx effect system: pass blocks,
+ * compile statements, render states — none of it survives to the GPU) */
+static void skip_technique(TokStream *ts){
+    advance(ts); /* the technique keyword */
+    if(peek(ts)->kind==TK_IDENT||peek(ts)->kind==TK_KW_PASS) advance(ts); /* optional name */
+    if(peek(ts)->kind==TK_IDENT&&!strcmp(peek(ts)->text,"Pass")) advance(ts); /* capital-P `Pass P0` */
+    if(peek(ts)->kind==TK_LT){ /* optional D3D9 annotation: < ... > */
+        int d=0;
+        do{ Token *t=peek(ts);
+            if(t->kind==TK_LT)d++;
+            else if(t->kind==TK_GT)d--;
+            if(t->kind==TK_EOF) die(t->line,"unterminated technique annotation");
+            advance(ts); } while(d>0);
+    }
+    if(peek(ts)->kind==TK_LBRACE){
+        int depth=0;
+        for(;;){
+            Token t=*peek(ts);
+            if(t.kind==TK_EOF) die(t.line,"unterminated technique block");
+            if(t.kind==TK_LBRACE) depth++;
+            else if(t.kind==TK_RBRACE){ depth--; if(depth==0) break; }
+            advance(ts);
+        }
+        advance(ts); /* consume the closing brace */
+        if(peek(ts)->kind==TK_SEMI) advance(ts); /* `};` — the ; is optional */
+    }
+    /* technique name without a block: nothing to consume */
+}
+
 HLSLProg hlsl_parse(TokStream *ts){
     HLSLProg hp={0}; size_t fcap=0,scap=0,ccap=0,gcap=0;
     Program tmp={0};
     while(peek(ts)->kind!=TK_EOF){
+        /* .fx effect system: `technique ... { pass ... { ... } }` blocks carry
+         * only host-side render states — strip them entirely */
+        if(peek(ts)->kind==TK_KW_TECHNIQUE||
+           (peek(ts)->kind==TK_IDENT&&(!strcmp(peek(ts)->text,"technique10")||!strcmp(peek(ts)->text,"technique9")||!strcmp(peek(ts)->text,"technique11")||!strcmp(peek(ts)->text,"Technique")))){
+            skip_technique(ts); continue; }
         /* leading attributes before a function */
         HLSLFunc attrs={0};
         parse_attributes(ts,&attrs);
         Token *kt=peek(ts);
+
+        /* D3D9 effect globals: `sampler X = sampler_state {...};` and
+         * `texture X <...> : register(...);` — the sampler_state block carries
+         * host-side filter/wrap state; the texture registers as a module
+         * global so tex2D-family calls can bind it */
+        if((kt->kind==TK_KW_SAMPLER)||(kt->kind==TK_IDENT&&(!strcmp(kt->text,"texture")||!strcmp(kt->text,"sampler2D")||!strcmp(kt->text,"samplerCUBE")||!strcmp(kt->text,"sampler3D")||!strcmp(kt->text,"sampler1D")||!strcmp(kt->text,"sampler2DShadow")||!strcmp(kt->text,"samplerCUBEShadow")))){
+            if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG d3d9: %s at line %d\n",kt->text,kt->line);
+            int is_samp=(kt->kind==TK_KW_SAMPLER)||strcmp(kt->text,"texture");
+            advance(ts);
+            Token *gn2=peek(ts); expect(ts,TK_IDENT,"D3D9 sampler/texture name");
+            if(is_samp){
+                if(peek(ts)->kind==TK_LT){ /* D3D9 annotation before sampler_state: < ... > */
+                    int d=0;
+                    do{ Token *t=peek(ts);
+                        if(t->kind==TK_LT)d++;
+                        else if(t->kind==TK_GT)d--;
+                        if(t->kind==TK_EOF) die(t->line,"unterminated sampler annotation");
+                        advance(ts); } while(d>0);
+                }
+                if(accept(ts,TK_EQ)){
+                    int d=0;
+                    for(;;){ Token *t=peek(ts);
+                        if(t->kind==TK_LBRACE)d++;
+                        else if(t->kind==TK_RBRACE)d--;
+                        else if(t->kind==TK_SEMI&&d==0) break;
+                        if(t->kind==TK_EOF) die(t->line,"unterminated sampler_state");
+                        advance(ts); }
+                } else if(peek(ts)->kind==TK_LBRACE){ /* SamplerState X { ... }; */
+                    int d=0;
+                    do{ Token *t=peek(ts);
+                        if(t->kind==TK_LBRACE)d++;
+                        else if(t->kind==TK_RBRACE)d--;
+                        if(t->kind==TK_EOF) die(t->line,"unterminated SamplerState block");
+                        advance(ts); } while(d>0);
+                }
+                skip_register_suffix(ts); /* bare `sampler s0 : register(s0);` */
+                expect(ts,TK_SEMI,";");
+                /* register the sampler as a module global so Sample() can bind it */
+                Type st={0}; st.kind=T_SAMPLER;
+                HLSLGlobal sg={0}; sg.name=strdup(gn2->text); sg.ty=st; sg.line=gn2->line;
+                hpush((void**)&hp.globals,&hp.nglobals,&gcap,&sg,sizeof sg);
+            } else {
+                skip_register_suffix(ts); /* `texture X : SEMANTIC < ... >;` */
+                if(accept(ts,TK_LT)){ int d=1; /* the < is already consumed */
+                    do{ Token *t=peek(ts);
+                        if(t->kind==TK_LT)d++;
+                        else if(t->kind==TK_GT)d--;
+                        if(t->kind==TK_EOF) die(t->line,"unterminated texture declaration");
+                        advance(ts); } while(d>0); }
+                skip_register_suffix(ts);
+                expect(ts,TK_SEMI,";");
+                Type tt={0}; tt.kind=T_TEXTURE; tt.tex_elt=T_FLOAT;
+                HLSLGlobal tg={0}; tg.name=strdup(gn2->text); tg.ty=tt; tg.line=gn2->line;
+                hpush((void**)&hp.globals,&hp.nglobals,&gcap,&tg,sizeof tg);
+            }
+            continue;
+        }
+
+        /* D3D10 state objects: `DepthStencilState X { ... };` /
+         * `BlendState X { ... };` / `RasterizerState X { ... };` — host-side */
+        if(kt->kind==TK_IDENT&&(ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_IDENT&&
+           (!strcmp(kt->text,"DepthStencilState")||!strcmp(kt->text,"BlendState")||
+            !strcmp(kt->text,"RasterizerState")||!strcmp(kt->text,"SamplerState"))){
+            advance(ts); advance(ts); /* type + name */
+            if(peek(ts)->kind==TK_LBRACE){
+                int d=0;
+                do{ Token *t=peek(ts);
+                    if(t->kind==TK_LBRACE)d++;
+                    else if(t->kind==TK_RBRACE)d--;
+                    if(t->kind==TK_EOF) die(t->line,"unterminated state block");
+                    advance(ts); } while(d>0);
+            }
+            if(peek(ts)->kind==TK_SEMI) advance(ts);
+            continue;
+        }
 
         if(kt->kind==TK_KW_STRUCT){
             /* anonymous `struct { ... }` (with a `{...}` initializer) — parse
@@ -216,8 +325,18 @@ HLSLProg hlsl_parse(TokStream *ts){
                     if(accept(ts,TK_COLON)){ Token *st=peek(ts); expect(ts,TK_IDENT,"semantic"); sem=strdup(st->text); }
                     skip_register_suffix(ts); /* : register(c0) / : packoffset(c0.x) */
                     if(accept(ts,TK_LBRACK)){ /* array member [N] or [N][M] */
-                        Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
-                        if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); }
+                        ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
+                        if(accept(ts,TK_LBRACK)){ ty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); }
+                    }
+                    if(accept(ts,TK_EQ)){ /* cbuffer field default value: parse + discard
+                        (the host provides the real data; the default is a hint) */
+                        if(peek(ts)->kind==TK_LBRACE){ int d=0;
+                            do{ Token *t=peek(ts);
+                                if(t->kind==TK_LBRACE)d++;
+                                else if(t->kind==TK_RBRACE)d--;
+                                if(t->kind==TK_EOF) die(t->line,"unterminated default initializer");
+                                advance(ts); } while(d>0);
+                        } else parse_expr(ts);
                     }
                     if(n==cap){cap=cap?cap*2:8;f=realloc(f,cap*sizeof(Field));}
                     f[n++]=(Field){strdup(fn->text),ty,0,0,sem};
@@ -226,13 +345,12 @@ HLSLProg hlsl_parse(TokStream *ts){
             }
             expect(ts,TK_RBRACE,"}");
             skip_register_suffix(ts);
-            expect(ts,TK_SEMI,";");
+            if(peek(ts)->kind==TK_SEMI) advance(ts); /* the ; after a cbuffer block is optional */
             cb.fields=f; cb.nfields=n;
             hpush((void**)&hp.cbufs,&hp.ncbufs,&ccap,&cb,sizeof cb);
             continue;
         }
-        if(kt->kind==TK_KW_GROUPSHARED||kt->kind==TK_KW_STATIC||kt->kind==TK_KW_CONSTANT){
-            int gs=accept(ts,TK_KW_GROUPSHARED);
+        if(kt->kind==TK_KW_GROUPSHARED||kt->kind==TK_KW_STATIC||kt->kind==TK_KW_CONSTANT){            int gs=accept(ts,TK_KW_GROUPSHARED);
             int st=accept(ts,TK_KW_STATIC);
             int cn=accept(ts,TK_KW_CONSTANT);
             if(peek(ts)->kind==TK_KW_STRUCT&&(ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_LBRACE){
@@ -265,25 +383,44 @@ HLSLProg hlsl_parse(TokStream *ts){
             HLSLGlobal gg={0};
             Token *gn=peek(ts); expect(ts,TK_IDENT,"global name");
             gg.name=strdup(gn->text); gg.ty=ty; gg.is_groupshared=gs; gg.is_const=cn||st; gg.line=gn->line;
-            if(accept(ts,TK_EQ)){
-                gg.has_init=1;
-                Expr *e=parse_expr(ts);
-                if(e->kind==E_ICONST){ gg.is_int=1; gg.ival=e->ival; }
-                else if(e->kind==E_FCONST){ gg.fval=e->fval; }
-                else if(e->kind==E_BOOL){ gg.is_int=1; gg.ival=e->bval; }
-                else {
-                    /* fold constant expressions (0.00125*0.00125, g_fG*10000*10000) */
-                    gg.fval=fold_init(e,&gg.is_int,&gg.ival,hp.globals,hp.nglobals);
-                }
-                /* non-literal initializers (float4(...), other calls) are
-                 * parsed and discarded — the lowering only materializes
-                 * literal consts (Phase 4 wires real constant buffers) */
+            skip_register_suffix(ts); /* semantic/register may precede the annotation+init */
+            if(peek(ts)->kind==TK_LT){ /* D3D9 effect annotation before the initializer: < ... > */
+                int d=0;
+                do{ Token *t=peek(ts);
+                    if(t->kind==TK_LT)d++;
+                    else if(t->kind==TK_GT)d--;
+                    if(t->kind==TK_EOF) die(t->line,"unterminated annotation");
+                    advance(ts); } while(d>0);
             }
             if(accept(ts,TK_LBRACK)){ /* global array [N] or [N][M] */
-                Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); gg.ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
-                if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); gg.ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); }
+                gg.ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
+                if(accept(ts,TK_LBRACK)){ gg.ty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); }
+            }
+            if(accept(ts,TK_EQ)){
+                gg.has_init=1;
+                Expr *e=NULL;
+                if(peek(ts)->kind==TK_LBRACE){ /* HLSL brace initializer: skip */
+                    int depth=0;
+                    do{ Token *t=peek(ts);
+                        if(t->kind==TK_LBRACE)depth++;
+                        else if(t->kind==TK_RBRACE)depth--;
+                        if(t->kind==TK_EOF) die(t->line,"unterminated initializer");
+                        advance(ts); } while(depth>0);
+                } else e=parse_expr(ts);
+                if(e&&e->kind==E_ICONST){ gg.is_int=1; gg.ival=e->ival; }
+                else if(e&&e->kind==E_FCONST){ gg.fval=e->fval; }
+                else if(e&&e->kind==E_BOOL){ gg.is_int=1; gg.ival=e->bval; }
+                else if(e) gg.fval=fold_init(e,&gg.is_int,&gg.ival,hp.globals,hp.nglobals);
             }
             gg.reg=skip_register_suffix(ts);
+            if(peek(ts)->kind==TK_LT){ /* D3D9 effect annotation: < ... > */
+                int d=0;
+                do{ Token *t=peek(ts);
+                    if(t->kind==TK_LT)d++;
+                    else if(t->kind==TK_GT)d--;
+                    if(t->kind==TK_EOF) die(t->line,"unterminated annotation");
+                    advance(ts); } while(d>0);
+            }
             expect(ts,TK_SEMI,";");
             hpush((void**)&hp.globals,&hp.nglobals,&gcap,&gg,sizeof gg);
             continue;
@@ -303,11 +440,44 @@ HLSLProg hlsl_parse(TokStream *ts){
             HLSLGlobal gg={0};
             Token *gn=peek(ts); expect(ts,TK_IDENT,"global name");
             gg.name=strdup(gn->text); gg.ty=gty; gg.line=gn->line;
+            skip_register_suffix(ts); /* semantic/register may precede the annotation+init */
+            if(peek(ts)->kind==TK_LT){ /* D3D9 effect annotation before the initializer: < ... > */
+                int d=0;
+                do{ Token *t=peek(ts);
+                    if(t->kind==TK_LT)d++;
+                    else if(t->kind==TK_GT)d--;
+                    if(t->kind==TK_EOF) die(t->line,"unterminated annotation");
+                    advance(ts); } while(d>0);
+            }
             if(accept(ts,TK_LBRACK)){ /* global array [N] or [N][M] */
-                Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); gty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
-                if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); gty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); }
+                gty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
+                if(accept(ts,TK_LBRACK)){ gty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); }
+            }
+            if(accept(ts,TK_EQ)){
+                gg.has_init=1;
+                Expr *e=NULL;
+                if(peek(ts)->kind==TK_LBRACE){ /* HLSL brace initializer: skip */
+                    int depth=0;
+                    do{ Token *t=peek(ts);
+                        if(t->kind==TK_LBRACE)depth++;
+                        else if(t->kind==TK_RBRACE)depth--;
+                        if(t->kind==TK_EOF) die(t->line,"unterminated initializer");
+                        advance(ts); } while(depth>0);
+                } else e=parse_expr(ts);
+                if(e&&e->kind==E_ICONST){ gg.is_int=1; gg.ival=e->ival; }
+                else if(e&&e->kind==E_FCONST){ gg.fval=e->fval; }
+                else if(e&&e->kind==E_BOOL){ gg.is_int=1; gg.ival=e->bval; }
+                else if(e) gg.fval=fold_init(e,&gg.is_int,&gg.ival,hp.globals,hp.nglobals);
             }
             gg.reg=skip_register_suffix(ts);
+            if(peek(ts)->kind==TK_LT){ /* D3D9 effect annotation: < ... > */
+                int d=0;
+                do{ Token *t=peek(ts);
+                    if(t->kind==TK_LT)d++;
+                    else if(t->kind==TK_GT)d--;
+                    if(t->kind==TK_EOF) die(t->line,"unterminated annotation");
+                    advance(ts); } while(d>0);
+            }
             expect(ts,TK_SEMI,";");
             hpush((void**)&hp.globals,&hp.nglobals,&gcap,&gg,sizeof gg);
             continue;
@@ -318,20 +488,31 @@ HLSLProg hlsl_parse(TokStream *ts){
         HLSLParam *ps=NULL; size_t np=0,pcap=0;
         while(peek(ts)->kind!=TK_RPAREN){
             HLSLParam hp={0};
-            if(accept(ts,TK_KW_INOUT))hp.inq=3;
-            else if(accept(ts,TK_KW_OUT))hp.inq=2;
-            else if(accept(ts,TK_KW_IN))hp.inq=1;
-            /* qualifiers HLSL tolerates on params: uniform / const / static */
-            while(peek(ts)->kind==TK_KW_UNIFORM||peek(ts)->kind==TK_KW_CONSTANT||peek(ts)->kind==TK_KW_STATIC) advance(ts);
+            /* in/out/inout and const/static/uniform interleave (`const in float3 P`) */
+            for(;;){
+                if(peek(ts)->kind==TK_KW_INOUT&&!hp.inq){ hp.inq=3; advance(ts); }
+                else if(peek(ts)->kind==TK_KW_OUT&&!hp.inq){ hp.inq=2; advance(ts); }
+                else if(peek(ts)->kind==TK_KW_IN&&!hp.inq){ hp.inq=1; advance(ts); }
+                else if(peek(ts)->kind==TK_KW_UNIFORM||peek(ts)->kind==TK_KW_CONSTANT||peek(ts)->kind==TK_KW_STATIC) advance(ts);
+                else break;
+            }
             while(peek(ts)->kind==TK_KW_LINEAR||peek(ts)->kind==TK_KW_NOPERSPECTIVE||
                   peek(ts)->kind==TK_KW_CENTROID||peek(ts)->kind==TK_KW_SAMPLE) advance(ts);
+            /* GS input primitives: point / line / lineadj / triangle /
+             * triangleadj — the primitive keyword precedes the struct type */
+            while(peek(ts)->kind==TK_IDENT&&
+                  (!strcmp(peek(ts)->text,"triangleadj")||!strcmp(peek(ts)->text,"lineadj")||
+                   !strcmp(peek(ts)->text,"triangle")||!strcmp(peek(ts)->text,"line")||
+                   !strcmp(peek(ts)->text,"point")||!strcmp(peek(ts)->text,"quad")||
+                   !strcmp(peek(ts)->text,"triangle_adj")||!strcmp(peek(ts)->text,"line_adj")))
+                advance(ts);
             hp.ty=hlsl_type(ts);
             Token *pn=peek(ts); expect_name(ts,"param name");
             hp.name=strdup(pn->text);
-            if(accept(ts,TK_COLON)){ Token *st=peek(ts); expect(ts,TK_IDENT,"semantic after :"); hp.sem=strdup(st->text); }
             if(accept(ts,TK_LBRACK)){
-                Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); hp.ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
+                hp.ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
             }
+            if(accept(ts,TK_COLON)){ Token *st=peek(ts); expect(ts,TK_IDENT,"semantic after :"); hp.sem=strdup(st->text); }
             hpush((void**)&ps,&np,&pcap,&hp,sizeof hp);
             if(!accept(ts,TK_COMMA))break;
         }
