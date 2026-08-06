@@ -45,5 +45,11 @@ vtx 1 0 16 float2" \
 
 # MRT: two render targets (base + swizzled key)
 NRT=2 run MRT tools/hlsl-diff/tests/render/mrt.hlsl
+unset NRT
+
+# matrix conventions: row-major cbuffer matrices + mul (m1*m2, row-vector*m)
+CBUF="1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0 0.5 0.0 0.0 0.0 0.0 0.5 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.5 1.0" \
+  run MatMul tools/hlsl-diff/tests/render/matmul.hlsl
+unset CBUF
 
 [ "$FAIL" = 0 ] && echo "render-suite: all pairs pixel-identical" || { echo "render-suite: FAILURES"; exit 1; }

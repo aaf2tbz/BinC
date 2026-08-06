@@ -63,7 +63,16 @@ Type parse_type(TokStream *ts){
     } else if(accept(ts,TK_KW_FLOAT)){t.kind=T_FLOAT;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_HALF))t.kind=T_HALF;
     else if(accept(ts,TK_KW_INT)){t.kind=T_INT32;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_UINT)){t.kind=T_UINT32;t.vecn=(int)pt->ival;}
     else if(accept(ts,TK_KW_BOOL))t.kind=T_BOOL; else if(accept(ts,TK_KW_VOID))t.kind=T_VOID;
-    else if(accept(ts,TK_KW_MAT)){ t.kind=T_FLOAT; t.matn=(int)pt->ival; }
+    else if(accept(ts,TK_KW_MAT)){ t.kind=T_FLOAT; t.matn=(int)pt->ival;
+        /* non-square spellings (float2x3) are recognized by the lexer but the
+         * codegen matrix machinery is square-only — refuse rather than silently
+         * squashing to max(rows,cols) (Phase 6 limitation) */
+        const char *mt=pt->text; char *x=mt?strchr(mt,'x'):NULL;
+        if(x&&x[1]&&mt&&strncmp(mt,"float",5)==0){
+            int rn=atoi(mt+5), cn=atoi(x+1);
+            if(rn!=cn) die(pt->line,"non-square matrix %s not supported yet (Phase 6)",mt);
+        }
+    }
     else if(peek(ts)->kind==TK_IDENT){
         /* HLSL template-style type spellings + template-arg struct fallback */
         const char *txt=peek(ts)->text;
@@ -74,7 +83,9 @@ Type parse_type(TokStream *ts){
             expect(ts,TK_COMMA,","); Token *rn=peek(ts); expect(ts,TK_ICONST,"matrix rows");
             expect(ts,TK_COMMA,","); Token *cn=peek(ts); expect(ts,TK_ICONST,"matrix cols");
             expect(ts,TK_GT,">");
-            t.kind=T_FLOAT; t.matn=(int)(rn->ival>cn->ival?rn->ival:cn->ival); return t;
+            t.kind=T_FLOAT; t.matn=(int)(rn->ival>cn->ival?rn->ival:cn->ival);
+            if(rn->ival!=cn->ival) die(rn->line,"non-square matrix matrix<T,%ld,%ld> not supported yet (Phase 6)",rn->ival,cn->ival);
+            return t;
         }
         if(has_lt&&!strcmp(txt,"vector")){
             advance(ts); expect(ts,TK_LT,"<");
