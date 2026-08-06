@@ -88,9 +88,9 @@ diff-smoke:
 test-lit:
 	@bash ../tools/hlsl-diff/lit-conformance.sh
 
-# Phase-2+ differential suite: every kernel in tools/hlsl-diff/tests/,
+# Phase-2+ differential suite: every kernel in tools/hlsl-diff/tests/compute/,
 # ours vs reference (DXC -> SPIRV-Cross) on GPU
-DIFF_TESTS := $(wildcard ../tools/hlsl-diff/tests/*.hlsl)
+DIFF_TESTS := $(wildcard ../tools/hlsl-diff/tests/compute/*.hlsl)
 diff-suite:
 	@for t in $(DIFF_TESTS); do \
 		case "$$t" in *mrt*) continue;; esac; \

@@ -131,12 +131,13 @@ typedef struct { char *name; HLSLParam *params; size_t np; Type ret; char *ret_s
 typedef struct { char *tag; Field *fields; size_t nfields; } HLSLStruct;
 typedef struct { char *name; Field *fields; size_t nfields; int reg; } HLCBuf;
 typedef struct { char *name; Type ty; int is_groupshared; int is_const; int is_int;
-    long ival; double fval; int has_init; int line; } HLSLGlobal;
+    long ival; double fval; int has_init; int line; int reg; } HLSLGlobal;
 typedef struct { HLSLFunc *funcs; size_t nfuncs; HLSLStruct *structs; size_t nstructs;
     HLCBuf *cbufs; size_t ncbufs; HLSLGlobal *globals; size_t nglobals; } HLSLProg;
 HLSLProg hlsl_parse(TokStream *ts);
 Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int stage_all);
 void emit_air(FILE *out, Program *prog);
 void binc_set_air(const char *triple, int sdk, int minor);
+void binc_reflect(FILE *out, HLSLProg *hp, Program *prog);
 void interp_run(const Program *prog);
 #endif

@@ -58,6 +58,7 @@ int main(int argc, char **argv){
     id<MTLBuffer> bufs[31]; memset(bufs,0,sizeof bufs);
     id<MTLTexture> texs[31]; memset(texs,0,sizeof texs);
     NSMutableDictionary<NSNumber*,NSArray<NSString*>*> *bufSpec=[NSMutableDictionary dictionary];
+    NSMutableDictionary<NSNumber*,NSArray<NSString*>*> *texSpec=[NSMutableDictionary dictionary];
     NSMutableArray<NSNumber*> *expectIdx=[NSMutableArray array];
     NSMutableArray<NSArray<NSString*>*> *expectVals=[NSMutableArray array];
     NSMutableArray<NSNumber*> *expectHex=[NSMutableArray array];
@@ -103,7 +104,7 @@ int main(int argc, char **argv){
              * texel(x,y) = (x+1, y+1, x+y+1, 1) — deterministic, integer-exact floats */
             int idx=toks[1].intValue;
             if(idx<0||idx>30) die(@"texture index out of range");
-            bufSpec[@(idx)]=toks; // applied after device creation
+            texSpec[@(idx)]=toks; // applied after device creation
         }
         else if([d isEqualToString:@"expecttex"]){
             /* expecttex <idx> <r> <g> <b> <a>: every texel must equal these 4 values */
@@ -132,8 +133,9 @@ int main(int argc, char **argv){
     id<MTLComputePipelineState> cps=nil;
     if(f){ cps=[dev newComputePipelineStateWithFunction:f error:&err]; if(!cps) die([err localizedDescription]); }
 
-    for(NSNumber *k in bufSpec){
-        NSArray<NSString*> *toks=bufSpec[k]; int idx=k.intValue;
+    for(NSNumber *k in texSpec){
+        NSArray<NSString*> *toks=texSpec[k];
+        int idx=k.intValue;
         if([toks[0] isEqualToString:@"tex"]){
             int w=(int)toks[2].integerValue, h=(int)toks[3].integerValue;
             MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:w height:h mipmapped:NO];
@@ -148,6 +150,9 @@ int main(int argc, char **argv){
             texs[idx]=t;
             continue;
         }
+    }
+    for(NSNumber *k in bufSpec){
+        NSArray<NSString*> *toks=bufSpec[k]; int idx=k.intValue;
         if([toks[0] isEqualToString:@"buf"]){
             NSUInteger nw=toks.count-2; uint32_t *w=malloc(nw*4);
             for(NSUInteger i=0;i<nw;i++) w[i]=parse_word(toks[i+2]).bits;
@@ -200,7 +205,7 @@ int main(int argc, char **argv){
                 int sz=[fmt hasPrefix:@"float4"]||[fmt hasPrefix:@"f4"]?16:[fmt hasPrefix:@"float3"]||[fmt hasPrefix:@"f3"]?12:8;
                 if(off+sz>maxend[buf]) maxend[buf]=off+sz;
             }
-            for(int b=0;b<32;b++) if(maxend[b]) vd.layouts[b].stride=(NSUInteger)((maxend[b]+15)&~15);
+            for(int b=0;b<32;b++) if(maxend[b]) vd.layouts[b].stride=(NSUInteger)((maxend[b]+3)&~3); /* 4-byte aligned (attribute offsets are) */
             rpd.vertexDescriptor=vd;
         }
         for(int i=0;i<nrt;i++) rpd.colorAttachments[i].pixelFormat=MTLPixelFormatRGBA32Float;
@@ -236,6 +241,15 @@ int main(int argc, char **argv){
         id<MTLDepthStencilState> dss=[dev newDepthStencilStateWithDescriptor:dsd];
         [renc setDepthStencilState:dss];
         for(int i=0;i<31;i++) if(bufs[i]) [renc setVertexBuffer:bufs[i] offset:0 atIndex:i];
+        for(int i=0;i<31;i++) if(bufs[i]) [renc setFragmentBuffer:bufs[i] offset:0 atIndex:i];
+        /* bind a default nearest/clamp sampler at every fragment sampler index
+         * (sampler indices are a separate binding space from textures/buffers) */
+        MTLSamplerDescriptor *sd=[MTLSamplerDescriptor new];
+        sd.minFilter=MTLSamplerMinMagFilterNearest; sd.magFilter=MTLSamplerMinMagFilterNearest;
+        sd.sAddressMode=MTLSamplerAddressModeClampToEdge; sd.tAddressMode=MTLSamplerAddressModeClampToEdge;
+        id<MTLSamplerState> defsamp=[dev newSamplerStateWithDescriptor:sd];
+        for(int i=0;i<31;i++) [renc setFragmentSamplerState:defsamp atIndex:i];
+        for(int i=0;i<31;i++) if(texs[i]) [renc setFragmentTexture:texs[i] atIndex:i];
         if(nverts<0) die(@"render spec needs a 'draw' directive");
         [renc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)nverts];
         [renc endEncoding];

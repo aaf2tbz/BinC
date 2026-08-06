@@ -31,20 +31,39 @@ if ! binc/binc -E "$VS" -T vs_6_0 --stage-all "$SRC" -o "$WORK/ours.metallib" 2>
   echo "FAIL: ours compilation"; echo "  ours.log: $(head -1 "$WORK/ours.log")"; exit 1
 fi
 
-# ---- vertex data: 3 vertices, position (float4) + color (float4) interleaved ----
-VERT="-0.5 -0.5 0.0 1.0 1.0 0.0 0.0 1.0 -0.0 0.5 0.0 1.0 0.0 1.0 0.0 1.0 0.5 -0.5 0.0 1.0 0.0 0.0 1.0 1.0"
+# ---- vertex data (VTX_OURS/VTX_REF layouts, VERT words) ----
+# optional constant buffer (CBUF="<float words>") and texture (TEX=w:h):
+# the cbuffer is bound at index 0, the vertex data moves to index 1
+CBUF="${CBUF:-}"; TEX="${TEX:-}"
+VBO=0
+CBUF_LINES=""; CBUF_REF_LINES=""
+if [ -n "$CBUF" ]; then
+  VBO=1
+  CBUF_LINES="buf ${CBUF_OURS:-0} $CBUF"
+  REF_BIDX=$(grep -oE "\[\[buffer\([0-9]+\)\]\]" "$WORK/ref_ps.metal" | grep -oE "[0-9]+" | head -1)
+  CBUF_REF_LINES="buf ${REF_BIDX:-0} $CBUF"
+fi
+TEX_LINES=""
+if [ -n "$TEX" ]; then
+  REF_TIDX=$(grep -oE "\[\[texture\([0-9]+\)\]\]" "$WORK/ref_ps.metal" | grep -oE "[0-9]+" | head -1)
+  TEX_LINES="tex ${TEX_OURS:-0} ${TEX%:*} ${TEX#*:}
+tex ${REF_TIDX:-0} ${TEX%:*} ${TEX#*:}"
+fi
 
 # reference attribute locations (DXC SPIR-V locations, spirv-cross keeps them)
 REF_ATTRS=$(grep -oE "\[\[attribute\([0-9]+\)\]\]" "$WORK/ref_vs.metal" | grep -oE "[0-9]+" | tr '\n' ' ')
 set -- $REF_ATTRS
-REF_VTX="vtx $1 0 0 float4
-vtx $2 0 16 float4"
-# ours: the BinC mapping (position -> locn0, color -> locn8)
-OURS_VTX="vtx 0 0 0 float4
-vtx 8 0 16 float4"
+: "${VTX_REF:=vtx $1 $VBO 0 float4
+vtx $2 $VBO 16 float4}"
+: "${VTX_OURS:=vtx 0 $VBO 0 float4
+vtx 8 $VBO 16 float4}"
+: "${VERT:=-0.5 -0.5 0.0 1.0 1.0 0.0 0.0 1.0 -0.0 0.5 0.0 1.0 0.0 1.0 0.0 1.0 0.5 -0.5 0.0 1.0 0.0 0.0 1.0 1.0}"
 
-printf 'vertex %s\nfragment %s\nrender %d %d %d\ndraw 3\n%s\nbuf 0 %s\ndumppix 0\ndumppix 1\n' "$VS" "$PS" "$W" "$H" "$NRT" "$OURS_VTX" "$VERT" > "$WORK/ours.spec"
-printf 'vertex %s\nfragment %s\nrender %d %d %d\ndraw 3\n%s\nbuf 0 %s\ndumppix 0\ndumppix 1\n' "$VS" "$PS" "$W" "$H" "$NRT" "$REF_VTX" "$VERT" > "$WORK/ref.spec"
+DUMP_LINES="dumppix 0"
+if [ "$NRT" -gt 1 ]; then DUMP_LINES="$DUMP_LINES
+dumppix 1"; fi
+printf 'vertex %s\nfragment %s\nrender %d %d %d\ndraw 3\n%s\n%s\n%s\nbuf %d %s\n%s\n' "$VS" "$PS" "$W" "$H" "$NRT" "$VTX_OURS" "$CBUF_LINES" "$TEX_LINES" "$VBO" "$VERT" "$DUMP_LINES" > "$WORK/ours.spec"
+printf 'vertex %s\nfragment %s\nrender %d %d %d\ndraw 3\n%s\n%s\n%s\nbuf %d %s\n%s\n' "$VS" "$PS" "$W" "$H" "$NRT" "$VTX_REF" "$CBUF_REF_LINES" "$TEX_LINES" "$VBO" "$VERT" "$DUMP_LINES" > "$WORK/ref.spec"
 
 REF_OUT=$(binc/harness "$WORK/ref.metallib" "$WORK/ref.spec" 2>/dev/null | grep "^pix")
 OURS_OUT=$(binc/harness "$WORK/ours.metallib" "$WORK/ours.spec" 2>/dev/null | grep "^pix")

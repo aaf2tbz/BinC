@@ -1248,7 +1248,8 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     const char *elt,*vec,*suf,*an; tex_kinds(tp->ty.tex_elt,&elt,&vec,&suf,&an);
                     (void)elt; (void)an;
                     char tname[64]; snprintf(tname,sizeof tname,"%%_%s",tp->name);
-                    if(!strcmp(e->name,"read")){
+                    if(!strcmp(e->name,"read")||!strcmp(e->name,"Load")){
+                        /* HLSL Load: int2 (or int3 with a mip) coordinate */
                         if(e->nargs!=1) die(0,"texture read expects 1 argument (the coordinate)");
                         ValKind ck; const char *cv=gen_rval(c,e->args[0],&ck);
                         if(c->rvw!=2) die(0,"texture read coordinate must be an int2");
@@ -1275,16 +1276,19 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         emit(c,"  call void @air.write_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, <2 x i32> %s, %s %s, i32 0, i32 2)\n",suf,tname,cv,vec,sv);
                         *k=VK_I32; c->rvw=0; return "0";
                     }
-                    if(!strcmp(e->name,"sample")){
-                        if(e->nargs!=2) die(0,"texture sample expects 2 arguments (sampler, uv)");
+                    if(!strcmp(e->name,"sample")||!strcmp(e->name,"Sample")||!strcmp(e->name,"SampleLevel")){
+                        if(e->nargs!=2&&e->nargs!=3) die(0,"texture sample expects 2 arguments (sampler, uv) or 3 (sampler, uv, lod)");
                         int si; if(e->args[0]->kind!=E_IDENT||resolve(c,e->args[0]->name,&si)!=R_SAMPLER)
                             die(0,"texture sample's first argument must be a sampler parameter");
                         ValKind uk; const char *uv=gen_rval(c,e->args[1],&uk);
                         if(c->rvw!=2) die(0,"texture sample uv must be a float2");
+                        const char *lod=fconst(c,0.0);
+                        if(e->nargs==3){ ValKind lk; lod=gen_rval(c,e->args[2],&lk);
+                            if(c->rvw) die(0,"texture sample lod must be a scalar"); }
                         tex_sample_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
                         char sname[64]; snprintf(sname,sizeof sname,"%%_%s",e->args[0]->name);
                         const char *r=newtmp(c);
-                        emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i1 true, <2 x i32> zeroinitializer, i1 false, float %s, float %s, i32 0)\n",r,vec,suf,tname,sname,uv,fconst(c,0.0),fconst(c,0.0));
+                        emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i1 true, <2 x i32> zeroinitializer, i1 false, float %s, float %s, i32 0)\n",r,vec,suf,tname,sname,uv,lod,fconst(c,0.0));
                         const char *v=newtmp(c);
                         emit(c,"  %s = extractvalue { %s, i8 } %s, 0\n",v,vec,r);
                         if(tp->ty.tex_elt==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext <4 x half> %s to <4 x float>\n",w,v); v=w; }
@@ -1672,7 +1676,37 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
         if(base){ char *s=newtmp(c); emit(c,"  %s = add i64 %s, %s\n",s,base,i64); i64=s; }
         if(mark)c->written[pi]=1; fill_param_li(c,pi,li); return element_ptr_idx(c,pi,i64);
     }
-    if(e->kind==E_FIELD){ char *addr=gen_lval(c,e->operand,li,mark);
+    if(e->kind==E_FIELD){
+        /* struct-pointer base: ptr.field (cbuffers, device struct buffers) */
+        if(e->operand->kind==E_IDENT){
+            int pi; if(resolve(c,e->operand->name,&pi)==R_PTR){
+                Param *pp=&c->fn->params[pi];
+                if(pp->ty.kind==T_STRUCT){
+                    StructDef *s=find_struct(c->prog,pp->ty.struct_name); if(!s) die(0,"unknown struct %s",pp->ty.struct_name);
+                    int fi=-1; for(size_t i=0;i<s->nfields;i++) if(!strcmp(s->fields[i].name,e->field)) fi=(int)i;
+                    if(fi<0) die(0,"struct %s has no field %s",pp->ty.struct_name,e->field);
+                    char *fp=newtmp(c);
+                    emit(c,"  %s = getelementptr inbounds %%struct.%s, %%struct.%s addrspace(%d)* %%_%s, i32 0, i32 %d\n",fp,pp->ty.struct_name,pp->ty.struct_name,pp->ty.as,pp->name,fi);
+                    if(mark)c->written[pi]=1; else c->read[pi]=1;
+                    li->tk=s->fields[fi].ty.kind; li->sname=s->fields[fi].ty.struct_name;
+                    li->vecn=s->fields[fi].ty.vecn; li->matn=s->fields[fi].ty.matn;
+                    li->an=s->fields[fi].ty.array_n; li->am=s->fields[fi].ty.array_m;
+                    li->as=pp->ty.as; li->pi=pi; li->is_local=0;
+                    return fp;
+                }
+            }
+        }
+        char *addr=gen_lval(c,e->operand,li,mark);
+        if(li->an>0&&li->vecn==0&&li->matn==0&&li->tk==T_FLOAT){
+            /* packed-vector component: b.x on a [N x float] cbuffer field */
+            int ci=comp_idx(e->field);
+            if(ci<0||ci>=li->an) die(0,"no component .%s on the packed vector",e->field);
+            char pty[96]; snprintf(pty,sizeof pty,"[%d x float]",li->an);
+            char *cp=newtmp(c);
+            emit(c,"  %s = getelementptr inbounds %s, %s addrspace(%d)* %s, i64 0, i64 %d\n",cp,pty,pty,li->as,addr,ci);
+            li->an=0;
+            return cp;
+        }
         if(li->tk==T_STRUCT){
             StructDef *s=find_struct(c->prog,li->sname); if(!s) die(0,"unknown struct %s",li->sname);
             int fi=-1; for(size_t i=0;i<s->nfields;i++) if(!strcmp(s->fields[i].name,e->field)) fi=(int)i;
@@ -1954,7 +1988,9 @@ static void stage_ptr_str(Function *fn,char *buf,size_t n){
         }
         char pl[64]; type_ll(pl,sizeof pl,p->ty.kind,p->ty.struct_name,p->ty.vecn);
         if(emitted++)o+=snprintf(buf+o,n-o,", ");
-        if(p->ty.is_ptr) o+=snprintf(buf+o,n-o,"%s addrspace(%d)*",pl,p->ty.as);
+        if(p->ty.kind==T_TEXTURE) o+=snprintf(buf+o,n-o,"%%struct._texture_2d_t addrspace(1)*");
+        else if(p->ty.kind==T_SAMPLER) o+=snprintf(buf+o,n-o,"%%struct._sampler_t addrspace(2)*");
+        else if(p->ty.is_ptr) o+=snprintf(buf+o,n-o,"%s addrspace(%d)*",pl,p->ty.as);
         else o+=snprintf(buf+o,n-o,"%s",pl);
     }
     o+=snprintf(buf+o,n-o,")* @%s",fn->link_name?fn->link_name:fn->name);
@@ -1981,6 +2017,11 @@ static void stage_lit_type(char *buf, size_t n, StructDef *sd){
         if(f)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"%s",fl); }
     snprintf(buf+o,n-o,"}>");
 }
+
+/* element size/align of a (possibly struct-typed) buffer element; structs use
+ * the real padded layout (StructuredBuffer<MyStruct> stride metadata) */
+static int elem_size(const Program *prog, Type *ty){ if(ty->kind==T_STRUCT&&ty->struct_name){ StructDef *s=find_struct(prog,ty->struct_name); if(s){ int al; return struct_layout(s,&al); } } return tsz(ty->kind,ty->vecn,ty->matn); }
+static int elem_align(const Program *prog, Type *ty){ if(ty->kind==T_STRUCT&&ty->struct_name){ StructDef *s=find_struct(prog,ty->struct_name); if(s){ int al; struct_layout(s,&al); return al; } } return tal(ty->kind,ty->vecn,ty->matn); }
 
 /* per-kernel !air.kernel metadata (argnode/structnode arrays are builder-allocated) */
 static void emit_kernel_meta(Meta *m, const Program *prog, Function *fn, KernelMeta *km,
@@ -2011,7 +2052,7 @@ static void emit_kernel_meta(Meta *m, const Program *prog, Function *fn, KernelM
             if(p->ty.kind==T_ATOMIC) meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.struct_type_info\", !%d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an,a,a,acc,p->ty.as,km->structnode[a],sz,al,tn,p->name);
             else meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an,a,a,acc,p->ty.as,sz,al,tn,p->name); }
         else { char tnb[64]; ptn_of(tnb,sizeof tnb,p->ty.kind,p->ty.vecn,p->ty.matn);
-            meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),a,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),tal(p->ty.kind,p->ty.vecn,p->ty.matn),tnb,p->name); } }
+            meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,elem_size(prog,&p->ty),a,elem_size(prog,&p->ty),elem_align(prog,&p->ty),tnb,p->name); } }
     for(int a=0;a<np;a++) if(km->structnode[a]>=0){ Param *p=&fn->params[a];
         meta_emit(m,"!%d = !{i32 0, i32 4, i32 0, !\"%s\", !\"__s\"}\n",km->structnode[a],type_name(p->ty.atomic_base)); }
     if(cp){ char cn[32]; snprintf(cn,sizeof cn,cp->ty.coordn==1?"uint":cp->ty.coordn==2?"ushort2":"ushort3");
@@ -2074,8 +2115,12 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
         }
         if(fn->stage==ST_VERTEX && p->ty.as==AS_THREAD){ meta_emit(m,"!%d = !{i32 %d, !\"air.vertex_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
         else if(fn->stage==ST_FRAGMENT && p->ty.kind==T_FLOAT && p->ty.vecn==4){ meta_emit(m,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
-        else if(p->ty.is_ptr) meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->ty.as,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),tal(p->ty.kind,p->ty.vecn,p->ty.matn),tn,p->name);
-        else meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),argi,tsz(p->ty.kind,p->ty.vecn,p->ty.matn),tal(p->ty.kind,p->ty.vecn,p->ty.matn),tn,p->name);
+        else if(p->ty.kind==T_TEXTURE){ /* probed: air.texture with access flags */
+            meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"air.sample\", !\"air.arg_type_name\", !\"texture2d<float, sample>\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->name); }
+        else if(p->ty.kind==T_SAMPLER){ /* probed: air.sampler */
+            meta_emit(m,"!%d = !{i32 %d, !\"air.sampler\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->name); }
+        else if(p->ty.is_ptr) meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->ty.as,elem_size(prog,&p->ty),elem_align(prog,&p->ty),tn,p->name);
+        else meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,elem_size(prog,&p->ty),argi,elem_size(prog,&p->ty),elem_align(prog,&p->ty),tn,p->name);
         argi++;
     }
 }

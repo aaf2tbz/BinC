@@ -28,7 +28,7 @@ static void sem_to_attr(const char *sem, int *attr, int *idx, int vertex_input){
     if(!sem) return;
     if(vertex_input){
         if(sem_pref(sem,"POSITION")){ *attr=5; *idx=0; return; }
-        if(sem_pref(sem,"TEXCOORD")){ *attr=5; *idx=atoi(sem+8); return; }
+        if(sem_pref(sem,"TEXCOORD")){ *attr=5; *idx=atoi(sem+8)+1; return; } /* leave locn0 for POSITION */
         if(sem_pref(sem,"COLOR")){ *attr=5; *idx=8+atoi(sem+5); return; }
         if(sem_eq(sem,"NORMAL")){ *attr=5; *idx=1; return; }
         if(sem_eq(sem,"TANGENT")){ *attr=5; *idx=2; return; }
@@ -244,14 +244,20 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
     }
     sd.nfields=fi;
     prog_add_struct(sd);
-    /* replace the attribute params with one stage-in struct param */
+    /* replace the attribute params with one stage-in struct param; keep the
+     * resource params (cbuffers, buffers, textures, samplers) in place */
     const char **names=malloc(attr_count*sizeof(char*));
     size_t nn=0;
-    Param *np2=calloc(hf->np+1,sizeof(Param)); size_t nn2=0;
-    for(size_t i=0;i<hf->np;i++){
-        HLSLParam *p=&hf->params[i];
-        int is_attr = !(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER) &&
-                      !(p->sem&&sem_eq(p->sem,"SV_VertexID"));
+    Param *np2=calloc(fn->nparams+1,sizeof(Param)); size_t nn2=0;
+    for(size_t i=0;i<fn->nparams;i++){
+        Param *p=&fn->params[i];
+        int is_svvid=0;
+        for(size_t j=0;j<hf->np;j++)
+            if(!strcmp(hf->params[j].name,p->name)&&hf->params[j].sem&&sem_eq(hf->params[j].sem,"SV_VertexID")) is_svvid=1;
+        if(is_svvid){ /* vertex_id built-in: keep as a thread-typed param */
+            p->ty.kind=T_UINT32; p->ty.vecn=0; p->ty.as=AS_THREAD;
+            np2[nn2++]=(Param){p->name,p->ty,UN_UNIFORM}; continue; }
+        int is_attr = !(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER);
         if(is_attr){ names[nn++]=p->name; continue; }
         np2[nn2++]=(Param){p->name,p->ty,UN_UNIFORM};
     }
@@ -300,6 +306,58 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         sd.fields=hs->fields; sd.nfields=hs->nfields;
         prog_add_struct(sd);
     }
+    /* cbuffers -> constant-buffer structs: <cbname>$cb, with the D3D packing.
+     * HLSL packs members into 16-byte registers: a member starts at the next
+     * offset aligned to 4 (vectors pack tightly) that does not cross a register
+     * boundary; vec4 stays 16-aligned. The natural MSL/AIR layout only differs
+     * where a tight-packed vec2/vec3 would land 8/16-aligned, so those fields
+     * become packed arrays ([2 x float] = packed_float2, align 4) and pad
+     * fields are injected when a member would cross a register. */
+    for(size_t i=0;i<hp->ncbufs;i++){
+        HLCBuf *cb=&hp->cbufs[i];
+        char tag[64]; snprintf(tag,sizeof tag,"%s$cb",cb->name);
+        Field *f=calloc(cb->nfields+16,sizeof(Field));
+        size_t nf=0, d3d=0, emit=0, npad=0;
+        for(size_t j=0;j<cb->nfields;j++){
+            Field *sf=&cb->fields[j];
+            int sz = (sf->ty.vecn==4?16:sf->ty.vecn==3?12:sf->ty.vecn==2?8:4) * (sf->ty.array_n?sf->ty.array_n*(sf->ty.array_m?sf->ty.array_m:1):1);
+            int d3d_off=(int)d3d;
+            if((d3d_off%16)+sz>16) d3d_off=((d3d_off/16)+1)*16; /* register boundary */
+            while(emit<(size_t)d3d_off){ /* explicit padding to the D3D offset */
+                char pn[32]; snprintf(pn,sizeof pn,"__pad%zu",npad++);
+                Type pt={0}; pt.kind=T_FLOAT;
+                f[nf++]=(Field){strdup(pn),pt,0,0,NULL};
+                emit+=4;
+            }
+            Type ft=sf->ty;
+            if(ft.vecn==2||ft.vecn==3){ ft.array_n=ft.vecn; ft.vecn=0; } /* packed vector */
+            f[nf++]=(Field){strdup(sf->name),ft,0,0,sf->sem?strdup(sf->sem):NULL};
+            emit+=sz; d3d=(size_t)d3d_off+sz;
+        }
+        StructDef sd={0}; sd.tag=strdup(tag);
+        sd.fields=f; sd.nfields=nf;
+        prog_add_struct(sd);
+    }
+    /* resource table: cbuffers + typed globals, ordered by register slot
+     * (matches the DXC/SPIRV-Cross buffer index ordering for the diff) */
+    typedef struct { const char *name; Type ty; int reg; } HRes;
+    HRes res[64]; size_t nres=0;
+    for(size_t i=0;i<hp->ncbufs;i++){
+        HLCBuf *cb=&hp->cbufs[i];
+        Type t={0}; t.kind=T_STRUCT;
+        char tag[64]; snprintf(tag,sizeof tag,"%s$cb",cb->name);
+        t.struct_name=strdup(tag); t.is_ptr=1; t.as=AS_CONSTANT;
+        res[nres++]=(HRes){cb->name,t,cb->reg>=0?cb->reg:0};
+    }
+    for(size_t i=0;i<hp->nglobals;i++){
+        HLSLGlobal *gg=&hp->globals[i];
+        if(gg->is_const||gg->is_groupshared) continue;
+        if(!(gg->ty.is_ptr||gg->ty.kind==T_TEXTURE||gg->ty.kind==T_SAMPLER)) continue;
+        res[nres++]=(HRes){gg->name,gg->ty,gg->reg>=0?gg->reg:0};
+    }
+    /* insertion sort by register slot */
+    for(size_t i=1;i<nres;i++){ HRes t=res[i]; size_t j=i;
+        while(j>0&&res[j-1].reg>t.reg){ res[j]=res[j-1]; j--; } res[j]=t; }
     /* functions: all of them, plain; the entry gets its stage */
     int entry_found=0;
     for(size_t i=0;i<hp->nfuncs;i++){
@@ -335,20 +393,25 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             if(is_entry) entry_found=1;
             if(stage_all){ fn.stage=s_vs?ST_VERTEX:ST_FRAGMENT; }
             else if(is_entry){ fn.stage=is_vs?ST_VERTEX:is_ps?ST_FRAGMENT:ST_NONE; }
+            /* resources (cbuffers + typed globals) become params in register
+             * order; cbuffer field references rewrite to struct-field access */
+            for(size_t r=0;r<nres;r++){
+                fn.params=realloc(fn.params,(fn.nparams+1)*sizeof(Param));
+                fn.params[fn.nparams++]=(Param){strdup(res[r].name),res[r].ty,UN_UNIFORM};
+            }
+            for(size_t ci=0;ci<hp->ncbufs;ci++){
+                HLCBuf *cb=&hp->cbufs[ci];
+                for(size_t fi=0;fi<cb->nfields;fi++){
+                    const char *fname=cb->fields[fi].name;
+                    Rewrite rw={&fname,1,fname,cb->name};
+                    rw_block(&fn.body,&rw);
+                }
+            }
             if(fn.stage==ST_VERTEX) lower_vertex(&fn,hf);
             else if(fn.stage==ST_FRAGMENT) lower_fragment(&fn,hf);
             if(is_entry&&!is_vs&&!is_ps&&!stage_all){
                 fn.is_kernel=1;
                 if(fn.ret.kind!=T_VOID) die(hf->line,"compute entry must return void");
-                /* module-level resources (StructuredBuffer<>, RWTexture2D, ...)
-                 * become kernel params in declaration order (register parity is
-                 * Phase 4; the harness binds by position) */
-                for(size_t g=0;g<hp->nglobals;g++){
-                    HLSLGlobal *gg=&hp->globals[g];
-                    if(!(gg->ty.is_ptr||gg->ty.kind==T_TEXTURE||gg->ty.kind==T_SAMPLER)) continue;
-                    fn.params=realloc(fn.params,(fn.nparams+1)*sizeof(Param));
-                    fn.params[fn.nparams++]=(Param){strdup(gg->name),gg->ty,UN_UNIFORM};
-                }
                 lower_compute(&fn,hf);
             }
         }
@@ -366,4 +429,78 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         g_prog.funcs[i].link_name=strdup(ln);
     }
     return g_prog;
+}
+
+/* ---- reflection sidecar JSON (Phase 4): the host-wiring contract ----
+ * Emits, per staged/kernel entry: the stage, the resource params (register,
+ * kind, Metal slot, element size/stride), the vertex attributes and the
+ * output targets. Registered via binc_reflect(); validated against the
+ * corpus's D3D-side declarations in tools/hlsl-diff/reflect-check.sh. */
+static const char *reflect_stage(int stage){
+    return stage==ST_VERTEX?"vertex":stage==ST_FRAGMENT?"fragment":"compute";
+}
+static const char *reflect_reg(HLSLProg *hp, const char *name, char *buf, size_t n){
+    for(size_t i=0;i<hp->ncbufs;i++) if(!strcmp(hp->cbufs[i].name,name)){
+        snprintf(buf,n,"b%d",hp->cbufs[i].reg<0?0:hp->cbufs[i].reg); return buf; }
+    for(size_t i=0;i<hp->nglobals;i++) if(!strcmp(hp->globals[i].name,name)){
+        const char *c=hp->globals[i].ty.kind==T_TEXTURE?"t":hp->globals[i].ty.kind==T_SAMPLER?"s":"u";
+        snprintf(buf,n,"%s%d",c,hp->globals[i].reg<0?0:hp->globals[i].reg); return buf; }
+    return NULL;
+}
+static const char *reflect_kind(Type *ty){
+    if(ty->is_ptr) return ty->as==AS_CONSTANT?"constant":"buffer";
+    if(ty->kind==T_TEXTURE) return "texture2d";
+    if(ty->kind==T_SAMPLER) return "sampler";
+    return "value";
+}
+static void reflect_struct_fields(FILE *out, Program *prog, const char *tag, const char *prefix){
+    for(size_t s=0;s<prog->nstructs;s++) if(!strcmp(prog->structs[s].tag,tag)){
+        StructDef *sd=&prog->structs[s];
+        for(size_t f=0;f<sd->nfields;f++)
+            fprintf(out,"%s    %s{\"name\":\"%s\",\"sem\":\"%s\",\"locn\":%d}\n",prefix,f?",":"",sd->fields[f].name,sd->fields[f].sem?sd->fields[f].sem:"",sd->fields[f].attr_idx);
+        return;
+    }
+}
+void binc_reflect(FILE *out, HLSLProg *hp, Program *prog){
+    fprintf(out,"{\n  \"entries\": [\n");
+    int first_entry=1;
+    for(size_t i=0;i<prog->nfuncs;i++){
+        Function *fn=&prog->funcs[i];
+        if(!fn->is_kernel&&fn->stage==ST_NONE) continue;
+        if(!first_entry) fprintf(out,",\n");
+        first_entry=0;
+        fprintf(out,"    {\"name\":\"%s\",\"stage\":\"%s\",\n",fn->name,reflect_stage(fn->stage));
+        /* resources */
+        fprintf(out,"      \"resources\": [\n");
+        int first_res=1;
+        for(size_t p=0;p<fn->nparams;p++){ Param *pr=&fn->params[p];
+            if(!(pr->ty.is_ptr||pr->ty.kind==T_TEXTURE||pr->ty.kind==T_SAMPLER)) continue;
+            char reg[16]; const char *r=reflect_reg(hp,pr->name,reg,sizeof reg);
+            if(!first_res) fprintf(out,",\n");
+            first_res=0;
+            fprintf(out,"        {\"name\":\"%s\",\"kind\":\"%s\",\"slot\":%zu,\"register\":\"%s\",\"stride\":%d}",
+                pr->name,reflect_kind(&pr->ty),p,r?r:"",pr->ty.kind==T_TEXTURE?16:pr->ty.is_ptr?(pr->ty.as==AS_CONSTANT?16:4):4);
+        }
+        fprintf(out,"\n      ],\n");
+        /* stage specifics */
+        if(fn->stage==ST_VERTEX){
+            fprintf(out,"      \"vertex_inputs\": [\n");
+            for(size_t p=0;p<fn->nparams;p++){ Param *pr=&fn->params[p];
+                if(pr->ty.kind!=T_STRUCT||pr->ty.is_ptr) continue;
+                char tmp[64]; snprintf(tmp,sizeof tmp,""); reflect_struct_fields(out,prog,pr->ty.struct_name,"        ");
+            }
+            fprintf(out,"      ],\n");
+            fprintf(out,"      \"outputs\": [\n");
+            if(fn->ret.kind==T_STRUCT){ char tmp[64]; snprintf(tmp,sizeof tmp,""); reflect_struct_fields(out,prog,fn->ret.struct_name,"        "); }
+            fprintf(out,"      ]\n");
+        } else if(fn->stage==ST_FRAGMENT){
+            fprintf(out,"      \"outputs\": [\n");
+            if(fn->ret.kind==T_STRUCT){ char tmp[64]; snprintf(tmp,sizeof tmp,""); reflect_struct_fields(out,prog,fn->ret.struct_name,"        "); }
+            fprintf(out,"      ]\n");
+        } else {
+            fprintf(out,"      \"coords\": \"%s\"\n", fn->is_kernel?"dispatch_threads":"");
+        }
+        fprintf(out,"    }");
+    }
+    fprintf(out,"\n  ]\n}\n");
 }

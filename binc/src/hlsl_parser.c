@@ -90,12 +90,21 @@ static void parse_attributes(TokStream *ts, HLSLFunc *f){
     }
 }
 
-/* optional `: register(bN)` / `: packoffset(cN.x)` suffix — parsed, ignored for now.
+/* optional `: register(bN)` / `: packoffset(cN.x)` suffix; returns the last
+ * register slot (b=0,t=1,u=2,s=3,c=4 classes; -1 when absent).
  * HLSL allows several in a row: `float4 f : register(vs, c0) : register(ps, c1);` */
-static void skip_register_suffix(TokStream *ts){
+static int skip_register_suffix(TokStream *ts){
+    int reg=-1;
     for(;;){
-        if(!accept(ts,TK_COLON)) return;
+        if(!accept(ts,TK_COLON)) return reg;
         if(accept(ts,TK_KW_REGISTER)){ expect(ts,TK_LPAREN,"(");
+            if(peek(ts)->kind==TK_IDENT){ /* register(vs, ...) / register(ps, ...): ignore */
+                Token *r=peek(ts);
+                if(!strcmp(r->text,"b")||!strcmp(r->text,"t")||!strcmp(r->text,"u")||!strcmp(r->text,"s")||!strcmp(r->text,"c")){
+                    advance(ts);
+                    if(peek(ts)->kind==TK_ICONST){ reg=(int)peek(ts)->ival; advance(ts); }
+                }
+            }
             while(peek(ts)->kind!=TK_RPAREN&&peek(ts)->kind!=TK_EOF) advance(ts);
             expect(ts,TK_RPAREN,")"); continue; }
         if(accept(ts,TK_KW_PACKOFFSET)){ expect(ts,TK_LPAREN,"(");
@@ -103,7 +112,7 @@ static void skip_register_suffix(TokStream *ts){
             expect(ts,TK_RPAREN,")"); continue; }
         /* bare semantic-ish ident: consume it */
         if(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_EOF) advance(ts);
-        return;
+        return reg;
     }
 }
 
@@ -167,7 +176,7 @@ HLSLProg hlsl_parse(TokStream *ts){
             advance(ts); /* 'cbuffer' / 'tbuffer' */
             HLCBuf cb={0};
             Token *bn=peek(ts); expect(ts,TK_IDENT,"cbuffer name"); cb.name=strdup(bn->text);
-            skip_register_suffix(ts); /* cbuffer X : register(b0) { */
+            cb.reg=skip_register_suffix(ts); /* cbuffer X : register(b0) { */
             expect(ts,TK_LBRACE,"{");
             Field *f=NULL; size_t n=0,cap=0;
             while(peek(ts)->kind!=TK_RBRACE&&peek(ts)->kind!=TK_EOF){
@@ -177,6 +186,10 @@ HLSLProg hlsl_parse(TokStream *ts){
                     char *sem=NULL;
                     if(accept(ts,TK_COLON)){ Token *st=peek(ts); expect(ts,TK_IDENT,"semantic"); sem=strdup(st->text); }
                     skip_register_suffix(ts); /* : register(c0) / : packoffset(c0.x) */
+                    if(accept(ts,TK_LBRACK)){ /* array member [N] or [N][M] */
+                        Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
+                        if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); }
+                    }
                     if(n==cap){cap=cap?cap*2:8;f=realloc(f,cap*sizeof(Field));}
                     f[n++]=(Field){strdup(fn->text),ty,0,0,sem};
                 } while(accept(ts,TK_COMMA));
@@ -237,7 +250,7 @@ HLSLProg hlsl_parse(TokStream *ts){
                 Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); gg.ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
                 if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); gg.ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); }
             }
-            skip_register_suffix(ts);
+            gg.reg=skip_register_suffix(ts);
             expect(ts,TK_SEMI,";");
             hpush((void**)&hp.globals,&hp.nglobals,&gcap,&gg,sizeof gg);
             continue;
@@ -261,7 +274,7 @@ HLSLProg hlsl_parse(TokStream *ts){
                 Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); gty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
                 if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); gty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); }
             }
-            skip_register_suffix(ts);
+            gg.reg=skip_register_suffix(ts);
             expect(ts,TK_SEMI,";");
             hpush((void**)&hp.globals,&hp.nglobals,&gcap,&gg,sizeof gg);
             continue;
