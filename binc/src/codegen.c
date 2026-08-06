@@ -474,7 +474,7 @@ static Builtin builtins[]={
 static int builtin_used[sizeof builtins/sizeof *builtins];
 static void mark_builtin(const char *name){ for(size_t i=0;i<sizeof builtins/sizeof *builtins;i++) if(!strcmp(builtins[i].name,name)){ builtin_used[i]=1; return; } }
 static int atomic_add_used[3];
-static int tex_read_used[4], tex_write_used[4], tex_sample_used[4], get_samp_used;
+static int tex_read_used[4], tex_write_used[4], tex_sample_used[4], tex_sample_cube_used[4], get_samp_used;
 static void tex_kinds(TypeKind et, const char **elt, const char **vec, const char **suf, const char **an){
     if(et==T_HALF){ *elt="half"; *vec="<4 x half>"; *suf="v4f16"; *an="half4"; }
     else if(et==T_INT32){ *elt="i32"; *vec="<4 x i32>"; *suf="v4i32"; *an="int4"; }
@@ -1132,7 +1132,20 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         int uns=(lk==VK_U32||rk==VK_U32);
         ValKind ok=isf?VK_F32:uns?VK_U32:VK_I32;
         int vw=lw?lw:rw;
-        if(lw&&rw&&lw!=rw) die(0,"vector width mismatch");
+        if(lw&&rw&&lw!=rw){
+            /* HLSL implicit truncation: `float3 += float4 * s` keeps the lhs width */
+            if(lw<rw){ static const int t3[3]={0,1,2}, t2[2]={0,1};
+                if(rk==VK_F32){ const char *tr=swizzle_read(c,r,"<4 x float>","float",lw==3?t3:t2,lw); r=tr; }
+                else { const char *rr=newtmp(c); emit(c,"  %s = shufflevector <%d x i32> %s, <%d x i32> poison, i32 0, i32 1%s\n",rr,rw,r,rw,lw==3?", i32 2":""); r=rr; }
+                rw=lw;
+            } else { static const int t3[3]={0,1,2}, t2[2]={0,1};
+                if(lk==VK_F32){ const char *tr=swizzle_read(c,l,"<4 x float>","float",rw==3?t3:t2,rw); l=tr; }
+                else { const char *lr=newtmp(c); emit(c,"  %s = shufflevector <%d x i32> %s, <%d x i32> poison, i32 0, i32 1%s\n",lr,lw,l,lw,rw==3?", i32 2":""); l=lr; }
+                lw=rw;
+            }
+            vw=lw?lw:rw;
+        }
+        if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG binop %s: lw=%d rw=%d\n",bin_op(e->bop,isf,uns),lw,rw);
         const char *op=bin_op(e->bop,isf,uns);
         if(vw){ const char *elt=ok==VK_F32?"float":"i32";
             if(!lw){ l=coerce(c,l,lk,ok); l=splat(c,l,elt,vw); } else if(lk!=ok) l=vconv(c,l,lw,lk,ok);
@@ -1210,29 +1223,35 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             }
         }
         /* swizzle assignment: v.xy = rhs — write each named component */
-        if(e->aop==A_ASSIGN && e->operand->kind==E_FIELD && e->operand->operand->kind==E_IDENT){
-            int wi; RKind wr=resolve(c,e->operand->operand->name,&wi);
-            if(wr==R_LOCAL && c->locs[wi].vecn>1){
-                int idxs[4]; int nc=swizzle_idx(e->operand->field,idxs);
-                if(nc>1){
-                    for(int i=0;i<nc;i++) if(idxs[i]>=c->locs[wi].vecn) die(0,"invalid vector component .%s",e->operand->field);
-                    ValKind rk; const char *rv=gen_rval(c,e->rhs,&rk); int rw=c->rvw;
-                    if(rw!=nc) die(0,"swizzle assignment width mismatch");
-                    char pty[96]; pty_str(pty,sizeof pty,c->locs[wi].kind,NULL,0,1,c->locs[wi].vecn,0);
-                    char *base=c->locs[wi].slot;
-                    char *bit=newtmp(c);
-                    emit(c,"  %s = bitcast %s %s to %s*\n",bit,pty,base,c->locs[wi].kind==T_HALF?"half":"float");
-                    for(int i=0;i<nc;i++){
-                        const char *p=newtmp(c);
-                        emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 %d\n",p,c->locs[wi].kind==T_HALF?"half":"float",c->locs[wi].kind==T_HALF?"half":"float",bit,idxs[i]);
-                        const char *ev=newtmp(c);
-                        emit(c,"  %s = extractelement <%d x float> %s, i32 %d\n",ev,nc,rv,i);
-                        const char *sv=ev;
-                        if(c->locs[wi].kind==T_HALF){ const char *h=newtmp(c); emit(c,"  %s = fptrunc float %s to half\n",h,ev); sv=h; }
-                        emit(c,"  store %s %s, %s* %s, align %d\n",c->locs[wi].kind==T_HALF?"half":"float",sv,c->locs[wi].kind==T_HALF?"half":"float",p,c->locs[wi].kind==T_HALF?2:4);
-                    }
-                    *k=scalar_vk(c->locs[wi].kind); c->rvw=nc; return rv;
+        if(e->aop==A_ASSIGN && e->operand->kind==E_FIELD){
+            /* swizzle assignment v.xy = rhs (also on struct fields: s.f.rgb = v) */
+            Expr *root=e->operand->operand;
+            while(root->kind==E_FIELD||root->kind==E_INDEX) root=root->operand;
+            int wi; RKind wr = root->kind==E_IDENT ? resolve(c,root->name,&wi) : R_NONE;
+            int root_vecn = 0;
+            if(wr==R_LOCAL) root_vecn=c->locs[wi].vecn;
+            int idxs[4]; int nc=swizzle_idx(e->operand->field,idxs);
+            if(nc>1){
+                LInfo lb; char *base;
+                if(root->kind==E_IDENT&&wr==R_LOCAL&&e->operand->operand->kind==E_IDENT){ base=c->locs[wi].slot; lb=(LInfo){c->locs[wi].kind,c->locs[wi].sname,0,-1,1,c->locs[wi].vecn,c->locs[wi].matn,0,0}; }
+                else { base=gen_lval(c,e->operand->operand,&lb,0); }
+                int base_vecn = root_vecn>1 ? root_vecn : lb.vecn;
+                if(base_vecn>1){ for(int i=0;i<nc;i++) if(idxs[i]>=base_vecn) die(0,"invalid vector component .%s",e->operand->field); }
+                ValKind rk; const char *rv=gen_rval(c,e->rhs,&rk); int rw=c->rvw;
+                if(rw!=nc) die(0,"swizzle assignment width mismatch");
+                char pty[96]; pty_str(pty,sizeof pty,lb.tk,NULL,lb.as,lb.is_local,base_vecn,0);
+                char *bit=newtmp(c);
+                emit(c,"  %s = bitcast %s %s to %s*\n",bit,pty,base,lb.tk==T_HALF?"half":"float");
+                for(int i=0;i<nc;i++){
+                    const char *p=newtmp(c);
+                    emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 %d\n",p,lb.tk==T_HALF?"half":"float",lb.tk==T_HALF?"half":"float",bit,idxs[i]);
+                    const char *ev=newtmp(c);
+                    emit(c,"  %s = extractelement <%d x float> %s, i32 %d\n",ev,nc,rv,i);
+                    const char *sv=ev;
+                    if(lb.tk==T_HALF){ const char *h=newtmp(c); emit(c,"  %s = fptrunc float %s to half\n",h,ev); sv=h; }
+                    emit(c,"  store %s %s, %s* %s, align %d\n",lb.tk==T_HALF?"half":"float",sv,lb.tk==T_HALF?"half":"float",p,lb.tk==T_HALF?2:4);
                 }
+                *k=scalar_vk(lb.tk); c->rvw=nc; return rv;
             }
         }
         ValKind rk; const char *rhs=gen_rval(c,e->rhs,&rk); int rw=c->rvw; int rm=c->rmat;
@@ -1265,7 +1284,17 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             ValKind ok=isf?VK_F32:uns?VK_U32:VK_I32;
             const char *nv=newtmp(c);
             if(vw){ const char *elt=ok==VK_F32?"float":"i32";
-                if(rw&&rw!=vw) die(0,"vector width mismatch");
+                if(rw&&rw!=vw){ /* HLSL implicit truncation: float3 += float4 keeps lhs width */
+                    if(rw>vw){ static const int t3[3]={0,1,2}, t2[2]={0,1};
+                        if(rk==VK_F32) rhs=swizzle_read(c,rhs,"<4 x float>","float",vw==3?t3:t2,vw);
+                        else { const char *rr=newtmp(c); emit(c,"  %s = shufflevector <%d x i32> %s, <%d x i32> poison, i32 0, i32 1%s\n",rr,rw,rhs,rw,vw==3?", i32 2":""); rhs=rr; }
+                        rw=vw;
+                    } else { static const int t3[3]={0,1,2}, t2[2]={0,1};
+                        if(ck==VK_F32) cur=swizzle_read(c,cur,"<4 x float>","float",rw==3?t3:t2,rw);
+                        else { const char *cr=newtmp(c); emit(c,"  %s = shufflevector <%d x i32> %s, <%d x i32> poison, i32 0, i32 1%s\n",cr,vw,cur,vw,rw==3?", i32 2":""); cur=cr; }
+                        vw=rw;
+                    }
+                }
                 if(ck!=ok) cur=vconv(c,cur,vw,ck,ok);
                 if(!rw){ rhs=coerce(c,rhs,rk,ok); rhs=splat(c,rhs,elt,vw); } else if(rk!=ok) rhs=vconv(c,rhs,rw,rk,ok);
                 emit(c,"  %s = %s <%d x %s> %s, %s\n",nv,as_op(e->aop,isf,uns),vw,elt,cur,rhs); rw=vw;
@@ -1344,14 +1373,21 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         int si; if(e->args[0]->kind!=E_IDENT||resolve(c,e->args[0]->name,&si)!=R_SAMPLER)
                             die(0,"texture sample's first argument must be a sampler parameter");
                         ValKind uk; const char *uv=gen_rval(c,e->args[1],&uk);
-                        if(c->rvw!=2) die(0,"texture sample uv must be a float2");
+                        if(tp->ty.tex_cube){ if(c->rvw!=3) die(0,"cube sample direction must be a float3"); }
+                        else if(c->rvw!=2) die(0,"texture sample uv must be a float2");
                         const char *lod=fconst(c,0.0);
                         if(e->nargs==3){ ValKind lk; lod=gen_rval(c,e->args[2],&lk);
                             if(c->rvw) die(0,"texture sample lod must be a scalar"); }
                         tex_sample_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
+                        if(tp->ty.tex_cube) tex_sample_cube_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
                         char sname[64]; snprintf(sname,sizeof sname,"%%_%s",e->args[0]->name);
                         const char *r=newtmp(c);
-                        emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i1 true, <2 x i32> zeroinitializer, i1 false, float %s, float %s, i32 0)\n",r,vec,suf,tname,sname,uv,lod,fconst(c,0.0));
+                        if(tp->ty.tex_cube){
+                            /* probed: air.sample_texture_cube.<suf>(tex, samp, <3 x float>, i1, lod, grad, i32) */
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_cube.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, i1 false, float %s, float %s, i32 0)\n",r,vec,suf,tname,sname,uv,lod,fconst(c,0.0));
+                        } else {
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i1 true, <2 x i32> zeroinitializer, i1 false, float %s, float %s, i32 0)\n",r,vec,suf,tname,sname,uv,lod,fconst(c,0.0));
+                        }
                         const char *v=newtmp(c);
                         emit(c,"  %s = extractvalue { %s, i8 } %s, 0\n",v,vec,r);
                         if(tp->ty.tex_elt==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext <4 x half> %s to <4 x float>\n",w,v); v=w; }
@@ -1693,8 +1729,7 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
                     const char *ix=newtmp(c);
                     emit(c,"  %s = sext i32 %s to i64\n",ix,iv);
                     char elt[32]; ll_of(elt,sizeof elt,li2.tk,li2.vecn);
-                    const char *asp = li2.as? " addrspace(1)" : ""; int asn = li2.as;
-                    (void)asn;
+                    char asp[32]; if(li2.as) snprintf(asp,sizeof asp," addrspace(%d)",li2.as); else asp[0]='\0';
                     if(li2.am>0){
                         /* two-dimensional: [N x [M x T]]* -> row [M x T]* */
                         char ty[64]; snprintf(ty,sizeof ty,"[%d x [%d x %s]]",li2.an,li2.am,elt);
@@ -1738,7 +1773,7 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             li->tk=sp->ty.kind; li->sname=sp->ty.struct_name; li->as=AS_THREADGROUP; li->pi=-1; li->is_local=0; li->vecn=sp->ty.vecn; return p;
         }
         if(e->operand->kind==E_IDENT){ if(resolve(c,e->operand->name,&pi)!=R_PTR) die(0,"subscript of non-pointer"); }
-        else pi=eval_ptr(c,e->operand,&base); /* e.g. (p+1)[i] */
+        else { if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG sub: operand-kind=%d field=%s line=%d\n",e->operand->kind,e->operand->field?e->operand->field:"",e->line); pi=eval_ptr(c,e->operand,&base); } /* e.g. (p+1)[i] */
         ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
         if(ik!=VK_I32&&ik!=VK_U32) die(0,"subscript must be an integer");
         const char *i64=newtmp(c); emit(c,"  %s = sext i32 %s to i64\n",i64,iv);
@@ -2195,7 +2230,7 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
         if(fn->stage==ST_VERTEX && p->ty.as==AS_THREAD){ meta_emit(m,"!%d = !{i32 %d, !\"air.vertex_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
         else if(fn->stage==ST_FRAGMENT && p->ty.kind==T_FLOAT && p->ty.vecn==4){ meta_emit(m,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
         else if(p->ty.kind==T_TEXTURE){ /* probed: air.texture with access flags */
-            meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"air.sample\", !\"air.arg_type_name\", !\"texture2d<float, sample>\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->name); }
+            meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"air.sample\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->ty.tex_cube?"texturecube<float, sample>":"texture2d<float, sample>",p->name); }
         else if(p->ty.kind==T_SAMPLER){ /* probed: air.sampler */
             meta_emit(m,"!%d = !{i32 %d, !\"air.sampler\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->name); }
         else if(p->ty.is_ptr) meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->ty.as,elem_size(prog,&p->ty),elem_align(prog,&p->ty),tn,p->name);
@@ -2384,6 +2419,7 @@ void emit_air(FILE *out, Program *prog){
             if(tex_read_used[i]) fprintf(out,"declare { %s, i8 } @air.read_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)*, <2 x i32>, <2 x i32>, i32, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_write_used[i]) fprintf(out,"declare void @air.write_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture, <2 x i32>, %s, i32, i32) local_unnamed_addr\n",sufs[i],vecs[i]);
             if(tex_sample_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, i1, <2 x i32>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
+            if(tex_sample_cube_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_cube.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
         }
     }
     /* declares for the builtins that were actually used (deduped by AIR name:

@@ -203,6 +203,7 @@ HLSLProg hlsl_parse(TokStream *ts){
             advance(ts);
             Token *gn2=peek(ts); expect(ts,TK_IDENT,"D3D9 sampler/texture name");
             if(is_samp){
+                char *texname=NULL;
                 if(peek(ts)->kind==TK_LT){ /* D3D9 annotation before sampler_state: < ... > */
                     int d=0;
                     do{ Token *t=peek(ts);
@@ -217,8 +218,19 @@ HLSLProg hlsl_parse(TokStream *ts){
                         if(t->kind==TK_LBRACE)d++;
                         else if(t->kind==TK_RBRACE)d--;
                         else if(t->kind==TK_SEMI&&d==0) break;
+                        if(t->kind==TK_IDENT&&!strcmp(t->text,"Texture")&&(ts->i+1<ts->n)){
+                            /* sampler_state { Texture = <t0>; } — capture the bound texture */
+                            size_t save=ts->i+2; /* skip `Texture =` */
+                            if(save<ts->n&&ts->toks[save].kind==TK_LT) save++;
+                            if(save<ts->n&&ts->toks[save].kind==TK_IDENT) texname=strdup(ts->toks[save].text);
+                        }
                         if(t->kind==TK_EOF) die(t->line,"unterminated sampler_state");
                         advance(ts); }
+                    /* bare `sampler s = <texture>` (no sampler_state) */
+                    if(!texname&&(ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_LT){
+                        size_t save=ts->i+2;
+                        if(save<ts->n&&ts->toks[save].kind==TK_IDENT) texname=strdup(ts->toks[save].text);
+                    }
                 } else if(peek(ts)->kind==TK_LBRACE){ /* SamplerState X { ... }; */
                     int d=0;
                     do{ Token *t=peek(ts);
@@ -229,10 +241,19 @@ HLSLProg hlsl_parse(TokStream *ts){
                 }
                 skip_register_suffix(ts); /* bare `sampler s0 : register(s0);` */
                 expect(ts,TK_SEMI,";");
-                /* register the sampler as a module global so Sample() can bind it */
+                /* register the sampler as a module global so Sample() can bind it;
+                 * samplerCUBE marks the bound texture as a cube map */
                 Type st={0}; st.kind=T_SAMPLER;
+                if(!strcmp(kt->text,"samplerCUBE")||!strcmp(kt->text,"samplerCUBEShadow")) st.tex_cube=1;
                 HLSLGlobal sg={0}; sg.name=strdup(gn2->text); sg.ty=st; sg.line=gn2->line;
+                sg.tex_name=texname; /* may be NULL: bind by register index at codegen */
                 hpush((void**)&hp.globals,&hp.nglobals,&gcap,&sg,sizeof sg);
+                if(st.tex_cube&&texname){
+                    /* mark the bound texture global as a cube map (its param type drives the AIR) */
+                    for(size_t gi=0;gi<hp.nglobals;gi++)
+                        if(hp.globals[gi].ty.kind==T_TEXTURE&&!strcmp(hp.globals[gi].name,texname))
+                            hp.globals[gi].ty.tex_cube=1;
+                }
             } else {
                 skip_register_suffix(ts); /* `texture X : SEMANTIC < ... >;` */
                 if(accept(ts,TK_LT)){ int d=1; /* the < is already consumed */
@@ -450,8 +471,8 @@ HLSLProg hlsl_parse(TokStream *ts){
                     advance(ts); } while(d>0);
             }
             if(accept(ts,TK_LBRACK)){ /* global array [N] or [N][M] */
-                gty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
-                if(accept(ts,TK_LBRACK)){ gty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); }
+                gg.ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
+                if(accept(ts,TK_LBRACK)){ gg.ty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); }
             }
             if(accept(ts,TK_EQ)){
                 gg.has_init=1;

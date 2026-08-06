@@ -30,20 +30,21 @@ static void sem_to_attr(const char *sem, int *attr, int *idx, int vertex_input){
         if(sem_pref(sem,"POSITION")){ *attr=5; *idx=0; return; }
         if(sem_pref(sem,"TEXCOORD")){ *attr=5; *idx=atoi(sem+8)+1; return; } /* leave locn0 for POSITION */
         if(sem_pref(sem,"COLOR")){ *attr=5; *idx=8+atoi(sem+5); return; }
-        if(sem_eq(sem,"NORMAL")){ *attr=5; *idx=1; return; }
-        if(sem_eq(sem,"TANGENT")){ *attr=5; *idx=2; return; }
-        if(sem_eq(sem,"BINORMAL")){ *attr=5; *idx=3; return; }
+        if(sem_eq(sem,"NORMAL")){ *attr=5; *idx=4; return; }
+        if(sem_eq(sem,"TANGENT")){ *attr=5; *idx=5; return; }
+        if(sem_eq(sem,"BINORMAL")){ *attr=5; *idx=6; return; }
         if(sem_pref(sem,"SV_")){ *attr=5; *idx=0; return; }
         *attr=5; *idx=0; return; /* unknown input semantic: attribute 0 */
     }
     if(sem_eq(sem,"SV_Position")){ *attr=1; return; }
+    if(sem_pref(sem,"POSITION")){ *attr=1; return; } /* D3D9 VS out: POSITION == air.position */
     if(sem_pref(sem,"SV_Target")){ *attr=3; *idx=atoi(sem+9); return; }
     if(sem_eq(sem,"SV_Depth")){ *attr=4; return; }
     if(sem_pref(sem,"TEXCOORD")){ *attr=5; *idx=atoi(sem+8)+1; return; } /* +1: keep locn0 for POSITION (VS outputs / PS inputs) */
-    if(sem_pref(sem,"COLOR")){ *attr=5; *idx=atoi(sem+5); return; }
-    if(sem_eq(sem,"NORMAL")){ *attr=5; *idx=1; return; }
-    if(sem_eq(sem,"TANGENT")){ *attr=5; *idx=2; return; }
-    if(sem_eq(sem,"BINORMAL")){ *attr=5; *idx=3; return; }
+    if(sem_pref(sem,"COLOR")){ *attr=5; *idx=8+atoi(sem+5); return; } /* +8: keep locn0-7 for POSITION/TEXCOORD/NORMAL/TANGENT */
+    if(sem_eq(sem,"NORMAL")){ *attr=5; *idx=4; return; }
+    if(sem_eq(sem,"TANGENT")){ *attr=5; *idx=5; return; }
+    if(sem_eq(sem,"BINORMAL")){ *attr=5; *idx=6; return; }
     if(sem_pref(sem,"SV_")){ *attr=5; *idx=0; return; }
     *attr=5; *idx=0;
 }
@@ -63,7 +64,8 @@ static Expr *rw_copy(Expr *e){
 }
 
 static int rw_matches(const Rewrite *rw, const char *name){
-    for(size_t i=0;i<rw->n;i++) if(!strcmp(rw->names[i],name)) return 1;
+    if(!name) return 0;
+    for(size_t i=0;i<rw->n;i++) if(rw->names[i]&&!strcmp(rw->names[i],name)) return 1;
     return 0;
 }
 static void rw_expr(Expr *e, const Rewrite *rw){
@@ -105,6 +107,98 @@ static void rw_stmt(Stmt *st, const Rewrite *rw){
 }
 static void rw_block(Block *b, const Rewrite *rw){
     for(size_t i=0;i<b->n;i++) rw_stmt(&b->stmts[i],rw);
+}
+
+/* ---- D3D9 sm3 tex2D family: `tex2D(s, uv)` -> `s.tex.Sample(s, uv)` ----
+ * The sampler global records the texture it was bound to in sampler_state
+ * (Texture = <name>) or by register convention; rewrite the intrinsic call
+ * into the texture-method form the codegen already lowers. */
+static void tex2d_expr(Expr *e, HLSLProg *hp);
+static void tex2d_block(Block *b, HLSLProg *hp);
+static void tex2d_stmt(Stmt *st, HLSLProg *hp){
+    switch(st->kind){
+    case S_EXPR: tex2d_expr(st->expr,hp); break;
+    case S_DECL: tex2d_expr(st->init,hp); break;
+    case S_RETURN: tex2d_expr(st->expr,hp); break;
+    case S_IF: tex2d_expr(st->cond,hp); tex2d_block(&st->then_b,hp); tex2d_block(&st->else_b,hp); break;
+    case S_WHILE: case S_DOWHILE: tex2d_expr(st->cond,hp); tex2d_block(&st->then_b,hp); break;
+    case S_FOR:
+        if(st->for_init) tex2d_stmt(st->for_init,hp);
+        tex2d_expr(st->for_cond,hp); tex2d_expr(st->for_incr,hp); tex2d_block(&st->then_b,hp); break;
+    case S_SWITCH:
+        tex2d_expr(st->sw_cond,hp);
+        for(size_t i=0;i<st->ncases;i++){ tex2d_expr(st->cases[i].val,hp); tex2d_block(&st->cases[i].body,hp); }
+        tex2d_block(&st->def_body,hp); break;
+    case S_BLOCK: tex2d_block(&st->then_b,hp); break;
+    default: break;
+    }
+}
+static void tex2d_block(Block *b, HLSLProg *hp){
+    for(size_t i=0;i<b->n;i++) tex2d_stmt(&b->stmts[i],hp);
+}
+static const char *sampler_tex_name(HLSLProg *hp, const char *sampler, int *reg_out){
+    for(size_t i=0;i<hp->nglobals;i++){
+        HLSLGlobal *g=&hp->globals[i];
+        if(!strcmp(g->name,sampler)&&g->ty.kind==T_SAMPLER){
+            if(reg_out) *reg_out=g->reg;
+            return g->tex_name;
+        }
+    }
+    return NULL;
+}
+static void tex2d_expr(Expr *e, HLSLProg *hp){
+    if(!e) return;
+    tex2d_expr(e->operand,hp); tex2d_expr(e->lhs,hp); tex2d_expr(e->rhs,hp);
+    if(e->callee) tex2d_expr(e->callee,hp);
+    for(size_t i=0;i<e->nargs;i++) tex2d_expr(e->args[i],hp);
+    if(e->kind!=E_CALL||e->callee||e->nargs<1) return;
+    const char *nm=e->name;
+    if(!nm) return;
+    int is_tex2d = !strcmp(nm,"tex2D")||!strcmp(nm,"texCUBE")||!strcmp(nm,"tex2Dproj");
+    int is_lod   = !strcmp(nm,"tex2Dlod");
+    if(!(is_tex2d||is_lod||!strcmp(nm,"tex2Dgrad"))) return;
+    Expr *s0=e->args[0];
+    if(s0->kind!=E_IDENT) return;
+    int sreg=-1; const char *tn=sampler_tex_name(hp,s0->name,&sreg);
+    if(!tn){ /* register convention: sampler sN binds texture tN */
+        if(sreg>=0){
+            for(size_t i=0;i<hp->nglobals;i++){
+                HLSLGlobal *g=&hp->globals[i];
+                if(g->ty.kind==T_TEXTURE&&g->reg==sreg){ tn=g->name; break; }
+            }
+        }
+    }
+    if(!tn) return; /* unresolved: leave the call as-is (codegen will die) */
+    Expr *op=E(E_IDENT,s0->line,s0->col); op->name=strdup(tn);
+    Expr *f=E(E_FIELD,s0->line,s0->col); f->operand=op;
+    if(is_tex2d){ f->field=strdup("Sample"); e->name=strdup("Sample"); }
+    else { f->field=strdup("SampleLevel"); e->name=strdup("SampleLevel"); }
+    e->callee=f;
+    /* tex2Dproj: uv is float3/float4 with the projection in the last lane:
+     * tex2Dproj(s, uv) == Sample(s, uv.xy / uv.z) (or .xy / .w) */
+    if(!strcmp(nm,"tex2Dproj")&&e->nargs>=2&&e->args[1]){
+        Expr *uv=e->args[1];
+        Expr *xy=E(E_FIELD,uv->line,uv->col); xy->operand=uv; xy->field=strdup("xy");
+        Expr *w=E(E_FIELD,uv->line,uv->col); w->operand=uv; w->field=strdup("w");
+        Expr *d=E(E_BIN,uv->line,uv->col); d->bop=B_DIV; d->lhs=xy; d->rhs=w;
+        e->args[1]=d;
+    }
+    /* tex2Dlod(s, float4(uv, 0, lod)) == SampleLevel(s, uv.xy, lod) */
+    if(!strcmp(nm,"tex2Dlod")&&e->nargs>=2&&e->args[1]){
+        Expr *v=e->args[1];
+        Expr *xy=E(E_FIELD,v->line,v->col); xy->operand=v; xy->field=strdup("xy");
+        Expr *w=E(E_FIELD,v->line,v->col); w->operand=v; w->field=strdup("w");
+        Expr *args2[3]; args2[0]=s0; args2[1]=xy; args2[2]=w;
+        e->nargs=3; memcpy(e->args,args2,3*sizeof(Expr*));
+        e->name=strdup("SampleLevel"); f->field=strdup("SampleLevel");
+    }
+    /* tex2Dgrad(s, uv, dx, dy) — SampleLevel with lod 0 (gradient path: see codegen) */
+    if(!strcmp(nm,"tex2Dgrad")&&e->nargs>=4){
+        Expr *z=E(E_FCONST,e->args[1]->line,e->args[1]->col); z->fval=0.0;
+        Expr *args2[3]; args2[0]=s0; args2[1]=e->args[1]; args2[2]=z;
+        e->nargs=3; memcpy(e->args,args2,3*sizeof(Expr*));
+        e->name=strdup("SampleLevel"); f->field=strdup("SampleLevel");
+    }
 }
 
 /* rewrite `return e;` into `__out.field = e; return __out;` (fragment stage-out) */
@@ -350,7 +444,16 @@ static void lower_fragment(Function *fn, HLSLFunc *hf){
     if(hf->ret.kind==T_STRUCT){
         StructDef *sd=NULL;
         for(size_t s=0;s<g_prog.nstructs;s++) if(!strcmp(g_prog.structs[s].tag,hf->ret.struct_name)){ sd=&g_prog.structs[s]; break; }
-        if(sd) for(size_t f=0;f<sd->nfields;f++) sem_to_attr(sd->fields[f].sem,&sd->fields[f].attr,&sd->fields[f].attr_idx,0);
+        if(sd) for(size_t f=0;f<sd->nfields;f++){
+            if(!sd->fields[f].sem) continue;
+            if(sem_pref(sd->fields[f].sem,"COLOR")){ /* D3D9 PS out: COLORn == render target n */
+                sd->fields[f].attr=3; sd->fields[f].attr_idx=atoi(sd->fields[f].sem+5); continue;
+            }
+            if(sem_pref(sd->fields[f].sem,"TEXCOORD")){ /* D3D9 PS out: TEXCOORDn == render target n */
+                sd->fields[f].attr=3; sd->fields[f].attr_idx=atoi(sd->fields[f].sem+8); continue;
+            }
+            sem_to_attr(sd->fields[f].sem,&sd->fields[f].attr,&sd->fields[f].attr_idx,0);
+        }
     }
 }
 
@@ -382,7 +485,8 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
         Field *f=&sd.fields[fi++];
         f->name=strdup(p->name); f->ty=p->ty;
         f->sem=p->sem?strdup(p->sem):NULL;
-        sem_to_attr(p->sem,&f->attr,&f->attr_idx,1);
+        if(!p->sem){ f->attr=5; f->attr_idx=16+(int)fi; } /* semantic-less (uniform bool): keep out of the D3D9 locn table */
+        else sem_to_attr(p->sem,&f->attr,&f->attr_idx,1);
     }
     sd.nfields=fi;
     prog_add_struct(sd);
@@ -429,6 +533,7 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
 static char **iw_helpers=NULL; static size_t niw=0;
 Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int stage_all){
     memset(&g_prog,0,sizeof g_prog);
+    fprintf(stderr,"DBG build: entry=%s nglobals=%zu\n",entry,hp->nglobals);
     int is_vs = strncmp(profile,"vs",2)==0;
     int is_ps = strncmp(profile,"ps",2)==0;
     int is_gs = strncmp(profile,"gs",2)==0;
@@ -505,6 +610,37 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             rt=at;
         }
         res[nres++]=(HRes){gg->name,rt,gg->reg>=0?gg->reg:0};
+    }
+    Rewrite unif_rw[64]; size_t nu=0; /* D3D9 uniform rewrites (built below) */
+    /* D3D9 uniforms: non-const scalar/vector globals pack into one const
+     * struct (like a cbuffer); the harness binds it at the register index
+     * that follows the declared resources. */
+    {
+        size_t nuf=0; Field uf[64]; int ureg=1000;
+        for(size_t i=0;i<hp->nglobals;i++){
+            HLSLGlobal *gg=&hp->globals[i];
+            if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG unif: %s kind=%d isc=%d vecn=%d an=%d\n",gg->name,gg->ty.kind,gg->is_const,gg->ty.vecn,gg->ty.array_n);
+            if(gg->is_const) continue;
+            if(gg->ty.is_ptr||gg->ty.kind==T_TEXTURE||gg->ty.kind==T_SAMPLER) continue;
+            if(gg->ty.kind!=T_FLOAT&&gg->ty.kind!=T_INT32&&gg->ty.kind!=T_UINT32&&gg->ty.kind!=T_BOOL&&gg->ty.kind!=T_HALF) continue;
+            Type ft=gg->ty;
+            if(ft.vecn==2||ft.vecn==3){ ft.array_n=ft.vecn; ft.vecn=0; }
+            uf[nuf++]=(Field){strdup(gg->name),ft,0,0,NULL};
+        }
+        if(nuf){
+            char tag[64]; snprintf(tag,sizeof tag,"$uniforms");
+            Field *ufh=calloc(nuf,sizeof(Field));
+            for(size_t di=0;di<nuf;di++) ufh[di]=uf[di];
+            StructDef sd={0}; sd.tag=strdup(tag); sd.fields=ufh; sd.nfields=nuf;
+            prog_add_struct(sd);
+            Type ut={0}; ut.kind=T_STRUCT; ut.struct_name=strdup(tag); ut.is_ptr=1; ut.as=AS_CONSTANT;
+            res[nres++]=(HRes){"__uniforms",ut,ureg};
+            for(size_t fi=0;fi<nuf;fi++){ /* the fn loop applies these below */
+                const char **nmarr=malloc(sizeof(char*)); nmarr[0]=ufh[fi].name;
+                Rewrite rw={nmarr,1,ufh[fi].name,"__uniforms",NULL};
+                if(nu<64) unif_rw[nu++]=rw;
+            }
+        }
     }
     /* insertion sort by register slot */
     for(size_t i=1;i<nres;i++){ HRes t=res[i]; size_t j=i;
@@ -590,6 +726,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                     rw_block(&fn.body,&rw);
                 }
             }
+            for(size_t ui=0;ui<nu;ui++) rw_block(&fn.body,&unif_rw[ui]);
             if(fn.stage==ST_VERTEX) lower_vertex(&fn,hf);
             else if(fn.stage==ST_FRAGMENT) lower_fragment(&fn,hf);
             else if(fn.stage==ST_GEOMETRY){
@@ -598,6 +735,8 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                  * path exists via metal_mesh). Parse/classification land here. */
                 die(hf->line,"geometry shader lowering (Metal mesh) not yet wired — GS parses, stage classified");
             }
+            /* D3D9 tex2D family: rewrite into the texture-method form */
+            tex2d_block(&fn.body,hp);
             if(is_entry&&!is_vs&&!is_ps&&!is_gs&&!stage_all){
                 fn.is_kernel=1;
                 if(fn.ret.kind!=T_VOID) die(hf->line,"compute entry must return void");

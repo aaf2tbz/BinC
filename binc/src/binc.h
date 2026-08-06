@@ -25,6 +25,7 @@ typedef struct {
     int      coordn; /* T_COORD dimensionality: 1, 2, or 3 */
     TypeKind atomic_base; /* T_ATOMIC's scalar payload */
     TypeKind tex_elt; /* T_TEXTURE's texel scalar type */
+    int      tex_cube; /* T_TEXTURE: cube map (sample with float3 direction) */
     int      array_n, array_m; /* threadgroup array extents, if declared */
 } Type;
 
@@ -133,7 +134,8 @@ typedef struct { char *name; HLSLParam *params; size_t np; Type ret; char *ret_s
 typedef struct { char *tag; Field *fields; size_t nfields; } HLSLStruct;
 typedef struct { char *name; Field *fields; size_t nfields; int reg; } HLCBuf;
 typedef struct { char *name; Type ty; int is_groupshared; int is_const; int is_int;
-    long ival; double fval; int has_init; int line; int reg; } HLSLGlobal;
+    long ival; double fval; int has_init; int line; int reg;
+    char *tex_name; /* sampler_state { Texture = <X>; } — the bound texture */ } HLSLGlobal;
 typedef struct { HLSLFunc *funcs; size_t nfuncs; HLSLStruct *structs; size_t nstructs;
     HLCBuf *cbufs; size_t ncbufs; HLSLGlobal *globals; size_t nglobals; } HLSLProg;
 HLSLProg hlsl_parse(TokStream *ts);
