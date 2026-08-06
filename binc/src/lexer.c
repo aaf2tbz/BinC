@@ -100,8 +100,8 @@ void lex(const char *src, Token **out, size_t *out_n, int first_line, int hlsl){
         if(isalpha((unsigned char)c)||c=='_'){
             const char *s=l.p; while(*l.p&&(isalnum((unsigned char)*l.p)||*l.p=='_'))l.p++;
             size_t len=(size_t)(l.p-s);
-            #define KW(w,k) if(strlen(w)==len&&!memcmp(w,s,len)){PUSH(tk(k,ln,col));goto done;}
-            #define VW(w,k,n) if(strlen(w)==len&&!memcmp(w,s,len)){Token x=tk(k,ln,col);x.ival=n;PUSH(x);goto done;}
+            #define KW(w,k) if(strlen(w)==len&&!memcmp(w,s,len)){Token x=tk(k,ln,col);x.text=dup_n(s,len);PUSH(x);goto done;}
+            #define VW(w,k,n) if(strlen(w)==len&&!memcmp(w,s,len)){Token x=tk(k,ln,col);x.ival=n;x.text=dup_n(s,len);PUSH(x);goto done;}
             VW("float2",TK_KW_FLOAT,2) VW("float3",TK_KW_FLOAT,3) VW("float4",TK_KW_FLOAT,4)
             VW("int2",TK_KW_INT,2) VW("int3",TK_KW_INT,3) VW("int4",TK_KW_INT,4)
             VW("uint2",TK_KW_UINT,2) VW("uint3",TK_KW_UINT,3) VW("uint4",TK_KW_UINT,4)
@@ -129,7 +129,7 @@ void lex(const char *src, Token **out, size_t *out_n, int first_line, int hlsl){
             KW("texture2d",TK_KW_TEXTURE2D) KW("sampler",TK_KW_SAMPLER)
             KW("template",TK_KW_TEMPLATE) KW("typename",TK_KW_TYPENAME)
             /* HLSL-only surface (mode-gated: `out`/`in` are legal BinC identifiers) */
-            #define HLSLKW(w,k) if(hlsl&&strlen(w)==len&&!memcmp(w,s,len)){PUSH(tk(k,ln,col));goto done;}
+            #define HLSLKW(w,k) if(hlsl&&strlen(w)==len&&!memcmp(w,s,len)){Token x=tk(k,ln,col);x.text=dup_n(s,len);PUSH(x);goto done;}
             HLSLKW("cbuffer",TK_KW_CBUFFER) HLSLKW("tbuffer",TK_KW_TBUFFER) HLSLKW("groupshared",TK_KW_GROUPSHARED)
             HLSLKW("in",TK_KW_IN) HLSLKW("out",TK_KW_OUT) HLSLKW("inout",TK_KW_INOUT) HLSLKW("static",TK_KW_STATIC)
             HLSLKW("register",TK_KW_REGISTER) HLSLKW("packoffset",TK_KW_PACKOFFSET)

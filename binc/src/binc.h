@@ -116,6 +116,7 @@ Program parse_program(TokStream *ts);
 /* ---- shared parser API (also used by the HLSL frontend) ---- */
 Token *peek(TokStream *ts); Token *advance(TokStream *ts);
 int accept(TokStream *ts, TokKind k); void expect(TokStream *ts, TokKind k, const char *w);
+void expect_name(TokStream *ts, const char *what);
 Expr *E(ExprKind k, int line, int col);
 Type parse_type(TokStream *ts); int starts_scalar_type(TokStream *ts);
 Expr *parse_expr(TokStream *ts); Stmt parse_stmt(TokStream *ts);
@@ -134,7 +135,7 @@ typedef struct { char *name; Type ty; int is_groupshared; int is_const; int is_i
 typedef struct { HLSLFunc *funcs; size_t nfuncs; HLSLStruct *structs; size_t nstructs;
     HLCBuf *cbufs; size_t ncbufs; HLSLGlobal *globals; size_t nglobals; } HLSLProg;
 HLSLProg hlsl_parse(TokStream *ts);
-Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile);
+Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int stage_all);
 void emit_air(FILE *out, Program *prog);
 void binc_set_air(const char *triple, int sdk, int minor);
 void interp_run(const Program *prog);

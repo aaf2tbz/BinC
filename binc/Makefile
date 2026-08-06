@@ -93,10 +93,26 @@ test-lit:
 DIFF_TESTS := $(wildcard ../tools/hlsl-diff/tests/*.hlsl)
 diff-suite:
 	@for t in $(DIFF_TESTS); do \
+		case "$$t" in *mrt*) continue;; esac; \
 		echo "== $$(basename $$t)"; \
 		bash ../tools/hlsl-diff/diff.sh -g 16 -w 16 $(abspath $$t) || exit 1; \
 	done
-	@echo "diff-suite: $$(echo $(DIFF_TESTS) | wc -w | tr -d ' ') tests OK"
+	@echo "diff-suite: compute kernels OK"
+
+# Phase-3 render differential: corpus VS/PS pairs + the MRT test,
+# ours vs reference (DXC -> SPIRV-Cross) rendered pixel-for-pixel
+RENDER_PAIRS := \
+	../third_party/DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloTriangle/shaders.hlsl \
+	../third_party/DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloFrameBuffering/shaders.hlsl \
+	../third_party/DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloBundles/shaders.hlsl
+render-diff:
+	@for p in $(RENDER_PAIRS); do \
+		echo "== $$(basename $$(dirname $$p))"; \
+		bash ../tools/hlsl-diff/render-diff.sh $(abspath $$p) || exit 1; \
+	done
+	@echo "== mrt.hlsl (2 targets)"; \
+	NRT=2 bash ../tools/hlsl-diff/render-diff.sh $(abspath ../tools/hlsl-diff/tests/mrt.hlsl) || exit 1
+	@echo "render-diff: all pairs pixel-identical"
 
 # GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
 ci: binc test-negative test-fuzz test-interp examples

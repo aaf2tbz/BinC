@@ -280,7 +280,7 @@ HLSLProg hlsl_parse(TokStream *ts){
             while(peek(ts)->kind==TK_KW_LINEAR||peek(ts)->kind==TK_KW_NOPERSPECTIVE||
                   peek(ts)->kind==TK_KW_CENTROID||peek(ts)->kind==TK_KW_SAMPLE) advance(ts);
             hp.ty=hlsl_type(ts);
-            Token *pn=peek(ts); expect(ts,TK_IDENT,"param name");
+            Token *pn=peek(ts); expect_name(ts,"param name");
             hp.name=strdup(pn->text);
             if(accept(ts,TK_COLON)){ Token *st=peek(ts); expect(ts,TK_IDENT,"semantic after :"); hp.sem=strdup(st->text); }
             if(accept(ts,TK_LBRACK)){

@@ -65,6 +65,8 @@ int main(int argc, char **argv){
     NSMutableDictionary<NSNumber*,NSArray<NSString*>*> *expectTexVals=[NSMutableDictionary dictionary];
     NSMutableArray<NSArray<NSString*>*> *pixExpect=[NSMutableArray array];   /* rt x y r g b a */
     NSMutableArray<NSArray<NSString*>*> *depExpect=[NSMutableArray array];   /* x y v */
+    NSMutableArray<NSArray<NSString*>*> *vtxSpec=[NSMutableArray array];     /* loc buffer offset format */
+    NSMutableArray<NSNumber*> *dumpPix=[NSMutableArray array];               /* render-target dumps */
 
     NSCharacterSet *ws=[NSCharacterSet whitespaceAndNewlineCharacterSet];
     for(NSString *line in [spec componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]){
@@ -78,6 +80,11 @@ int main(int argc, char **argv){
         else if([d isEqualToString:@"fragment"]){ fragmentFn=toks[1]; }
         else if([d isEqualToString:@"render"]){ rw=toks[1].integerValue; rh=toks[2].integerValue; if(toks.count>3) nrt=toks[3].integerValue; }
         else if([d isEqualToString:@"draw"]){ nverts=toks[1].integerValue; }
+        else if([d isEqualToString:@"vtx"]){
+            /* vtx <location> <buffer> <offset> <format>: vertex attribute layout
+             * (builds the MTLVertexDescriptor for stage-in vertex functions) */
+            [vtxSpec addObject:[toks subarrayWithRange:NSMakeRange(1,toks.count-1)]]; }
+        else if([d isEqualToString:@"dumppix"]){ [dumpPix addObject:@(toks[1].intValue)]; }
         else if([d isEqualToString:@"expectpix"]){ [pixExpect addObject:[toks subarrayWithRange:NSMakeRange(1,toks.count-1)]]; }
         else if([d isEqualToString:@"expectdepth"]){ [depExpect addObject:[toks subarrayWithRange:NSMakeRange(1,toks.count-1)]]; }
         else if([d isEqualToString:@"grid"]){ gx=toks[1].integerValue; tx=gx; }
@@ -168,6 +175,34 @@ int main(int argc, char **argv){
         rpd.vertexFunction=[lib newFunctionWithName:vertexFn];
         rpd.fragmentFunction=[lib newFunctionWithName:fragmentFn];
         if(!rpd.vertexFunction||!rpd.fragmentFunction) die(@"render functions not found in library");
+        /* vertex attribute layout: vtx <location> <buffer> <offset> <format> */
+        if(vtxSpec.count){
+            MTLVertexDescriptor *vd=[MTLVertexDescriptor new];
+            fprintf(stderr,"DBG vtx entries: %zu\n",(size_t)vtxSpec.count);
+            int maxend[32]; memset(maxend,0,sizeof maxend);
+            for(NSArray *vt in vtxSpec){
+                if(vt.count<4) die(@"vtx needs: location buffer offset format");
+                int loc=[vt[0] intValue], buf=[vt[1] intValue], off=[vt[2] intValue];
+                if(loc<0||loc>30||buf<0||buf>30) die(@"vtx location/buffer out of range");
+                MTLVertexFormat vf=MTLVertexFormatFloat4;
+                NSString *fmt=vt[3];
+                if([fmt isEqualToString:@"float"])vf=MTLVertexFormatFloat;
+                else if([fmt isEqualToString:@"float2"]||[fmt isEqualToString:@"f2"])vf=MTLVertexFormatFloat2;
+                else if([fmt isEqualToString:@"float3"]||[fmt isEqualToString:@"f3"])vf=MTLVertexFormatFloat3;
+                else if([fmt isEqualToString:@"float4"]||[fmt isEqualToString:@"f4"])vf=MTLVertexFormatFloat4;
+                else if([fmt isEqualToString:@"half2"]||[fmt isEqualToString:@"h2"])vf=MTLVertexFormatHalf2;
+                else if([fmt isEqualToString:@"half4"]||[fmt isEqualToString:@"h4"])vf=MTLVertexFormatHalf4;
+                else if([fmt isEqualToString:@"uchar4"]||[fmt isEqualToString:@"u8x4"])vf=MTLVertexFormatUChar4;
+                else if([fmt isEqualToString:@"ushort2"]||[fmt isEqualToString:@"u16x2"])vf=MTLVertexFormatUShort2;
+                else die([NSString stringWithFormat:@"unknown vtx format %@",fmt]);
+                vd.attributes[loc].format=vf; vd.attributes[loc].bufferIndex=(NSUInteger)buf; vd.attributes[loc].offset=(NSUInteger)off;
+                fprintf(stderr,"DBG vtx loc=%d buf=%d off=%d fmt=%s\n",loc,buf,off,[fmt UTF8String]);
+                int sz=[fmt hasPrefix:@"float4"]||[fmt hasPrefix:@"f4"]?16:[fmt hasPrefix:@"float3"]||[fmt hasPrefix:@"f3"]?12:8;
+                if(off+sz>maxend[buf]) maxend[buf]=off+sz;
+            }
+            for(int b=0;b<32;b++) if(maxend[b]) vd.layouts[b].stride=(NSUInteger)((maxend[b]+15)&~15);
+            rpd.vertexDescriptor=vd;
+        }
         for(int i=0;i<nrt;i++) rpd.colorAttachments[i].pixelFormat=MTLPixelFormatRGBA32Float;
         rpd.depthAttachmentPixelFormat=MTLPixelFormatDepth32Float;
         id<MTLRenderPipelineState> rps=[dev newRenderPipelineStateWithDescriptor:rpd error:&err];
@@ -313,6 +348,18 @@ int main(int argc, char **argv){
         printf("buf%d:",idx);
         for(NSInteger i=0;i<words;i++){ float f; memcpy(&f,&w[i],4); printf(" %.7g",(double)f); }
         printf("\n");
+    }
+    /* differential dump of a rendered render-target: pixels as floats */
+    for(NSNumber *pn in dumpPix){
+        int rt=pn.intValue;
+        if(rt<0||rt>=nrt||!colorTexs[rt]) die(@"dumppix target out of range");
+        id<MTLTexture> t=colorTexs[rt];
+        float *px=malloc((size_t)rw*rh*16);
+        [t getBytes:px bytesPerRow:(NSUInteger)rw*16 fromRegion:MTLRegionMake2D(0,0,(NSUInteger)rw,(NSUInteger)rh) mipmapLevel:0];
+        printf("pix%d:",rt);
+        for(int i=0;i<rw*rh*4;i++) printf(" %.7g",(double)px[i]);
+        printf("\n");
+        free(px);
     }
     printf(ok?"\n✅ %s correct on GPU\n":"\n❌ %s mismatch\n",[kernel UTF8String]);
     return ok?0:1;

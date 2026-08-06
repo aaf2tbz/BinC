@@ -221,7 +221,9 @@ static Expr *parse_primary(TokStream *ts){
         advance(ts); Expr *e=E(E_IDENT,t->line,t->col);
         e->name=strdup(t->kind==TK_KW_FLOAT?"float":t->kind==TK_KW_HALF?"half":t->kind==TK_KW_INT?"int":t->kind==TK_KW_UINT?"uint":"bool");
         return e; }
-    if(t->kind==TK_IDENT){ advance(ts); Expr *e=E(E_IDENT,t->line,t->col); e->name=strdup(t->text); return e; }
+    if(t->kind==TK_IDENT||t->kind==TK_KW_IN||t->kind==TK_KW_OUT||t->kind==TK_KW_INOUT){
+        /* HLSL code reuses in/out/inout as variable names (`MRT out;`) */
+        advance(ts); Expr *e=E(E_IDENT,t->line,t->col); e->name=strdup(t->text); return e; }
     if(accept(ts,TK_LPAREN)){ Expr *e=parse_expr(ts); expect(ts,TK_RPAREN,")"); return e; }
     die(t->line,"expected an expression");
 }
@@ -378,6 +380,16 @@ Block parse_block_or_stmt(TokStream *ts){
     if(accept(ts,TK_LBRACE)) return parse_braced(ts);
     Stmt *s=malloc(sizeof(Stmt)); s[0]=parse_stmt(ts); return (Block){s,1};
 }
+/* expect a name token: TK_IDENT, or (HLSL mode only — these kinds never
+ * appear in .binc input) the in/out/inout qualifier keywords, which HLSL
+ * code freely reuses as variable names (e.g. `PSInput out;`) */
+void expect_name(TokStream *ts, const char *what){
+    TokKind k=peek(ts)->kind;
+    if(k==TK_IDENT||k==TK_KW_IN||k==TK_KW_OUT||k==TK_KW_INOUT){ advance(ts); return; }
+    die(peek(ts)->line,"expected %s",what);
+}
+static int is_name_kind(TokKind k){ return k==TK_IDENT||k==TK_KW_IN||k==TK_KW_OUT||k==TK_KW_INOUT; }
+
 Stmt parse_stmt(TokStream *ts){
     /* HLSL statement attributes: [unroll] / [branch] / [flatten] ... */
     while(peek(ts)->kind==TK_LBRACK && (ts->i+1<ts->n) && ts->toks[ts->i+1].kind==TK_IDENT){
@@ -439,7 +451,7 @@ Stmt parse_stmt(TokStream *ts){
         advance(ts); expect(ts,TK_LPAREN,"("); Stmt st={0}; st.kind=S_FOR; st.line=kt->line; st.col=kt->col;
         if(peek(ts)->kind!=TK_SEMI){
             Stmt *fi=malloc(sizeof(Stmt)); memset(fi,0,sizeof *fi);
-            if(starts_scalar_type(ts)){ Type ty=parse_type(ts); Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
+            if(starts_scalar_type(ts)){ Type ty=parse_type(ts); Token *nm=peek(ts); expect_name(ts,"name");
                 Expr *init=NULL; if(accept(ts,TK_EQ))init=parse_expr(ts);
                 fi->kind=S_DECL; fi->line=nm->line; fi->col=nm->col; fi->ty=ty; fi->name=strdup(nm->text); fi->init=init; }
             else { fi->kind=S_EXPR; fi->line=peek(ts)->line; fi->expr=parse_expr(ts); }
@@ -453,10 +465,10 @@ Stmt parse_stmt(TokStream *ts){
         st.then_b=parse_block_or_stmt(ts); return st;
     }
     if(kt->kind==TK_LBRACE){ advance(ts); Block b=parse_braced(ts); Stmt st={0}; st.kind=S_BLOCK; st.line=kt->line; st.col=kt->col; st.then_b=b; return st; }
-    if(kt->kind==TK_IDENT&&is_stag(kt->text)&&(ts->toks[ts->i+1].kind==TK_IDENT||ts->toks[ts->i+1].kind==TK_LT)){
+    if(kt->kind==TK_IDENT&&is_stag(kt->text)&&(ts->i+1<ts->n)&&(is_name_kind(ts->toks[ts->i+1].kind)||ts->toks[ts->i+1].kind==TK_LT)){
         /* struct local: `Dog d;` / `Dog d = other;` / `Pair<float> p;` */
         Type ty=parse_type(ts);
-        Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
+        Token *nm=peek(ts); expect_name(ts,"name");
         Expr *init=NULL; if(accept(ts,TK_EQ)) init=parse_expr(ts);
         expect(ts,TK_SEMI,";");
         Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init; return st;
@@ -482,7 +494,7 @@ Stmt parse_stmt(TokStream *ts){
             advance(ts); /* consume 'const', the type follows */
     }
     if(starts_scalar_type(ts)||(peek(ts)->kind==TK_IDENT&&g_tvar&&!strcmp(peek(ts)->text,g_tvar))){
-        Type ty=parse_type(ts); Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
+        Type ty=parse_type(ts); Token *nm=peek(ts); expect_name(ts,"name");
         if(accept(ts,TK_LBRACK)){ Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
             if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); } }
         Expr *init=NULL; if(accept(ts,TK_EQ)){
@@ -522,11 +534,11 @@ void parse_function(TokStream *ts, Program *prog){
     if(is_kernel&&tvar) die(peek(ts)->line,"kernels cannot be templates");
     if(ret.kind==T_STRUCT) { /* struct-by-value returns: plain + stage functions; kernels keep void */ }
     if(ret.matn) die(peek(ts)->line,"matrix-by-value return not supported");
-    Token *nm=peek(ts); expect(ts,TK_IDENT,"function name"); expect(ts,TK_LPAREN,"(");
+    Token *nm=peek(ts); expect_name(ts,"function name"); expect(ts,TK_LPAREN,"(");
     Param *params=NULL; size_t np=0,cap=0;
     while(peek(ts)->kind!=TK_RPAREN){
         Uniformity un=UN_UNIFORM; if(accept(ts,TK_KW_VARYING))un=UN_VARYING; else accept(ts,TK_KW_UNIFORM);
-        Type ty=parse_type(ts); Token *pn=peek(ts); expect(ts,TK_IDENT,"param name");
+        Type ty=parse_type(ts); Token *pn=peek(ts); expect_name(ts,"param name");
         if(accept(ts,TK_LBRACK)){
             Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
             if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); }
@@ -563,7 +575,7 @@ void parse_struct(TokStream *ts, Program *prog){
     }
     g_tvar=tvar;
     expect(ts,TK_KW_STRUCT,"struct");
-    Token *tag=peek(ts); expect(ts,TK_IDENT,"struct tag"); expect(ts,TK_LBRACE,"{");
+    Token *tag=peek(ts); expect_name(ts,"struct tag"); expect(ts,TK_LBRACE,"{");
     Field *f=NULL; size_t n=0,cap=0;
     while(peek(ts)->kind!=TK_RBRACE){
         /* HLSL struct method? `type name ( ... ) { ... }` — skip the body */
@@ -586,7 +598,7 @@ void parse_struct(TokStream *ts, Program *prog){
             continue;
         }
         Type ty=parse_type(ts); if(ty.is_ptr) die(peek(ts)->line,"pointer fields unsupported");
-        do{ Token *fn=peek(ts); expect(ts,TK_IDENT,"field name");
+        do{ Token *fn=peek(ts); expect_name(ts,"field name");
             /* optional HLSL-style semantic: `float4 pos : SV_POSITION;` */
             char *fsem=NULL;
             if(accept(ts,TK_COLON)){ Token *st=peek(ts); expect(ts,TK_IDENT,"semantic after :"); fsem=strdup(st->text); }

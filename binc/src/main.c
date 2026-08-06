@@ -164,7 +164,7 @@ int main(int argc, char **argv) {
         char triple[64]; snprintf(triple,sizeof triple,"air64_v%d-apple-macosx%d.0.0",sdk+2,sdk);
         binc_set_air(triple,sdk,sdk-18);
     }
-    const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0; int no_prelude = 0; int interpret = 0; int syntax_only = 0;
+    const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0; int no_prelude = 0; int interpret = 0; int syntax_only = 0; int stage_all = 0;
     const char *hlsl_entry = NULL; const char *hlsl_profile = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i+1 < argc) outfile = argv[++i];
@@ -189,6 +189,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "-E") && i + 1 < argc) { hlsl_entry = argv[++i]; }
         else if (!strcmp(argv[i], "-T") && i + 1 < argc) { hlsl_profile = argv[++i]; }
+        else if (!strcmp(argv[i], "-a") || !strcmp(argv[i], "--stage-all")) { stage_all = 1; }
         else if (argv[i][0] != '-') infile = argv[i];
         else { fprintf(stderr, "binc: unknown option %s\n", argv[i]); fputs(usage_text, stderr); return 2; }
     }
@@ -257,7 +258,7 @@ int main(int argc, char **argv) {
         HLSLProg hprog = hlsl_parse(&ts);
         if (had_errors()) return 1;
         if (syntax_only) return 0; /* HLSL parse acceptance (lit conformance gate) */
-        prog = hlsl_build(&hprog, entry, profile);
+        prog = hlsl_build(&hprog, entry, profile, stage_all);
     }
     else prog = parse_program(&ts);
     if (had_errors()) return 1;

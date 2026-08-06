@@ -173,7 +173,9 @@ static void lower_fragment(Function *fn, HLSLFunc *hf){
         if(!sd) continue;
         for(size_t f=0;f<sd->nfields;f++) sem_to_attr(sd->fields[f].sem,&sd->fields[f].attr,&sd->fields[f].attr_idx,0);
     }
-    if(hf->ret_sem&&hf->ret.kind!=T_VOID){
+    if(hf->ret_sem&&hf->ret.kind!=T_VOID&&hf->ret.kind!=T_STRUCT){
+        /* scalar/vector return with a semantic: synthesize a stage-out struct.
+         * struct returns carry per-field semantics already and pass through. */
         char tag[64]; snprintf(tag,sizeof tag,"%s$out",fn->name);
         StructDef sd={0}; sd.tag=strdup(tag);
         Field *f=calloc(1,sizeof(Field));
@@ -201,6 +203,12 @@ static void lower_fragment(Function *fn, HLSLFunc *hf){
         free(fn->body.stmts); fn->body=nb;
         rr_block(&fn->body,"__out",f->name);
         fn->ret.kind=T_STRUCT; fn->ret.struct_name=strdup(tag); fn->ret.vecn=0; fn->ret.matn=0;
+    }
+    /* struct returns with semantic fields: map the field attrs (SV_Target0..) */
+    if(hf->ret.kind==T_STRUCT){
+        StructDef *sd=NULL;
+        for(size_t s=0;s<g_prog.nstructs;s++) if(!strcmp(g_prog.structs[s].tag,hf->ret.struct_name)){ sd=&g_prog.structs[s]; break; }
+        if(sd) for(size_t f=0;f<sd->nfields;f++) sem_to_attr(sd->fields[f].sem,&sd->fields[f].attr,&sd->fields[f].attr_idx,0);
     }
 }
 
@@ -266,7 +274,11 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
     }
 }
 
-Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile){
+/* hlsl_build: lower an HLSLProg onto the shared Program AST.
+ * entry/profile select the compute/vertex/fragment entry; with stage_all,
+ * every function whose return semantics imply a stage gets lowered (render
+ * files with multiple stage functions, e.g. shaders.hlsl VS+PS pairs). */
+Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int stage_all){
     memset(&g_prog,0,sizeof g_prog);
     int is_vs = strncmp(profile,"vs",2)==0;
     int is_ps = strncmp(profile,"ps",2)==0;
@@ -302,11 +314,30 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile){
             fn.params[fn.nparams++]=(Param){strdup(hp2->name),hp2->ty,UN_UNIFORM};
         }
         int is_entry = !strcmp(hf->name,entry);
-        if(is_entry){
-            entry_found=1;
-            if(is_vs){ fn.stage=ST_VERTEX; lower_vertex(&fn,hf); }
-            else if(is_ps){ fn.stage=ST_FRAGMENT; lower_fragment(&fn,hf); }
-            else {
+        int s_vs=0, s_ps=0;
+        if(stage_all){
+            /* infer the stage from the return semantics: SV_Target -> fragment;
+             * a struct return carrying SV_Position (or the POSITION semantic)
+             * -> vertex (semantics are case-insensitive) */
+            if(hf->ret_sem&&sem_pref(hf->ret_sem,"SV_Target")) s_ps=1;
+            else if(hf->ret_sem&&(sem_pref(hf->ret_sem,"SV_Position")||sem_pref(hf->ret_sem,"POSITION"))) s_vs=1;
+            else if(hf->ret.kind==T_STRUCT){
+                StructDef *sd=NULL;
+                for(size_t si=0;si<g_prog.nstructs;si++)
+                    if(!strcmp(g_prog.structs[si].tag,hf->ret.struct_name)){ sd=&g_prog.structs[si]; break; }
+                if(sd) for(size_t fi=0;fi<sd->nfields;fi++){
+                    Field *fd=&sd->fields[fi];
+                    if(fd->sem&&(sem_pref(fd->sem,"SV_Position")||sem_pref(fd->sem,"POSITION"))) s_vs=1;
+                }
+            }
+        }
+        if(is_entry||(stage_all&&(s_vs||s_ps))){
+            if(is_entry) entry_found=1;
+            if(stage_all){ fn.stage=s_vs?ST_VERTEX:ST_FRAGMENT; }
+            else if(is_entry){ fn.stage=is_vs?ST_VERTEX:is_ps?ST_FRAGMENT:ST_NONE; }
+            if(fn.stage==ST_VERTEX) lower_vertex(&fn,hf);
+            else if(fn.stage==ST_FRAGMENT) lower_fragment(&fn,hf);
+            if(is_entry&&!is_vs&&!is_ps&&!stage_all){
                 fn.is_kernel=1;
                 if(fn.ret.kind!=T_VOID) die(hf->line,"compute entry must return void");
                 /* module-level resources (StructuredBuffer<>, RWTexture2D, ...)
@@ -324,7 +355,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile){
         g_prog.funcs=realloc(g_prog.funcs,(g_prog.nfuncs+1)*sizeof(Function));
         g_prog.funcs[g_prog.nfuncs++]=fn;
     }
-    if(!entry_found) die(0,"entry point '%s' not found in the shader",entry);
+    if(!entry_found&&!stage_all) die(0,"entry point '%s' not found in the shader",entry);
     /* overloaded names get mangled link names (name$N); `name` stays the
      * resolution key. The emission sites use link_name. */
     for(size_t i=0;i<g_prog.nfuncs;i++){
