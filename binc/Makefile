@@ -105,14 +105,16 @@ RENDER_PAIRS := \
 	../third_party/DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloTriangle/shaders.hlsl \
 	../third_party/DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloFrameBuffering/shaders.hlsl \
 	../third_party/DirectX-Graphics-Samples/Samples/Desktop/D3D12HelloWorld/src/HelloBundles/shaders.hlsl
+# Phase-3/4 render differential: the full render-suite (3 corpus VS/PS pairs,
+# cbuffer + tight-packing cbuffer, texture sample, MRT), ours vs the
+# DXC -> SPIRV-Cross reference, rendered pixel-for-pixel
 render-diff:
-	@for p in $(RENDER_PAIRS); do \
-		echo "== $$(basename $$(dirname $$p))"; \
-		bash ../tools/hlsl-diff/render-diff.sh $(abspath $$p) || exit 1; \
-	done
-	@echo "== mrt.hlsl (2 targets)"; \
-	NRT=2 bash ../tools/hlsl-diff/render-diff.sh $(abspath ../tools/hlsl-diff/tests/mrt.hlsl) || exit 1
-	@echo "render-diff: all pairs pixel-identical"
+	@bash ../tools/hlsl-diff/render-suite.sh 2>&1 | tail -1
+
+# Phase-5: the D3D12 nBodyGravity gravity CS (groupshared + barriers +
+# four thread semantics + inout helper), ours vs DXC->SPIRV-Cross on GPU
+diff-nbody:
+	@bash ../tools/hlsl-diff/nbody-diff.sh 2>&1 | tail -1
 
 # GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
 ci: binc test-negative test-fuzz test-interp examples

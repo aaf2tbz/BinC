@@ -816,9 +816,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
          * coordinate itself is the global position; local/group values are appended as
          * hidden built-in arguments when referenced. */
         if(e->kind==E_FIELD){
-            /* field access on a VALUE (function-call result): vector swizzle
-             * for vector results, extractvalue for struct results */
-            if(e->operand->kind==E_CALL){
+            /* field access on a VALUE (computed vector/struct result): vector
+             * swizzle for vector results, extractvalue for struct results */
+            if(e->operand->kind!=E_IDENT&&e->operand->kind!=E_DEREF&&e->operand->kind!=E_FIELD&&e->operand->kind!=E_INDEX){
                 ValKind ck; const char *cv=gen_rval(c,e->operand,&ck);
                 if(c->rvw>1){
                     /* vector call result: asfloat(...).x — swizzle */
@@ -1147,6 +1147,22 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         emit(c,"  store %s %s, %s %s, align %d\n",ll,sv,pty,addr,type_align(li.tk,li.vecn));
         *k=ck; c->rvw=0; return cur; }
     case E_ASSIGN:{
+        /* v.xy += rhs -> v.xy = v.xy + rhs (compound swizzle desugar) */
+        if(e->aop!=A_ASSIGN && e->operand->kind==E_FIELD && e->operand->operand->kind==E_IDENT){
+            int wi; RKind wr=resolve(c,e->operand->operand->name,&wi);
+            if(wr==R_LOCAL && c->locs[wi].vecn>1){
+                int idxs[4]; int nc=swizzle_idx(e->operand->field,idxs);
+                if(nc>1){
+                    BinOp bop = e->aop==A_ADDEQ?B_ADD:e->aop==A_SUBEQ?B_SUB:e->aop==A_MULEQ?B_MUL:e->aop==A_DIVEQ?B_DIV:B_ADD;
+                    Expr *id=E(E_IDENT,e->operand->operand->line,e->operand->operand->col);
+                    id->name=strdup(e->operand->operand->name);
+                    Expr *fd=E(E_FIELD,e->operand->line,e->operand->col);
+                    fd->operand=id; fd->field=strdup(e->operand->field);
+                    Expr *sum=E(E_BIN,e->line,e->col); sum->bop=bop; sum->lhs=fd; sum->rhs=e->rhs;
+                    e->aop=A_ASSIGN; e->rhs=sum;
+                }
+            }
+        }
         /* swizzle assignment: v.xy = rhs — write each named component */
         if(e->aop==A_ASSIGN && e->operand->kind==E_FIELD && e->operand->operand->kind==E_IDENT){
             int wi; RKind wr=resolve(c,e->operand->operand->name,&wi);
@@ -1217,6 +1233,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         else { if(rw) die(0,"cannot store a vector into a scalar"); sv=store_val(c,rhs,rk,li.tk,&ev); }
         char pty[96]; pty_str(pty,sizeof pty,li.tk,li.sname,li.as,li.is_local,vw,li.matn);
         char ll[32]; ll_of(ll,sizeof ll,li.tk,vw);
+        if(getenv("BINC_DEBUG_ASSIGN")) fprintf(stderr,"DBG assign: rhs=%s rk=%d rw=%d vw=%d tk=%d\n",rhs,rk,rw,vw,li.tk);
         emit(c,"  store %s %s, %s %s, align %d\n",ll,sv,pty,addr,type_align(li.tk,vw));
         *k=scalar_vk(li.tk); c->rvw=vw; return ev;
     }
@@ -1742,14 +1759,18 @@ static const char *gen_cond(CG *c, Expr *e){
     else emit(c,"  %s = icmp ne i32 %s, 0\n",r,v);
     return r;
 }
-/* divergence heuristic: does expr touch device/constant element data (=> varying)? */
+/* divergence heuristic: does expr touch per-thread (device-buffer / coordinate)
+ * data (=> varying)? constant-buffer reads are uniform across a threadgroup */
 static int is_varying(CG *c, Expr *e){
     if(!e) return 0;
     if(e->kind==E_IDENT){ int i; RKind r=resolve(c,e->name,&i);
         if(r==R_COORD) return 1;
         if(r==R_SCALAR && c->fn->params[i].un==UN_VARYING) return 1;
     }
-    if(e->kind==E_DEREF||e->kind==E_FIELD||e->kind==E_INDEX){ if(root_param(c,e)>=0) return 1; }
+    if(e->kind==E_DEREF||e->kind==E_FIELD||e->kind==E_INDEX){
+        int pi=root_param(c,e);
+        if(pi>=0 && c->fn->params[pi].ty.as!=AS_CONSTANT) return 1; /* constant = uniform */
+    }
     if(is_varying(c,e->operand)||is_varying(c,e->lhs)||is_varying(c,e->rhs)) return 1;
     for(size_t i=0;i<e->nargs;i++) if(is_varying(c,e->args[i])) return 1;
     return 0;
@@ -2033,14 +2054,15 @@ static void emit_kernel_meta(Meta *m, const Program *prog, Function *fn, KernelM
     meta_emit(m,"}\n");
     meta_emit(m,"!%d = !{%s, !%d, !%d}\n",km->knode,fptr,km->empty,km->arglist);
     int ai=0; Param *cp=NULL; for(size_t x=0;x<fn->nparams;x++)if(fn->params[x].ty.kind==T_COORD){cp=&fn->params[x];break;}
+    int argidx=0; /* the actual argument index: threadgroup arrays take no args */
     for(int a=0;a<(int)fn->nparams;a++){ Param *p=&fn->params[a]; if(p->ty.array_n)continue;
         if(p->ty.kind==T_COORD){ char cn[32]; snprintf(cn,sizeof cn,p->ty.coordn==1?"uint":p->ty.coordn==2?"ushort2":"ushort3");
-            meta_emit(m,"!%d = !{i32 %d, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,cn,p->name); continue; }
-        if(p->ty.kind==T_GRID_EXTENT){ meta_emit(m,"!%d = !{i32 %d, !\"air.threads_per_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,p->name); continue; }
+            meta_emit(m,"!%d = !{i32 %d, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,cn,p->name); argidx++; continue; }
+        if(p->ty.kind==T_GRID_EXTENT){ meta_emit(m,"!%d = !{i32 %d, !\"air.threads_per_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,p->name); argidx++; continue; }
         if(p->ty.kind==T_TEXTURE){ const char *elt,*vec,*suf,*an; tex_kinds(p->ty.tex_elt,&elt,&vec,&suf,&an);
-            meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"air.read_write\", !\"air.arg_type_name\", !\"texture2d<%s, read_write>\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,a,elt,p->name); continue; }
+            meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"air.read_write\", !\"air.arg_type_name\", !\"texture2d<%s, read_write>\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,argidx,elt,p->name); argidx++; continue; }
         if(p->ty.kind==T_SAMPLER){
-            meta_emit(m,"!%d = !{i32 %d, !\"air.sampler\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,a,p->name); continue; }
+            meta_emit(m,"!%d = !{i32 %d, !\"air.sampler\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,argidx,p->name); argidx++; continue; }
         if(p->ty.is_ptr){ int r=read[a],w=written[a]; const char *acc=(r&&w)?"air.read_write":w?"air.write":"air.read";
             int sz=tsz(p->ty.kind,p->ty.vecn,p->ty.matn),al=tal(p->ty.kind,p->ty.vecn,p->ty.matn); char tnb[64];
             ptn_of(tnb,sizeof tnb,p->ty.kind,p->ty.vecn,p->ty.matn); const char *tn=tnb;
@@ -2049,17 +2071,17 @@ static void emit_kernel_meta(Meta *m, const Program *prog, Function *fn, KernelM
                 if(s){ sz=struct_layout(s,&al); snprintf(tnb,sizeof tnb,"%s",p->ty.struct_name); tn=tnb; }
                 else { sz=4; al=4; snprintf(tnb,sizeof tnb,"%s",p->ty.struct_name); tn=tnb; } }
             int an=km->argnode[ai++];
-            if(p->ty.kind==T_ATOMIC) meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.struct_type_info\", !%d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an,a,a,acc,p->ty.as,km->structnode[a],sz,al,tn,p->name);
-            else meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an,a,a,acc,p->ty.as,sz,al,tn,p->name); }
+            if(p->ty.kind==T_ATOMIC) meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.struct_type_info\", !%d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an,argidx,argidx,acc,p->ty.as,km->structnode[a],sz,al,tn,p->name);
+            else meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",an,argidx,argidx,acc,p->ty.as,sz,al,tn,p->name); argidx++; }
         else { char tnb[64]; ptn_of(tnb,sizeof tnb,p->ty.kind,p->ty.vecn,p->ty.matn);
-            meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],a,elem_size(prog,&p->ty),a,elem_size(prog,&p->ty),elem_align(prog,&p->ty),tnb,p->name); } }
+            meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,elem_size(prog,&p->ty),argidx,elem_size(prog,&p->ty),elem_align(prog,&p->ty),tnb,p->name); argidx++; } }
     for(int a=0;a<np;a++) if(km->structnode[a]>=0){ Param *p=&fn->params[a];
         meta_emit(m,"!%d = !{i32 0, i32 4, i32 0, !\"%s\", !\"__s\"}\n",km->structnode[a],type_name(p->ty.atomic_base)); }
     if(cp){ char cn[32]; snprintf(cn,sizeof cn,cp->ty.coordn==1?"uint":cp->ty.coordn==2?"ushort2":"ushort3");
-        meta_emit(m,"!%d = !{i32 %d, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s_local\"}\n",km->argnode[ai++],(int)fn->nparams,cn,cp->name);
-        meta_emit(m,"!%d = !{i32 %d, !\"air.threadgroup_position_in_grid\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s_group\", !\"air.arg_unused\"}\n",km->argnode[ai++],(int)fn->nparams+1,cn,cp->name);
+        meta_emit(m,"!%d = !{i32 %d, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s_local\"}\n",km->argnode[ai++],argidx,cn,cp->name);
+        meta_emit(m,"!%d = !{i32 %d, !\"air.threadgroup_position_in_grid\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s_group\", !\"air.arg_unused\"}\n",km->argnode[ai++],argidx+1,cn,cp->name);
     } else {
-        meta_emit(m,"!%d = !{i32 %d, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"id\"}\n",km->argnode[ai++],(int)fn->nparams);
+        meta_emit(m,"!%d = !{i32 %d, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"id\"}\n",km->argnode[ai++],argidx);
     }
 }
 

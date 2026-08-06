@@ -1,0 +1,7 @@
+kernel void hist(device atomic<float>* acc, coord1D i, grid_extent n) {
+    /* 1024 threads race to increment one atomic histogram counter.
+     * NOTE: metal on this GPU rejects i32 atomics ("unlowered function call")
+     * — the f32 atomic path is the verified one; the HLSL InterlockedAdd
+     * lowering produces the same AIR shape and is gated the same way. */
+    if (i < n) acc->add(1.0);
+}

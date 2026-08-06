@@ -49,7 +49,18 @@ static void sem_to_attr(const char *sem, int *attr, int *idx, int vertex_input){
 }
 
 /* ---- expression/statement rewriting ---- */
-typedef struct { const char **names; size_t n; const char *field; const char *base; } Rewrite;
+typedef struct { const char **names; size_t n; const char *field; const char *base; Expr *expr; } Rewrite;
+
+static Expr *rw_copy(Expr *e){
+    if(!e) return NULL;
+    Expr *n=calloc(1,sizeof(Expr)); *n=*e;
+    n->name=e->name?strdup(e->name):NULL;
+    n->field=e->field?strdup(e->field):NULL;
+    n->operand=rw_copy(e->operand); n->lhs=rw_copy(e->lhs); n->rhs=rw_copy(e->rhs);
+    n->callee=rw_copy(e->callee);
+    if(e->nargs){ n->args=calloc(e->nargs,sizeof(Expr*)); for(size_t i=0;i<e->nargs;i++) n->args[i]=rw_copy(e->args[i]); }
+    return n;
+}
 
 static int rw_matches(const Rewrite *rw, const char *name){
     for(size_t i=0;i<rw->n;i++) if(!strcmp(rw->names[i],name)) return 1;
@@ -58,6 +69,11 @@ static int rw_matches(const Rewrite *rw, const char *name){
 static void rw_expr(Expr *e, const Rewrite *rw){
     if(!e) return;
     if(e->kind==E_IDENT&&rw_matches(rw,e->name)){
+        if(rw->expr){ /* E_IDENT(name) -> a computed expression (derived thread ids) */
+            Expr *n=rw_copy(rw->expr);
+            *e=*n;
+            return;
+        }
         /* E_IDENT(name) -> E_FIELD(E_IDENT(base), field); do not recurse */
         Expr *base=E(E_IDENT,e->line,e->col); base->name=strdup(rw->base?rw->base:e->name);
         Expr *n=E(E_FIELD,e->line,e->col); n->operand=base; n->field=strdup(rw->field);
@@ -127,6 +143,109 @@ static void rr_block(Block *b, const char *out, const char *field){
     }
 }
 
+/* ---- inout helpers (Phase 5): void f(inout T a, ...) -> T f(T a, ...) ----
+ * The call sites `f(a, b, ...)` become `a = f(b, ...)` (the inout arg is the
+ * receiver, removed from the call). The function body gets `return a;`
+ * appended so the modified value flows out. */
+static void iw_expr(Expr *e, const char *fnname);
+static void iw_block(Block *b, const char *fnname);
+static void rn_expr(Expr *e){ /* HLSL barriers -> the sync builtin */
+    if(!e) return;
+    if(e->kind==E_CALL&&e->name&&(!strcmp(e->name,"GroupMemoryBarrierWithGroupSync")||!strcmp(e->name,"GroupMemoryBarrier")||!strcmp(e->name,"DeviceMemoryBarrier")||!strcmp(e->name,"AllMemoryBarrierWithGroupSync")))
+        e->name=strdup("sync");
+    rn_expr(e->operand); rn_expr(e->lhs); rn_expr(e->rhs);
+    if(e->callee) rn_expr(e->callee);
+    for(size_t i=0;i<e->nargs;i++) rn_expr(e->args[i]);
+}
+static void rn_block(Block *b){ for(size_t i=0;i<b->n;i++){
+    Stmt *st=&b->stmts[i];
+    if(st->expr) rn_expr(st->expr);
+    if(st->init) rn_expr(st->init);
+    if(st->cond) rn_expr(st->cond);
+    if(st->for_incr) rn_expr(st->for_incr);
+    if(st->for_init) rn_expr(st->for_init->expr);
+    rn_block(&st->then_b); rn_block(&st->else_b);
+    for(size_t c=0;c<st->ncases;c++){ rn_expr(st->cases[c].val); rn_block(&st->cases[c].body); }
+    rn_block(&st->def_body);
+} }
+/* InterlockedAdd/Min/Max/And/Or/Xor/Exchange(dst[i], v) -> the atomic-method
+ * form dst.add(v). The target buffer gets its element address; the codegen
+ * atomic machinery handles the rest. Element indices beyond 0 are deferred
+ * (the method form indexes element 0). */
+static void ax_expr(Expr *e){
+    if(!e) return;
+    if(e->kind==E_CALL&&e->name&&!strncmp(e->name,"Interlocked",11)){
+        if(e->nargs<2) die(0,"%s expects (buffer, value)",e->name);
+        Expr *dst=e->args[0]; const char *bufname=NULL;
+        if(dst->kind==E_INDEX&&dst->operand->kind==E_IDENT) bufname=dst->operand->name;
+        else if(dst->kind==E_IDENT) bufname=dst->name;
+        else die(0,"Interlocked target must be a buffer element");
+        const char *m = !strcmp(e->name,"InterlockedAdd")?"add":!strcmp(e->name,"InterlockedMin")?"min":
+            !strcmp(e->name,"InterlockedMax")?"max":!strcmp(e->name,"InterlockedAnd")?"and":
+            !strcmp(e->name,"InterlockedOr")?"or":!strcmp(e->name,"InterlockedXor")?"xor":
+            !strcmp(e->name,"InterlockedExchange")?"exchange":!strcmp(e->name,"InterlockedCompareExchange")?"compare_exchange":NULL;
+        if(!m) die(0,"unsupported Interlocked op %s",e->name);
+        Expr *id=E(E_IDENT,dst->line,dst->col); id->name=strdup(bufname);
+        Expr *der=E(E_DEREF,dst->line,dst->col); der->operand=id;
+        Expr *callee=E(E_FIELD,e->line,e->col); callee->operand=der; callee->field=strdup(m);
+        Expr *n=E(E_CALL,e->line,e->col); n->callee=callee; n->name=strdup(m);
+        n->nargs=e->nargs-1;
+        if(n->nargs){ n->args=calloc(n->nargs,sizeof(Expr*));
+            for(size_t i=1;i<e->nargs;i++) n->args[i-1]=rw_copy(e->args[i]); }
+        *e=*n;
+        return;
+    }
+    ax_expr(e->operand); ax_expr(e->lhs); ax_expr(e->rhs);
+    if(e->callee) ax_expr(e->callee);
+    for(size_t i=0;i<e->nargs;i++) ax_expr(e->args[i]);
+}
+static void ax_block(Block *b){ for(size_t i=0;i<b->n;i++){
+    Stmt *st=&b->stmts[i];
+    if(st->expr) ax_expr(st->expr);
+    if(st->init) ax_expr(st->init);
+    if(st->cond) ax_expr(st->cond);
+    if(st->for_incr) ax_expr(st->for_incr);
+    if(st->for_init) ax_expr(st->for_init->expr);
+    ax_block(&st->then_b); ax_block(&st->else_b);
+    for(size_t c=0;c<st->ncases;c++){ ax_expr(st->cases[c].val); ax_block(&st->cases[c].body); }
+    ax_block(&st->def_body);
+} }
+static void iw_stmt(Stmt *st, const char *fnname){
+    switch(st->kind){
+    case S_EXPR: iw_expr(st->expr,fnname); break;
+    case S_DECL: iw_expr(st->init,fnname); break;
+    case S_RETURN: iw_expr(st->expr,fnname); break;
+    case S_IF: iw_expr(st->cond,fnname); iw_block(&st->then_b,fnname); iw_block(&st->else_b,fnname); break;
+    case S_WHILE: case S_DOWHILE: iw_expr(st->cond,fnname); iw_block(&st->then_b,fnname); break;
+    case S_FOR:
+        if(st->for_init) iw_stmt(st->for_init,fnname);
+        iw_expr(st->for_cond,fnname); iw_expr(st->for_incr,fnname); iw_block(&st->then_b,fnname); break;
+    case S_SWITCH:
+        iw_expr(st->sw_cond,fnname);
+        for(size_t i=0;i<st->ncases;i++){ iw_expr(st->cases[i].val,fnname); iw_block(&st->cases[i].body,fnname); }
+        iw_block(&st->def_body,fnname); break;
+    case S_BLOCK: iw_block(&st->then_b,fnname); break;
+    default: break;
+    }
+}
+static void iw_block(Block *b, const char *fnname){
+    for(size_t i=0;i<b->n;i++) iw_stmt(&b->stmts[i],fnname);
+}
+static void iw_expr(Expr *e, const char *fnname){
+    if(!e) return;
+    if(e->kind==E_CALL&&e->name&&!strcmp(e->name,fnname)){
+        if(e->nargs<1) die(0,"inout call needs at least one argument");
+        /* a = f(a, b, ...) — the receiver is arg0, the call keeps every arg */
+        Expr *receiver=rw_copy(e->args[0]);
+        Expr *as=E(E_ASSIGN,e->line,e->col); as->aop=A_ASSIGN; as->operand=receiver; as->rhs=rw_copy(e);
+        if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG iw: call->assign operand=%s kind=%d\n",receiver->name,receiver->kind);
+        *e=*as;
+        return;
+    }
+    iw_expr(e->operand,fnname); iw_expr(e->lhs,fnname); iw_expr(e->rhs,fnname);
+    if(e->callee) iw_expr(e->callee,fnname);
+    for(size_t i=0;i<e->nargs;i++) iw_expr(e->args[i],fnname);
+}
 static void prog_add_struct(StructDef sd){
     g_prog.structs=realloc(g_prog.structs,(g_prog.nstructs+1)*sizeof(StructDef));
     g_prog.structs[g_prog.nstructs++]=sd;
@@ -142,14 +261,37 @@ static void lower_compute(Function *fn, HLSLFunc *hf){
         if(!p->sem) continue;
         if(sem_eq(p->sem,"SV_DispatchThreadID")){ names[nn++]=p->name; if(!coord_name){coord_name=p->name;coord_kind=1;} }
         else if(sem_eq(p->sem,"SV_GroupThreadID")){ names[nn++]=p->name; if(!coord_name){coord_name=p->name;coord_kind=2;} }
-        else if(sem_eq(p->sem,"SV_GroupID")||sem_eq(p->sem,"SV_GroupIndex"))
-            die(hf->line,"SV_GroupID / SV_GroupIndex lower in Phase 5");
+        else if(sem_eq(p->sem,"SV_GroupID")){ names[nn++]=p->name; if(!coord_name){coord_name=p->name;coord_kind=3;} }
+        else if(sem_eq(p->sem,"SV_GroupIndex")){ names[nn++]=p->name; if(!coord_name){coord_name=p->name;coord_kind=4;} }
     }
     if(!coord_name) return; /* no thread ids: plain kernel */
-    Rewrite rw={names,nn,coord_kind==1?"global":"local",NULL};
-    rw_block(&fn->body,&rw);
+    /* derived thread ids, each semantic its own rewrite in terms of the one
+     * coord param: global = the dispatch thread id; local = global % numthreads;
+     * group = global / numthreads; index = linearized local */
+    Expr *glob=E(E_FIELD,0,0); { Expr *b=E(E_IDENT,0,0); b->name=strdup(coord_name); glob->operand=b; glob->field=strdup("global"); }
+    Expr *local=E(E_FIELD,0,0); { Expr *b=E(E_IDENT,0,0); b->name=strdup(coord_name); local->operand=b; local->field=strdup("local"); }
+    for(size_t k=0;k<nn;k++){
+        Expr *der=NULL; const char *fld="global";
+        for(size_t i=0;i<hf->np;i++) if(hf->params[i].name&&!strcmp(hf->params[i].name,names[k])&&hf->params[i].sem){
+            if(sem_eq(hf->params[i].sem,"SV_DispatchThreadID")) fld="global";
+            else if(sem_eq(hf->params[i].sem,"SV_GroupThreadID")) fld="local";
+            else if(sem_eq(hf->params[i].sem,"SV_GroupID")){ /* group = global / numthreads */
+                Expr *d=E(E_BIN,0,0); d->bop=B_DIV; d->lhs=rw_copy(glob); Expr *c=E(E_ICONST,0,0); c->ival=hf->numtx?hf->numtx:1; d->rhs=c; der=d;
+            } else if(sem_eq(hf->params[i].sem,"SV_GroupIndex")){ /* linearized local */
+                int nx=hf->numtx?hf->numtx:1, ny=hf->numty?hf->numty:1;
+                Expr *ix=E(E_FIELD,0,0); ix->operand=rw_copy(local); ix->field=strdup("x");
+                if(ny>1){ Expr *iy=E(E_FIELD,0,0); iy->operand=rw_copy(local); iy->field=strdup("y");
+                    Expr *t=E(E_BIN,0,0); t->bop=B_MUL; t->lhs=iy; Expr *c=E(E_ICONST,0,0); c->ival=nx; t->rhs=c;
+                    Expr *s=E(E_BIN,0,0); s->bop=B_ADD; s->lhs=t; s->rhs=ix; ix=s; }
+                der=ix;
+            }
+            break;
+        }
+        Rewrite rw={names+k,1,fld,coord_name,der};
+        rw_block(&fn->body,&rw);
+    }
     /* rebuild params from the live list: drop the SV-thread-id params (matched
-     * by name), append one coord3D */
+     * by name), append one coord (1D for numthreads(x,1,1)) */
     Param *np2=calloc(fn->nparams+1,sizeof(Param)); size_t nn2=0;
     for(size_t i=0;i<fn->nparams;i++){
         int is_sv=0;
@@ -267,7 +409,7 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
     /* rewrite body references: E_IDENT(pname) -> E_FIELD(E_IDENT(__in), pname) */
     for(size_t i=0;i<nn;i++){
         const char *nm=names[i];
-        Rewrite rw={&nm,1,nm,"__in"};
+        Rewrite rw={&nm,1,nm,"__in",NULL};
         rw_block(&fn->body,&rw);
     }
     free(names);
@@ -284,6 +426,7 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
  * entry/profile select the compute/vertex/fragment entry; with stage_all,
  * every function whose return semantics imply a stage gets lowered (render
  * files with multiple stage functions, e.g. shaders.hlsl VS+PS pairs). */
+static char **iw_helpers=NULL; static size_t niw=0;
 Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int stage_all){
     memset(&g_prog,0,sizeof g_prog);
     int is_vs = strncmp(profile,"vs",2)==0;
@@ -351,9 +494,16 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
     }
     for(size_t i=0;i<hp->nglobals;i++){
         HLSLGlobal *gg=&hp->globals[i];
-        if(gg->is_const||gg->is_groupshared) continue;
+        if(gg->is_const) continue;
+        if(gg->is_groupshared){ Type t=gg->ty; t.as=AS_THREADGROUP; res[nres++]=(HRes){gg->name,t,0}; continue; }
         if(!(gg->ty.is_ptr||gg->ty.kind==T_TEXTURE||gg->ty.kind==T_SAMPLER)) continue;
-        res[nres++]=(HRes){gg->name,gg->ty,gg->reg>=0?gg->reg:0};
+        Type rt=gg->ty;
+        /* RWStructuredBuffer<uint|int> -> atomic buffers (the Interlocked ops) */
+        if(gg->ty.is_ptr&&!gg->ty.struct_name&&(gg->ty.kind==T_UINT32||gg->ty.kind==T_INT32)){
+            Type at={0}; at.kind=T_ATOMIC; at.atomic_base=gg->ty.kind; at.is_ptr=1; at.as=gg->ty.as;
+            rt=at;
+        }
+        res[nres++]=(HRes){gg->name,rt,gg->reg>=0?gg->reg:0};
     }
     /* insertion sort by register slot */
     for(size_t i=1;i<nres;i++){ HRes t=res[i]; size_t j=i;
@@ -365,11 +515,44 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         Function fn={0};
         fn.name=strdup(hf->name); fn.line=hf->line;
         fn.ret=hf->ret; fn.body=hf->body;
+        rn_block(&fn.body); /* HLSL barriers -> sync */
+        ax_block(&fn.body); /* Interlocked* -> the atomic method form */
         fn.params=calloc(hf->np?hf->np:1,sizeof(Param));
         fn.nparams=0;
         for(size_t p=0;p<hf->np;p++){
             HLSLParam *hp2=&hf->params[p];
             fn.params[fn.nparams++]=(Param){strdup(hp2->name),hp2->ty,UN_UNIFORM};
+        }
+        /* inout/out helpers (Phase 5): single inout on a void function becomes a
+         * value return; the call sites are rewritten to `a = f(b, ...)` */
+        {
+            int io=-1;
+            for(size_t p=0;p<hf->np;p++) if(hf->params[p].inq==2||hf->params[p].inq==3){
+                if(io>=0) die(hf->line,"multiple inout params not supported yet"); io=(int)p;
+            }
+            if(io>=0){
+                if(hf->ret.kind!=T_VOID) die(hf->line,"inout param on a value-returning function not supported yet");
+                fn.ret=hf->params[io].ty;
+                /* params are read-only: copy the inout param into a mutable local
+                 * (`float3 ai = ai$in;` for inout, a bare decl for out) */
+                char inname[64]; snprintf(inname,sizeof inname,"%s$in",hf->params[io].name);
+                for(size_t p=0;p<fn.nparams;p++) if(!strcmp(fn.params[p].name,hf->params[io].name))
+                    fn.params[p].name=strdup(inname);
+                Stmt decl={0}; decl.kind=S_DECL; decl.line=fn.line;
+                decl.ty=hf->params[io].ty; decl.name=strdup(hf->params[io].name);
+                if(hf->params[io].inq==3){ decl.init=E(E_IDENT,fn.line,0); decl.init->name=strdup(inname); }
+                fn.body.stmts=realloc(fn.body.stmts,(fn.body.n+1)*sizeof(Stmt));
+                memmove(&fn.body.stmts[1],&fn.body.stmts[0],fn.body.n*sizeof(Stmt));
+                fn.body.stmts[0]=decl; fn.body.n++;
+                /* append `return <name>;` */
+                Stmt ret={0}; ret.kind=S_RETURN; ret.expr=E(E_IDENT,fn.line,0);
+                ret.expr->name=strdup(hf->params[io].name);
+                fn.body.stmts=realloc(fn.body.stmts,(fn.body.n+1)*sizeof(Stmt));
+                fn.body.stmts[fn.body.n++]=ret;
+                /* remember the helper so every function's call sites get rewritten */
+                iw_helpers=realloc(iw_helpers,(niw+1)*sizeof(char*));
+                iw_helpers[niw++]=strdup(hf->name);
+            }
         }
         int is_entry = !strcmp(hf->name,entry);
         int s_vs=0, s_ps=0;
@@ -403,7 +586,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                 HLCBuf *cb=&hp->cbufs[ci];
                 for(size_t fi=0;fi<cb->nfields;fi++){
                     const char *fname=cb->fields[fi].name;
-                    Rewrite rw={&fname,1,fname,cb->name};
+                    Rewrite rw={&fname,1,fname,cb->name,NULL};
                     rw_block(&fn.body,&rw);
                 }
             }
@@ -419,6 +602,8 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         g_prog.funcs[g_prog.nfuncs++]=fn;
     }
     if(!entry_found&&!stage_all) die(0,"entry point '%s' not found in the shader",entry);
+    /* rewrite every inout-helper call site across all functions */
+    for(size_t h=0;h<niw;h++) for(size_t i=0;i<g_prog.nfuncs;i++) iw_block(&g_prog.funcs[i].body,iw_helpers[h]);
     /* overloaded names get mangled link names (name$N); `name` stays the
      * resolution key. The emission sites use link_name. */
     for(size_t i=0;i<g_prog.nfuncs;i++){

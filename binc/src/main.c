@@ -2,6 +2,7 @@
 #include "binc.h"
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -220,17 +221,48 @@ int main(int argc, char **argv) {
     if (is_hlsl) {
         char *main_spl=splice_file(infile);
         if(!main_spl) return 1;
-        /* crude Phase-1 # handling: drop #include/#define/#pragma/#line lines */
+        /* crude Phase-1 # handling: drop #include/#define/#pragma/#line lines;
+         * collect `#define NAME value` for a minimal token substitution */
         Buf all={0};
+        typedef struct { char *name; char *val; } Def;
+        Def defs[64]; size_t ndefs=0;
         char *ls=main_spl;
         while(ls&&*ls){
             char *nl=strchr(ls,'\n');
             size_t len=nl?(size_t)(nl-ls):strlen(ls);
-            if(len&&ls[0]=='#'){ /* skip the directive line */ }
+            if(len&&ls[0]=='#'){ /* skip the directive line */
+                char *ln=strndup(ls,len);
+                char *p=ln+1; while(*p==' ') p++;
+                if(!strncmp(p,"define ",7)){
+                    char *nm=p+7; char *sp=nm; while(*sp&&*sp!=' '&&*sp!='\t') sp++;
+                    char *val=sp; while(*val==' '||*val=='\t') val++;
+                    if(sp>nm&&*val&&ndefs<64){
+                        *sp=0; char *ve=val+strlen(val);
+                        while(ve>val&&(ve[-1]==' '||ve[-1]=='\t')) *--ve=0;
+                        defs[ndefs].name=strdup(nm); defs[ndefs].val=strdup(val); ndefs++;
+                    }
+                }
+                free(ln);
+            }
             else { bput(&all,ls,len); bput(&all,"\n",1); }
             ls = nl?nl+1:NULL;
         }
         free(main_spl);
+        /* substitute the collected defines (whole-word) */
+        for(size_t d=0;d<ndefs;d++){
+            size_t nl2=strlen(defs[d].name);
+            Buf out={0};
+            char *q=all.p;
+            while(q&&*q){
+                char *hit=strstr(q,defs[d].name);
+                if(!hit){ bput(&out,q,strlen(q)); break; }
+                int lb=hit==q||!(isalnum((unsigned char)hit[-1])||hit[-1]=='_');
+                int rb=!(isalnum((unsigned char)hit[nl2])||hit[nl2]=='_');
+                if(lb&&rb){ bput(&out,q,(size_t)(hit-q)); bput(&out,defs[d].val,strlen(defs[d].val)); q=hit+nl2; }
+                else { bput(&out,q,(size_t)(hit-q+nl2)); q=hit+nl2; }
+            }
+            free(all.p); all=out;
+        }
         src=all.p;
     } else {
     {

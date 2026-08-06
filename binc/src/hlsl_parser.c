@@ -116,8 +116,37 @@ static int skip_register_suffix(TokStream *ts){
     }
 }
 
-static void hpush(void **arr, size_t *n, size_t *cap, void *item, size_t sz){
-    if(*n==*cap){*cap=*cap?*cap*2:8; *arr=realloc(*arr,*cap*sz);} 
+/* fold a constant global-initializer expression (binops/unary on literals and
+ * earlier-declared const globals); returns the float value, sets *is_int/*ival
+ * for integer-only results */
+static double fold_init(Expr *e, int *is_int, long *ival, HLSLGlobal *gs, size_t ngs){
+    if(!e) return 0;
+    switch(e->kind){
+    case E_FCONST: *is_int=0; return e->fval;
+    case E_ICONST: *is_int=1; *ival=e->ival; return (double)e->ival;
+    case E_BOOL:   *is_int=1; *ival=e->bval; return (double)e->bval;
+    case E_IDENT:  for(size_t i=0;i<ngs;i++) if(!strcmp(gs[i].name,e->name)&&gs[i].has_init){
+                       *is_int=gs[i].is_int; *ival=gs[i].ival; return gs[i].fval; }
+                   *is_int=1; *ival=0; return 0;
+    case E_NEG: { double v=fold_init(e->operand,is_int,ival,gs,ngs); if(*is_int)*ival=-*ival; else return -v; return v; }
+    case E_BIN: {
+        int li,ri; long lv=0,rv=0;
+        double l=fold_init(e->lhs,&li,&lv,gs,ngs);
+        double r=fold_init(e->rhs,&ri,&rv,gs,ngs);
+        double v=0; switch(e->bop){
+            case B_ADD: v=l+r; if(li&&ri){*is_int=1;*ival=lv+rv;return v;} break;
+            case B_SUB: v=l-r; if(li&&ri){*is_int=1;*ival=lv-rv;return v;} break;
+            case B_MUL: v=l*r; if(li&&ri){*is_int=1;*ival=lv*rv;return v;} break;
+            case B_DIV: v=l/r; break;
+            case B_MOD: v=li&&ri?(double)(lv%rv):0; break;
+            default: break;
+        }
+        *is_int=0; return v;
+    }
+    default: *is_int=1; *ival=0; return 0;
+    }
+}
+static void hpush(void **arr, size_t *n, size_t *cap, void *item, size_t sz){    if(*n==*cap){*cap=*cap?*cap*2:8; *arr=realloc(*arr,*cap*sz);} 
     memcpy((char*)*arr+(*n)*sz,item,sz); (*n)++;
 }
 
@@ -242,6 +271,10 @@ HLSLProg hlsl_parse(TokStream *ts){
                 if(e->kind==E_ICONST){ gg.is_int=1; gg.ival=e->ival; }
                 else if(e->kind==E_FCONST){ gg.fval=e->fval; }
                 else if(e->kind==E_BOOL){ gg.is_int=1; gg.ival=e->bval; }
+                else {
+                    /* fold constant expressions (0.00125*0.00125, g_fG*10000*10000) */
+                    gg.fval=fold_init(e,&gg.is_int,&gg.ival,hp.globals,hp.nglobals);
+                }
                 /* non-literal initializers (float4(...), other calls) are
                  * parsed and discarded — the lowering only materializes
                  * literal consts (Phase 4 wires real constant buffers) */
