@@ -73,7 +73,7 @@ struct Stmt {
 
 typedef struct { char *name; Type ty; Uniformity un; } Param;
 typedef enum { ST_NONE, ST_VERTEX, ST_FRAGMENT } Stage;
-typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; int line;
+typedef struct { char *name; char *link_name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; int line;
     int is_template; char *tvar; Type tvar_ty; } Function;
 typedef struct { char *name; Type ty; int attr; int attr_idx; char *sem; } Field; /* attr: 0 none, 1 position, 2 flat, 3 color(N), 4 depth, 5 user(locnN); sem: raw HLSL semantic */
 typedef struct { char *tag; Field *fields; size_t nfields; int is_template; char *tvar; } StructDef;

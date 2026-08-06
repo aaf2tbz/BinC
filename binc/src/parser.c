@@ -551,7 +551,7 @@ void parse_function(TokStream *ts, Program *prog){
     if(is_kernel&&ret.kind!=T_VOID) die(nm->line,"kernel functions must return void"); /* also covers coordN-implicit kernels */
     g_tvar=NULL; /* template type parameter ends with the function body */
     prog->funcs=realloc(prog->funcs,(prog->nfuncs+1)*sizeof(Function));
-    prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,stage,ret,nm->line,tvar!=NULL,tvar?strdup(tvar):NULL,{0}};
+    prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),NULL,params,np,body,is_kernel,stage,ret,nm->line,tvar!=NULL,tvar?strdup(tvar):NULL,{0}};
 }
 void parse_struct(TokStream *ts, Program *prog){
     /* template<typename T> struct ... */

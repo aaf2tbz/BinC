@@ -182,6 +182,7 @@ static InstRec *insts=NULL; static size_t ninsts=0;
 static size_t inst_lookup(const char *key){ for(size_t i=0;i<ninsts;i++) if(!strcmp(insts[i].key,key)) return insts[i].fidx; return (size_t)-1; }
 
 /* static type of an expression, for template argument inference */
+static int vec_name(const char *s, TypeKind *k, int *n); /* forward (defined below) */
 static void expr_type_of(CG *c, Expr *e, Type *out){
     memset(out,0,sizeof *out);
     switch(e->kind){
@@ -202,9 +203,16 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
                 StructDef *sd=&c->prog->structs[i];
                 for(size_t j=0;j<sd->nfields;j++) if(!strcmp(sd->fields[j].name,e->field)){ Type t=sd->fields[j].ty; t.tvar=NULL; *out=t; return; }
                 break; } }
+        else { *out=base; if(strlen(e->field)==1) out->vecn=0; } /* vector swizzle */
         break; }
     case E_CALL:{ for(size_t i=0;i<c->prog->nfuncs;i++)
             if(!strcmp(c->prog->funcs[i].name,e->name)){ Type t=c->prog->funcs[i].ret; t.tvar=NULL; *out=t; return; }
+        /* vector/scalar constructors: float2..uint4, float/int/uint/bool */
+        { TypeKind ck; int cn; if(vec_name(e->name,&ck,&cn)){ out->kind=ck; out->vecn=cn; break; } }
+        if(!strcmp(e->name,"float")||!strcmp(e->name,"half")){ out->kind=T_FLOAT; break; }
+        if(!strcmp(e->name,"int")){ out->kind=T_INT32; break; }
+        if(!strcmp(e->name,"uint")){ out->kind=T_UINT32; break; }
+        if(!strcmp(e->name,"bool")){ out->kind=T_BOOL; break; }
         out->kind=T_INT32; break; }
     case E_INDEX:{ Type base; expr_type_of(c,e->operand,&base); base.vecn=0; base.matn=0; base.array_n=0; base.array_m=0; *out=base; break; }
     case E_DEREF:{ Type base; expr_type_of(c,e->operand,&base); base.is_ptr=0; *out=base; break; }
@@ -218,6 +226,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
 }
 static Type expr_type(CG *c, Expr *e){ Type t={0}; expr_type_of(c,e,&t); return t; }
 
+static size_t instantiate(Program *prog, Function *tpl, const Type *concrete);
 static size_t instantiate(Program *prog, Function *tpl, const Type *concrete){
     char key[128]; type_key(concrete,key,sizeof key);
     Function inst=*tpl;
@@ -414,6 +423,8 @@ static Builtin builtins[]={
     {"cos","air.fast_cos.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
     {"exp","air.fast_exp.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
     {"log","air.fast_log.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"exp2","air.fast_exp2.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"log2","air.fast_log2.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
     {"fmin","air.fast_fmin.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
     {"fmax","air.fast_fmax.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
     {"pow","air.fast_pow.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
@@ -422,6 +433,17 @@ static Builtin builtins[]={
     {"sign","air.sign.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
     {"imin","air.min.s.i32",2,T_INT32,T_INT32,T_INT32,1},
     {"imax","air.max.s.i32",2,T_INT32,T_INT32,T_INT32,1},
+    /* HLSL aliases: min/max are type-generic in HLSL; the float forms are
+     * exact for the differential range (int operands convert to float) */
+    {"min","air.fast_fmin.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"max","air.fast_fmax.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"abs","air.fast_fabs.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"saturate","air.fast_saturate.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"tan","air.fast_tan.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"asin","air.fast_asin.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"acos","air.fast_acos.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"atan","air.fast_atan.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"fmod","air.fast_fmod.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
     {"sync","air.wg.barrier",0,T_VOID,T_VOID,T_VOID,0},
 };
 static int builtin_used[sizeof builtins/sizeof *builtins];
@@ -503,7 +525,7 @@ static const char *spread(CG *c, const char *v, int w, int n){
 /* returns the result register, or NULL if `e->name` is not a composite builtin */
 static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
     const char *nm=e->name;
-    static const char *names[]={"dot","cross","length","distance","normalize","reflect","clamp","mix","step","smoothstep","fract","mod","radians","degrees"};
+    static const char *names[]={"dot","cross","length","distance","normalize","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","fmod","radians","degrees","saturate","abs","min","max","mul","asfloat","asuint","asint"};
     int hit=0; for(size_t i=0;i<sizeof names/sizeof *names;i++) if(!strcmp(names[i],nm)){ hit=1; break; }
     if(!hit) return NULL;
     if(e->nargs<1||e->nargs>3) die(0,"%s: wrong number of arguments",nm);
@@ -513,6 +535,67 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
     const char *cv=NULL; int cw=0; if(e->nargs>=3){ cv=gen_rval(c,e->args[2],&ck); cw=c->rvw; }
     int n=aw?aw:(bw?bw:cw); if(n==0) n=1;
     if((aw&&aw!=n)||(bw&&bw!=n)||(cw&&cw!=n)) die(0,"vector width mismatch in %s",nm);
+    /* ---- HLSL intrinsics that also take integer operands ---- */
+    if(!strcmp(nm,"abs")){
+        if(e->nargs!=1) die(0,"abs expects 1 argument");
+        if(ak==VK_I32){
+            /* abs(int): select(x<0, -x, x) */
+            const char *va=spread(c,av,aw,n);
+            const char *neg=newtmp(c), *cmp=newtmp(c), *res=newtmp(c);
+            char vty[32]; snprintf(vty,sizeof vty,"<%d x i32>",n);
+            char mty[32]; snprintf(mty,sizeof mty,"<%d x i1>",n);
+            if(n>1){
+                emit(c,"  %s = icmp slt %s %s, zeroinitializer\n",cmp,vty,va);
+                emit(c,"  %s = sub %s zeroinitializer, %s\n",neg,vty,va);
+                emit(c,"  %s = select %s %s, %s %s, %s %s\n",res,mty,cmp,vty,neg,vty,va);
+                *k=VK_I32; c->rvw=n; return res;
+            }
+            emit(c,"  %s = icmp slt i32 %s, 0\n",cmp,va);
+            emit(c,"  %s = sub i32 0, %s\n",neg,va);
+            emit(c,"  %s = select i1 %s, i32 %s, i32 %s\n",res,cmp,neg,va);
+            *k=VK_I32; c->rvw=0; return res;
+        }
+        mark_builtin("fabs");
+        *k=VK_F32; c->rvw=n>1?n:0;
+        return elem_call(c,"air.fast_fabs.f32",spread(c,av,aw,n),n,T_FLOAT,T_FLOAT);
+    }
+    if(!strcmp(nm,"min")||!strcmp(nm,"max")){
+        /* dispatched via the builtin table (air.fast_fmin/fmax + coercion);
+         * int operands convert to float — exact for the differential range */
+        if(e->nargs!=2) die(0,"%s expects 2 arguments",nm);
+        mark_builtin(!strcmp(nm,"min")?"fmin":"fmax");
+        return NULL; /* fall through to the table dispatch */
+    }
+    if(!strcmp(nm,"asfloat")||!strcmp(nm,"asuint")||!strcmp(nm,"asint")){
+        /* bit reinterpret: bitcast f32<->i32, scalar or vector */
+        if(e->nargs!=1) die(0,"%s expects 1 argument",nm);
+        int want_f=!strcmp(nm,"asfloat");
+        const char *src=ak==VK_I32?"i32":"float";
+        const char *dst=want_f?"float":"i32";
+        char sty[48], dty[48];
+        if(n>1){ snprintf(sty,sizeof sty,"<%d x %s>",n,src); snprintf(dty,sizeof dty,"<%d x %s>",n,dst); }
+        else { snprintf(sty,sizeof sty,"%s",src); snprintf(dty,sizeof dty,"%s",dst); }
+        const char *r=newtmp(c);
+        emit(c,"  %s = bitcast %s %s to %s\n",r,sty,spread(c,av,aw,n),dty);
+        *k=want_f?VK_F32:VK_I32; c->rvw=n>1?n:0; return r;
+    }
+    if(!strcmp(nm,"mul")){
+        /* mul(a,b): vector-vector = dot; everything else reuses the binary
+         * multiply (scalar, matrix*vector, vector*matrix, matrix*matrix) */
+        if(e->nargs!=2) die(0,"mul expects 2 arguments");
+        int am=c->rmat, bm=c->rmat;
+        if(aw>1&&bw>1&&!am&&!bm&&aw==bw){
+            *k=VK_F32; c->rvw=0;
+            return vreduce(c,vbin(c,"fmul fast",spread(c,av,aw,aw),spread(c,bv,bw,aw),aw),aw);
+        }
+        Expr *bin=E(E_BIN,e->line,e->col); bin->bop=B_MUL; bin->lhs=e->args[0]; bin->rhs=e->args[1];
+        return gen_rval(c,bin,k);
+    }
+    if(!strcmp(nm,"saturate")||!strcmp(nm,"abs")||!strcmp(nm,"min")||!strcmp(nm,"max")||
+       !strcmp(nm,"tan")||!strcmp(nm,"asin")||!strcmp(nm,"acos")||!strcmp(nm,"atan")||!strcmp(nm,"fmod")){
+        /* table-dispatched (handles scalars + per-element vectors + coercion) */
+        return NULL;
+    }
     if(ak!=VK_F32||bk!=VK_F32||ck!=VK_F32) die(0,"%s requires float arguments",nm);
     if(!strcmp(nm,"dot")){
         if(e->nargs!=2) die(0,"dot expects 2 arguments");
@@ -568,7 +651,7 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
         *k=VK_F32; c->rvw=n>1?n:0;
         return clamp_elem(c,spread(c,av,aw,n),spread(c,bv,bw,n),spread(c,cv,cw,n),n);
     }
-    if(!strcmp(nm,"mix")){
+    if(!strcmp(nm,"mix")||!strcmp(nm,"lerp")){
         if(e->nargs!=3) die(0,"mix expects 3 arguments");
         const char *va=spread(c,av,aw,n), *vb=spread(c,bv,bw,n), *vc=spread(c,cv,cw,n);
         *k=VK_F32; c->rvw=n>1?n:0;
@@ -607,7 +690,7 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
         *k=VK_F32; c->rvw=n>1?n:0;
         return vbin(c,"fmul fast",tt,vbin(c,"fsub fast",t3,vbin(c,"fmul fast",t2,tc,n),n),n);
     }
-    if(!strcmp(nm,"fract")){
+    if(!strcmp(nm,"fract")||!strcmp(nm,"frac")){
         if(e->nargs!=1) die(0,"fract expects 1 argument");
         mark_builtin("floor");
         const char *va=spread(c,av,aw,n);
@@ -733,9 +816,22 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
          * coordinate itself is the global position; local/group values are appended as
          * hidden built-in arguments when referenced. */
         if(e->kind==E_FIELD){
-            /* field access on a struct VALUE (function-call result): extractvalue */
+            /* field access on a VALUE (function-call result): vector swizzle
+             * for vector results, extractvalue for struct results */
             if(e->operand->kind==E_CALL){
                 ValKind ck; const char *cv=gen_rval(c,e->operand,&ck);
+                if(c->rvw>1){
+                    /* vector call result: asfloat(...).x — swizzle */
+                    int idxs[4]; int nc=swizzle_idx(e->field,idxs);
+                    if(nc<0) die(0,"invalid vector component .%s",e->field);
+                    const char *elt=ck==VK_I32?"i32":"float";
+                    char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",c->rvw,elt);
+                    *k=ck;
+                    if(nc==1){ const char *r=newtmp(c); c->rvw=0;
+                        emit(c,"  %s = extractelement %s %s, i32 %d\n",r,vty,cv,idxs[0]); return r; }
+                    c->rvw=nc;
+                    return swizzle_read(c,cv,vty,elt,idxs,nc);
+                }
                 if(!c->rstruct) die(0,"field access on a non-struct value");
                 StructDef *sd=find_struct(c->prog,c->rstruct);
                 int fi=-1; for(size_t i=0;i<sd->nfields;i++) if(!strcmp(sd->fields[i].name,e->field)){ fi=(int)i; break; }
@@ -1333,9 +1429,31 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         }
         /* composite math builtins (dot, cross, length, clamp, mix, ...) */
         { const char *cm=gen_composite_math(c,e,k); if(cm) return cm; }
-        /* user function? the whole Program is visible, so definition order doesn't matter */
-        Function *f=NULL; for(size_t i=0;i<c->prog->nfuncs;i++)
-            if(!strcmp(c->prog->funcs[i].name,e->name)){ f=&c->prog->funcs[i]; break; }
+        /* user function? the whole Program is visible, so definition order doesn't matter.
+         * HLSL overloads: rank-based selection (exact > int→float promotion >
+         * scalar→vector splat); the best-ranked candidate wins. */
+        Function *f=NULL; int best=1<<30;
+        for(size_t i=0;i<c->prog->nfuncs;i++){
+            Function *cf=&c->prog->funcs[i];
+            if(strcmp(cf->name,e->name)) continue;
+            if(e->nargs!=cf->nparams) continue;
+            int rk=0, bad=0;
+            for(size_t ai=0;ai<e->nargs;ai++){
+                Type at={0}; expr_type_of(c,e->args[ai],&at);
+                Type pt=cf->params[ai].ty;
+                if(pt.kind==T_TVAR) continue; /* template parameter matches anything */
+                if(pt.is_ptr){ if(!at.is_ptr||at.as!=pt.as){ bad=1; break; } continue; }
+                if(at.kind!=pt.kind){
+                    if(at.kind==T_INT32&&pt.kind==T_FLOAT&&!at.vecn&&!pt.vecn){ rk+=1; continue; } /* promotion */
+                    bad=1; break;
+                }
+                if(at.vecn!=pt.vecn){
+                    if(at.vecn==0&&pt.vecn>0){ rk+=2; continue; } /* scalar splat */
+                    bad=1; break;
+                }
+            }
+            if(!bad&&rk<best){ best=rk; f=cf; }
+        }
         if(f){
             if(f->is_template){
                 /* instantiate for the concrete type of the first T-typed argument */
@@ -1385,15 +1503,15 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn);
                     o+=snprintf(args+o,sizeof args-o,"%s %s",ll,sv); }
             }
-            if(f->ret.kind==T_VOID){ emit(c,"  call void @%s(%s)\n",f->name,args); *k=VK_I32; c->rvw=0; return "0"; }
+            if(f->ret.kind==T_VOID){ emit(c,"  call void @%s(%s)\n",f->link_name?f->link_name:f->name,args); *k=VK_I32; c->rvw=0; return "0"; }
             const char *r=newtmp(c);
             if(f->ret.kind==T_STRUCT){
                 char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",f->ret.struct_name);
-                emit(c,"  %s = call %s @%s(%s)\n",r,sn,f->name,args);
+                emit(c,"  %s = call %s @%s(%s)\n",r,sn,f->link_name?f->link_name:f->name,args);
                 *k=VK_I32; c->rvw=0; c->rstruct=f->ret.struct_name; return r;
             }
             char rll[32]; ll_of(rll,sizeof rll,f->ret.kind,f->ret.vecn);
-            emit(c,"  %s = call %s @%s(%s)\n",r,rll,f->name,args);
+            emit(c,"  %s = call %s @%s(%s)\n",r,rll,f->link_name?f->link_name:f->name,args);
             if(f->ret.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,r); r=w; }
             *k=scalar_vk(f->ret.kind); c->rvw=f->ret.vecn>1?f->ret.vecn:0; return r;
         }
@@ -1811,7 +1929,7 @@ static void fn_ptr_str(Function *fn,char *buf,size_t n){
     if(fn->is_kernel){ if(ex){ Param *cp=NULL; for(size_t i=0;i<fn->nparams;i++)if(fn->params[i].ty.kind==T_COORD){cp=&fn->params[i];break;} char cl[32]; coord_ll(&cp->ty,cl,sizeof cl);
             if(emitted++)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"%s, %s",cl,cl);
         } else { if(emitted++)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"i32"); } }
-    o+=snprintf(buf+o,n-o,")* @%s",fn->name);
+    o+=snprintf(buf+o,n-o,")* @%s",fn->link_name?fn->link_name:fn->name);
 }
 static const Program *g_curprog; /* set by emit_air; used by stage string helpers */
 /* AIR contract of the installed toolchain; set by binc_set_air() (main.c detection) */
@@ -1839,7 +1957,7 @@ static void stage_ptr_str(Function *fn,char *buf,size_t n){
         if(p->ty.is_ptr) o+=snprintf(buf+o,n-o,"%s addrspace(%d)*",pl,p->ty.as);
         else o+=snprintf(buf+o,n-o,"%s",pl);
     }
-    o+=snprintf(buf+o,n-o,")* @%s",fn->name);
+    o+=snprintf(buf+o,n-o,")* @%s",fn->link_name?fn->link_name:fn->name);
 }
 
 /* ---- structured AIR metadata builder ----
@@ -2029,13 +2147,13 @@ void emit_air(FILE *out, Program *prog){
          * implicit kernels retain the historical hidden scalar thread id. */
         g_last_line=fn->line; g_last_col=0;
         char sig[2048]; size_t so=0;
-        if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,"define void @%s(",fn->name);
+        if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,"define void @%s(",fn->link_name?fn->link_name:fn->name);
         else { char rl[64];
             if(fn->ret.kind==T_VOID) snprintf(rl,sizeof rl,"void");
             else if(fn->ret.kind==T_STRUCT){ if(fn->stage==ST_NONE) snprintf(rl,sizeof rl,"%%struct.%s",fn->ret.struct_name);
                 else { StructDef *sd=find_struct(prog,fn->ret.struct_name); stage_lit_type(rl,sizeof rl,sd); } }
             else ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
-            so+=snprintf(sig+so,sizeof sig-so,"define %s%s @%s(",fn->stage==ST_NONE?"internal ":"",rl,fn->name); }
+            so+=snprintf(sig+so,sizeof sig-so,"define %s%s @%s(",fn->stage==ST_NONE?"internal ":"",rl,fn->link_name?fn->link_name:fn->name); }
         int emitted=0;
         for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i];
             if(p->ty.array_n) continue; /* shared arrays are module globals, not ABI args */
@@ -2141,8 +2259,11 @@ void emit_air(FILE *out, Program *prog){
             if(tex_sample_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, i1, <2 x i32>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
         }
     }
-    /* declares for the builtins that were actually used */
+    /* declares for the builtins that were actually used (deduped by AIR name:
+     * aliases like min/fmin share air.fast_fmin.f32) */
     for(size_t b=0;b<sizeof builtins/sizeof *builtins;b++){ if(!builtin_used[b]) continue; Builtin *bi=&builtins[b];
+        int dup=0; for(size_t q=0;q<b;q++) if(builtin_used[q]&&!strcmp(builtins[q].ll,bi->ll)){ dup=1; break; }
+        if(dup) continue;
         if(bi->ret==T_VOID){ fprintf(out,"declare void @%s(i32, i32, i32) local_unnamed_addr #3\n",bi->ll); continue; }
         char da[64]; size_t o=0;
         for(int i=0;i<bi->nargs;i++) o+=snprintf(da+o,sizeof da-o,"%s%s",i?", ":"",scalar_ll(i==0?bi->a0:bi->a1));

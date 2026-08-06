@@ -325,5 +325,14 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile){
         g_prog.funcs[g_prog.nfuncs++]=fn;
     }
     if(!entry_found) die(0,"entry point '%s' not found in the shader",entry);
+    /* overloaded names get mangled link names (name$N); `name` stays the
+     * resolution key. The emission sites use link_name. */
+    for(size_t i=0;i<g_prog.nfuncs;i++){
+        int dups=0;
+        for(size_t j=0;j<g_prog.nfuncs;j++) if(i!=j&&!strcmp(g_prog.funcs[i].name,g_prog.funcs[j].name)){ dups++; break; }
+        if(!dups){ g_prog.funcs[i].link_name=NULL; continue; }
+        char ln[128]; snprintf(ln,sizeof ln,"%s$%zu",g_prog.funcs[i].name,i);
+        g_prog.funcs[i].link_name=strdup(ln);
+    }
     return g_prog;
 }

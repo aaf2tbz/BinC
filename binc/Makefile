@@ -88,6 +88,16 @@ diff-smoke:
 test-lit:
 	@bash ../tools/hlsl-diff/lit-conformance.sh
 
+# Phase-2+ differential suite: every kernel in tools/hlsl-diff/tests/,
+# ours vs reference (DXC -> SPIRV-Cross) on GPU
+DIFF_TESTS := $(wildcard ../tools/hlsl-diff/tests/*.hlsl)
+diff-suite:
+	@for t in $(DIFF_TESTS); do \
+		echo "== $$(basename $$t)"; \
+		bash ../tools/hlsl-diff/diff.sh -g 16 -w 16 $(abspath $$t) || exit 1; \
+	done
+	@echo "diff-suite: $$(echo $(DIFF_TESTS) | wc -w | tr -d ' ') tests OK"
+
 # GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
 ci: binc test-negative test-fuzz test-interp examples
 	@echo "CI OK"

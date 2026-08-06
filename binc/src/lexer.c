@@ -81,6 +81,13 @@ void lex(const char *src, Token **out, size_t *out_n, int first_line, int hlsl){
                 Token x=tk(TK_ICONST,ln,col); x.ival=(long)strtoul(num+2,NULL,16); free(num); PUSH(x); continue;
             }
             while(*l.p&&(isdigit((unsigned char)*l.p)||*l.p=='.')){ if(*l.p=='.')isint=0; l.p++; }
+            /* scientific notation: 1e-6, 2.5E+3 */
+            if(*l.p=='e'||*l.p=='E'){
+                const char *save=l.p; l.p++;
+                if(*l.p=='+'||*l.p=='-')l.p++;
+                if(isdigit((unsigned char)*l.p)){ isint=0; while(isdigit((unsigned char)*l.p))l.p++; }
+                else l.p=save;
+            }
             if(*l.p=='u'||*l.p=='U'){ isint=1; l.p++; }
             if(*l.p=='h'||*l.p=='H'){ isint=0; l.p++; }  /* HLSL half literal (kept as float) */
             else if(*l.p=='l'||*l.p=='L'){ isint=1; l.p++; if(*l.p=='l'||*l.p=='L')l.p++; }  /* HLSL int64 (kept as int32) */

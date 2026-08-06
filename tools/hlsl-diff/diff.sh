@@ -68,11 +68,11 @@ echo "reference: $REF_OUT"
 
 [ "$REFONLY" = 1 ] && { echo "OK (reference-only)"; exit 0; }
 
-# ---- ours side: BinC HLSL frontend (lands in Phase 1) ----
+# ---- ours side: BinC HLSL frontend ----
 if ! binc/binc -E "$ENTRY" -T "$PROFILE" "$SRC" -o "$WORK/ours.metallib" 2>"$WORK/ours.log"; then
-  echo "SKIP: BinC HLSL frontend not built yet (Phase 1) — reference toolchain validated"
+  echo "FAIL: ours compilation"
   echo "  ours.log: $(head -1 "$WORK/ours.log")"
-  exit 0
+  exit 1
 fi
 OURS_OUT=$(binc/harness "$WORK/ours.metallib" "$WORK/ours.spec" 2>/dev/null | grep "^buf$OUTIDX:")
 echo "ours:      $OURS_OUT"
