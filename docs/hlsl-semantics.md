@@ -9,20 +9,26 @@ Semantics are case-insensitive on both sides.
 | HLSL semantic        | BinC attr   | Metal location |
 |----------------------|-------------|----------------|
 | POSITION / POSITION0 | user        | 0              |
-| TEXCOORDn            | user        | n              |
+| TEXCOORDn            | user        | n + 1          |
 | COLORn               | user        | 8 + n          |
-| NORMAL               | user        | 30             |
+| NORMAL               | user        | 4              |
+| TANGENT              | user        | 5              |
+| BINORMAL             | user        | 6              |
 | SV_VertexID          | thread      | [[vertex_id]]  |
 | SV_InstanceID        | thread      | [[instance_id]]|
 
-COLORn is offset by 8 so TEXCOORD and COLOR registers do not collide in
+TEXCOORDn is offset by 1 (locn0 stays for POSITION); NORMAL/TANGENT/BINORMAL
+live at 4/5/6; COLORn is offset by 8 so the register classes do not collide in
 Metal's single attribute space (D3D9 keeps them in separate register files).
+Semantic-less params (`uniform bool bTexture` in D3D9 VS param lists) get
+locns 16+, out of the D3D9 table.
 
 ## Stage-out (vertex outputs / fragment inputs)
 
 | HLSL semantic        | BinC attr   | Metal                            |
 |----------------------|-------------|----------------------------------|
 | SV_Position          | position    | [[position]]                     |
+| POSITION (D3D9)      | position    | [[position]]                     |
 | TEXCOORDn / COLORn   | user        | [[user(locnN)]] (interpolated)   |
 | SV_RenderTargetArrayIndex | user  | [[render_target_array_index]]    |
 | no_semantic fields   | user        | sequential locn (0, 1, 2, ...)   |
@@ -33,11 +39,15 @@ Metal's single attribute space (D3D9 keeps them in separate register files).
 |-----------------|-------------|----------------|
 | SV_Target0      | color(0)    | [[color(0)]]   |
 | SV_TargetN      | color(N)    | [[color(N)]]   |
+| COLORn (D3D9)   | color(N)    | [[color(N)]]   |
+| TEXCOORDn (D3D9)| color(N)    | [[color(N)]]   |
 | SV_Depth        | depth       | [[depth(any)]] |
 
 The lowering synthesizes a `<fn>$out` struct for scalar/vector returns carrying
 SV_Target semantics and rewrites the function's `return e;` into a field
-assignment + struct return.
+assignment + struct return. D3D9 PS returns (`: COLOR0` or a struct with
+`COLORn`/`TEXCOORDn` fields) map to render targets; D3D9 VS returns map
+`POSITION` to `[[position]]`.
 
 ## Compute (SV_* thread IDs)
 
