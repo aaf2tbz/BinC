@@ -75,7 +75,7 @@ typedef struct { char *name; Type ty; Uniformity un; } Param;
 typedef enum { ST_NONE, ST_VERTEX, ST_FRAGMENT } Stage;
 typedef struct { char *name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; int line;
     int is_template; char *tvar; Type tvar_ty; } Function;
-typedef struct { char *name; Type ty; int attr; int attr_idx; } Field; /* attr: 0 none, 1 position, 2 flat, 3 color(N), 4 depth, 5 user(locnN) */
+typedef struct { char *name; Type ty; int attr; int attr_idx; char *sem; } Field; /* attr: 0 none, 1 position, 2 flat, 3 color(N), 4 depth, 5 user(locnN); sem: raw HLSL semantic */
 typedef struct { char *tag; Field *fields; size_t nfields; int is_template; char *tvar; } StructDef;
 typedef struct { char *name; Type ty; int is_int; long ival; double fval; int line; } ConstDef;
 typedef struct { StructDef *structs; size_t nstructs; Function *funcs; size_t nfuncs; ConstDef *consts; size_t nconsts; } Program;
@@ -95,12 +95,17 @@ typedef enum {
     TK_KW_BREAK, TK_KW_CONTINUE, TK_KW_SWITCH, TK_KW_CASE, TK_KW_DEFAULT,
     TK_KW_DEVICE, TK_KW_CONSTANT, TK_KW_THREADGROUP, TK_KW_THREAD, TK_KW_UNIFORM, TK_KW_VARYING,
     TK_KW_COORD, TK_KW_GRID_EXTENT, TK_KW_ATOMIC, TK_KW_VERTEX, TK_KW_FRAGMENT, TK_KW_VERTEX_ID,
-    TK_KW_MAT, TK_KW_TEXTURE2D, TK_KW_SAMPLER, TK_KW_TEMPLATE, TK_KW_TYPENAME
+    TK_KW_MAT, TK_KW_TEXTURE2D, TK_KW_SAMPLER, TK_KW_TEMPLATE, TK_KW_TYPENAME,
+    /* HLSL frontend keywords */
+    TK_KW_CBUFFER, TK_KW_TBUFFER, TK_KW_GROUPSHARED, TK_KW_IN, TK_KW_OUT, TK_KW_INOUT, TK_KW_STATIC,
+    TK_KW_REGISTER, TK_KW_PACKOFFSET, TK_KW_RWTEXTURE2D,
+    TK_KW_STRUCTURED, TK_KW_RWSTRUCTURED, TK_KW_BYTEADDR, TK_KW_RWBYTEADDR,
+    TK_KW_LINEAR, TK_KW_NOPERSPECTIVE, TK_KW_CENTROID, TK_KW_SAMPLE
 } TokKind;
 typedef struct { TokKind kind; char *text; double fval; long ival; int line, col; } Token;
 typedef struct { Token *toks; size_t n; size_t i; } TokStream;
 
-void lex(const char *src, Token **out, size_t *out_n, int first_line);
+void lex(const char *src, Token **out, size_t *out_n, int first_line, int hlsl);
 _Noreturn void die(int line, const char *fmt, ...);
 int had_errors(void);
 /* position of the expression/statement being lowered, for located die(0, ...) errors */
@@ -108,6 +113,28 @@ extern int g_last_line, g_last_col, g_err_count;
 /* when set, die() reports and longjmps to the recovery point instead of exiting */
 extern jmp_buf *g_recover;
 Program parse_program(TokStream *ts);
+/* ---- shared parser API (also used by the HLSL frontend) ---- */
+Token *peek(TokStream *ts); Token *advance(TokStream *ts);
+int accept(TokStream *ts, TokKind k); void expect(TokStream *ts, TokKind k, const char *w);
+Expr *E(ExprKind k, int line, int col);
+Type parse_type(TokStream *ts); int starts_scalar_type(TokStream *ts);
+Expr *parse_expr(TokStream *ts); Stmt parse_stmt(TokStream *ts);
+Block parse_braced(TokStream *ts); Block parse_block_or_stmt(TokStream *ts);
+void blk_push(Block *b, Stmt s); int is_stag(const char *s);
+void parse_struct(TokStream *ts, Program *prog); void parse_function(TokStream *ts, Program *prog);
+extern const char *g_tvar; extern Program *g_parse_prog;
+/* ---- HLSL frontend (Phases 1-7) ---- */
+typedef struct { char *name; char *sem; Type ty; int inq; int reg; } HLSLParam; /* inq: 0 plain, 1 in, 2 out, 3 inout */
+typedef struct { char *name; HLSLParam *params; size_t np; Type ret; char *ret_sem;
+    Block body; int line; int numtx, numty, numtz; int has_numthreads; int is_export; } HLSLFunc;
+typedef struct { char *tag; Field *fields; size_t nfields; } HLSLStruct;
+typedef struct { char *name; Field *fields; size_t nfields; int reg; } HLCBuf;
+typedef struct { char *name; Type ty; int is_groupshared; int is_const; int is_int;
+    long ival; double fval; int has_init; int line; } HLSLGlobal;
+typedef struct { HLSLFunc *funcs; size_t nfuncs; HLSLStruct *structs; size_t nstructs;
+    HLCBuf *cbufs; size_t ncbufs; HLSLGlobal *globals; size_t nglobals; } HLSLProg;
+HLSLProg hlsl_parse(TokStream *ts);
+Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile);
 void emit_air(FILE *out, Program *prog);
 void binc_set_air(const char *triple, int sdk, int minor);
 void interp_run(const Program *prog);

@@ -194,29 +194,43 @@ int main(int argc, char **argv) {
     }
     if (!infile) { fputs(usage_text, stderr); return 2; }
 
-    /* ---- HLSL frontend routing (Phase 1 of the HLSL-to-Metal plan) ----
-     * `binc -E <entry> -T <profile> file.hlsl` mirrors DXC's interface.
-     * The frontend itself lands in Phase 1; the CLI surface is defined here. */
+    /* ---- HLSL frontend routing (Phases 1-7 of the HLSL-to-Metal plan) ----
+     * `binc -E <entry> -T <profile> file.hlsl` mirrors DXC's interface. */
     const char *entry = hlsl_entry ? hlsl_entry : "main";
     const char *profile = hlsl_profile;
     const char *ext = strrchr(infile, '.');
     int is_hlsl = ext && (!strcmp(ext, ".hlsl") || !strcmp(ext, ".fx") || !strcmp(ext, ".fxh"));
-    if (is_hlsl) {
-        if (profile) {
-            /* validate the target profile: vs_5_0 / ps_5_0 / cs_5_0 / *_3_0 ... */
-            int maj = -1, min = -1; char stage[4] = {0};
-            if (sscanf(profile, "%3[vspscs]_%d_%d", stage, &maj, &min) != 3 ||
-                (strcmp(stage, "vs") && strcmp(stage, "ps") && strcmp(stage, "cs")))
-                { fprintf(stderr, "binc: invalid target profile '%s' (expected vs/ps/cs_N_M)\n", profile); return 2; }
-            fprintf(stderr, "binc: HLSL frontend lands in Phase 1 (-E %s -T %s); see .hermes/plans/2026-08-05_163031-hlsl-to-metal.md\n", entry, profile);
-            return 3;
-        }
-        fprintf(stderr, "binc: %s looks like an HLSL shader — compile with -T <profile> (e.g. -T vs_5_0); frontend lands in Phase 1\n", infile);
+    if (is_hlsl && !profile) {
+        fprintf(stderr, "binc: %s looks like an HLSL shader — compile with -T <profile> (e.g. -T vs_5_0)\n", infile);
         return 3;
     }
+    if (is_hlsl) {
+        /* validate the target profile: vs_5_0 / ps_5_0 / cs_5_0 / *_3_0 ... */
+        int maj = -1, min = -1; char stage[4] = {0};
+        if (sscanf(profile, "%3[vspscs]_%d_%d", stage, &maj, &min) != 3 ||
+            (strcmp(stage, "vs") && strcmp(stage, "ps") && strcmp(stage, "cs")))
+            { fprintf(stderr, "binc: invalid target profile '%s' (expected vs/ps/cs_N_M)\n", profile); return 2; }
+    }
 
-    /* preprocess: optional prelude, then the user file, splicing includes */
+    /* preprocess: for HLSL, raw file with #-directives stripped (no prelude);
+     * otherwise the optional prelude, then the user file, splicing includes */
     char *src; int first_line = 1;
+    if (is_hlsl) {
+        char *main_spl=splice_file(infile);
+        if(!main_spl) return 1;
+        /* crude Phase-1 # handling: drop #include/#define/#pragma/#line lines */
+        Buf all={0};
+        char *ls=main_spl;
+        while(ls&&*ls){
+            char *nl=strchr(ls,'\n');
+            size_t len=nl?(size_t)(nl-ls):strlen(ls);
+            if(len&&ls[0]=='#'){ /* skip the directive line */ }
+            else { bput(&all,ls,len); bput(&all,"\n",1); }
+            ls = nl?nl+1:NULL;
+        }
+        free(main_spl);
+        src=all.p;
+    } else {
     {
         Buf all={0};
         if(!no_prelude){
@@ -233,11 +247,19 @@ int main(int argc, char **argv) {
         bput(&all,main_spl,strlen(main_spl)); free(main_spl);
         src=all.p;
     }
+    }
 
     Token *toks; size_t ntoks;
-    lex(src, &toks, &ntoks, first_line);
+    lex(src, &toks, &ntoks, first_line, is_hlsl);
     TokStream ts = { toks, ntoks, 0 };
-    Program prog = parse_program(&ts);
+    Program prog;
+    if (is_hlsl) {
+        HLSLProg hprog = hlsl_parse(&ts);
+        if (had_errors()) return 1;
+        if (syntax_only) return 0; /* HLSL parse acceptance (lit conformance gate) */
+        prog = hlsl_build(&hprog, entry, profile);
+    }
+    else prog = parse_program(&ts);
     if (had_errors()) return 1;
     if (interpret) { interp_run(&prog); return 0; }
     if (syntax_only) {

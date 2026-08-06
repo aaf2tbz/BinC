@@ -1,7 +1,7 @@
 # BinC bootstrap compiler (in C). Self-hosting target.
 CC      ?= clang
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
-SRC     := src/main.c src/lexer.c src/parser.c src/codegen.c src/interp.c
+SRC     := src/main.c src/lexer.c src/parser.c src/codegen.c src/interp.c src/hlsl_parser.c src/hlsl_lower.c
 DEV     ?= /Users/averyfelts/Downloads/Xcode-beta.app/Contents/Developer
 
 binc: $(SRC) src/binc.h
@@ -80,9 +80,13 @@ corpus-scan:
 corpus-parse:
 	@bash ../tools/hlsl-diff/corpus-parse.sh
 
-# differential smoke: reference side (DXC -> SPIRV-Cross -> metal -> harness)
+# differential smoke: ours (BinC HLSL frontend) vs reference (DXC -> SPIRV-Cross)
 diff-smoke:
-	@bash ../tools/hlsl-diff/diff.sh --reference-only -g 4 -w 4 $(abspath ../tools/hlsl-diff/tests/hello_hlsl/main.hlsl)
+	@bash ../tools/hlsl-diff/diff.sh -g 4 -w 4 $(abspath ../tools/hlsl-diff/tests/hello_hlsl/main.hlsl)
+
+# Phase-1 conformance: how much of DXC's lit corpus the HLSL frontend parses
+test-lit:
+	@bash ../tools/hlsl-diff/lit-conformance.sh
 
 # GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
 ci: binc test-negative test-fuzz test-interp examples

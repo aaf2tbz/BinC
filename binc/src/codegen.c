@@ -1260,6 +1260,17 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 die(0,"mat%d expects 1 scalar, %d scalars, or %d column vectors",mn,mn,mn);
             }
         }
+        /* scalar constructor/cast: float(x) / int(x) / uint(x) / bool(x) */
+        if(!strcmp(e->name,"float")||!strcmp(e->name,"half")||!strcmp(e->name,"int")||
+           !strcmp(e->name,"uint")||!strcmp(e->name,"bool")){
+            if(e->nargs!=1) die(0,"%s expects 1 argument",e->name);
+            ValKind ak; const char *v=gen_rval(c,e->args[0],&ak);
+            if(c->rvw) die(0,"vector argument in %s constructor",e->name);
+            TypeKind tk = !strcmp(e->name,"float")?T_FLOAT:!strcmp(e->name,"half")?T_HALF:
+                          !strcmp(e->name,"int")?T_INT32:!strcmp(e->name,"uint")?T_UINT32:T_BOOL;
+            *k=scalar_vk(tk); c->rvw=0;
+            return coerce(c,v,ak,scalar_vk(tk));
+        }
         /* vector constructor? float4(...)/int3(...)/uint2(...): 1 scalar (splat),
          * N scalars, or mixed scalars/vectors totalling N components (float3(v2, s), ...) */
         TypeKind cb; int cn;
@@ -1816,8 +1827,8 @@ static void stage_ptr_str(Function *fn,char *buf,size_t n){
     else { char rl[32]; ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn); o+=snprintf(buf+o,n-o,"%s (",rl); }
     int emitted=0;
     for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i];
-        if(p->ty.kind==T_STRUCT && !p->ty.is_ptr && fn->stage==ST_FRAGMENT){
-            /* stage-in struct: unpacked as separate args */
+        if(p->ty.kind==T_STRUCT && !p->ty.is_ptr && fn->stage!=ST_NONE){
+            /* stage-in struct (vertex or fragment): unpacked as separate args */
             StructDef *sd=find_struct(g_curprog,p->ty.struct_name);
             for(size_t f=0;f<sd->nfields;f++){ char fl[64]; type_ll(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.struct_name,sd->fields[f].ty.vecn);
                 if(emitted++)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"%s",fl); }
@@ -1924,14 +1935,20 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
     meta_emit(m,"!%d = !{%s, !%d, !%d}\n",sm->node,fp,sm->outs,sm->args);
     int argi=0;
     for(size_t a=0;a<fn->nparams;a++){ Param *p=&fn->params[a]; char tn[64]; ptn_of(tn,sizeof tn,p->ty.kind,p->ty.vecn,p->ty.matn);
-        if(fn->stage==ST_FRAGMENT && p->ty.kind==T_STRUCT && !p->ty.is_ptr){
+        if(fn->stage!=ST_NONE && p->ty.kind==T_STRUCT && !p->ty.is_ptr){
             /* stage-in struct: one metadata node per unpacked field */
             StructDef *sd=find_struct(prog,p->ty.struct_name);
             int locn=0;
             for(size_t f=0;f<sd->nfields;f++){
                 Field *fd=&sd->fields[f]; char ftn[64]; ptn_of(ftn,sizeof ftn,fd->ty.kind,fd->ty.vecn,0);
-                if(fd->attr==1) meta_emit(m,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,ftn,fd->name);
-                else { int ln=fd->attr==5?fd->attr_idx:locn; locn++;
+                if(fn->stage==ST_VERTEX){
+                    int ln=fd->attr==5?fd->attr_idx:locn; locn++;
+                    /* probed from real metal output: air.vertex_input +
+                     * air.location_index, then a trailing i32 1 (buffer flag) */
+                    meta_emit(m,"!%d = !{i32 %d, !\"air.vertex_input\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,ln,ftn,fd->name);
+                } else if(fd->attr==1){
+                    meta_emit(m,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,ftn,fd->name);
+                } else { int ln=fd->attr==5?fd->attr_idx:locn; locn++;
                     meta_emit(m,"!%d = !{i32 %d, !\"air.fragment_input\", !\"user(locn%d)\", !\"air.center\", !\"%s\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,ln,fd->attr==2?"air.flat":"air.perspective",ftn,fd->name); }
                 argi++;
             }
@@ -2022,8 +2039,9 @@ void emit_air(FILE *out, Program *prog){
         int emitted=0;
         for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i];
             if(p->ty.array_n) continue; /* shared arrays are module globals, not ABI args */
-            if(fn->stage==ST_FRAGMENT && p->ty.kind==T_STRUCT && !p->ty.is_ptr){
-                /* stage-in struct: unpacked as separate arguments */
+            if(fn->stage!=ST_NONE && p->ty.kind==T_STRUCT && !p->ty.is_ptr){
+                /* stage-in struct (vertex attributes or fragment interpolants):
+                 * unpacked as separate arguments */
                 StructDef *sd=find_struct(prog,p->ty.struct_name);
                 for(size_t f=0;f<sd->nfields;f++){ char fl[64]; type_ll(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.struct_name,sd->fields[f].ty.vecn);
                     if(emitted++)so+=snprintf(sig+so,sizeof sig-so,", ");
@@ -2073,8 +2091,8 @@ void emit_air(FILE *out, Program *prog){
             c.locs=realloc(c.locs,(c.nlocs+1)*sizeof(Loc));
             c.locs[c.nlocs++]=(Loc){p->name,slot,T_STRUCT,p->ty.struct_name,0,0,0,0,0};
         }
-        /* fragment stage-in struct: unpack the argument registers into a struct local */
-        if(fn->stage==ST_FRAGMENT) for(size_t pi2=0;pi2<fn->nparams;pi2++){ Param *p=&fn->params[pi2];
+        /* stage-in struct (vertex or fragment): unpack the argument registers into a struct local */
+        if(fn->stage!=ST_NONE) for(size_t pi2=0;pi2<fn->nparams;pi2++){ Param *p=&fn->params[pi2];
             if(p->ty.kind!=T_STRUCT||p->ty.is_ptr) continue;
             StructDef *sd=find_struct(prog,p->ty.struct_name);
             int sal; struct_layout(sd,&sal);
@@ -2152,7 +2170,7 @@ void emit_air(FILE *out, Program *prog){
         Function *sf=&prog->funcs[fi];
         size_t nin=0;
         for(size_t a=0;a<sf->nparams;a++){
-            if(sf->stage==ST_FRAGMENT && sf->params[a].ty.kind==T_STRUCT && !sf->params[a].ty.is_ptr){
+            if(sf->stage!=ST_NONE && sf->params[a].ty.kind==T_STRUCT && !sf->params[a].ty.is_ptr){
                 StructDef *sd=find_struct(prog,sf->params[a].ty.struct_name);
                 nin += sd?sd->nfields:1;
             } else nin++;

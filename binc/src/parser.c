@@ -3,15 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-static Token *peek(TokStream *ts){ return &ts->toks[ts->i]; }
-static Token *advance(TokStream *ts){ return &ts->toks[ts->i++]; }
-static int accept(TokStream *ts,TokKind k){ if(peek(ts)->kind==k){ts->i++;return 1;} return 0; }
-static void expect(TokStream *ts,TokKind k,const char *w){ if(peek(ts)->kind!=k) die(peek(ts)->line,"expected %s",w); ts->i++; }
+Token *peek(TokStream *ts){ return &ts->toks[ts->i]; }
+Token *advance(TokStream *ts){ return &ts->toks[ts->i++]; }
+int accept(TokStream *ts,TokKind k){ if(peek(ts)->kind==k){ts->i++;return 1;} return 0; }
+void expect(TokStream *ts,TokKind k,const char *w){ if(peek(ts)->kind!=k) die(peek(ts)->line,"expected %s",w); ts->i++; }
 
 /* active template type parameter name while parsing a template function signature+body */
-static const char *g_tvar = NULL;
+const char *g_tvar = NULL;
 /* Program under construction, so parse_type can instantiate template structs */
-static Program *g_parse_prog = NULL;
+Program *g_parse_prog = NULL;
 /* known struct tags, for disambiguating `Dog d;` local declarations */
 static char **stags=NULL; static size_t nstags=0;
 
@@ -44,7 +44,7 @@ static StructDef *inst_struct(Program *prog, StructDef *tpl, const Type *concret
     return &prog->structs[prog->nstructs-1];
 }
 
-static Type parse_type(TokStream *ts){
+Type parse_type(TokStream *ts){
     Type t={0};
     if(accept(ts,TK_KW_DEVICE))t.as=AS_DEVICE; else if(accept(ts,TK_KW_CONSTANT))t.as=AS_CONSTANT;
     else if(accept(ts,TK_KW_THREADGROUP))t.as=AS_THREADGROUP; else if(accept(ts,TK_KW_THREAD))t.as=AS_THREAD;
@@ -64,20 +64,97 @@ static Type parse_type(TokStream *ts){
     else if(accept(ts,TK_KW_INT)){t.kind=T_INT32;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_UINT)){t.kind=T_UINT32;t.vecn=(int)pt->ival;}
     else if(accept(ts,TK_KW_BOOL))t.kind=T_BOOL; else if(accept(ts,TK_KW_VOID))t.kind=T_VOID;
     else if(accept(ts,TK_KW_MAT)){ t.kind=T_FLOAT; t.matn=(int)pt->ival; }
+    else if(peek(ts)->kind==TK_IDENT){
+        /* HLSL template-style type spellings + template-arg struct fallback */
+        const char *txt=peek(ts)->text;
+        int has_lt = (ts->i+1<ts->n) && ts->toks[ts->i+1].kind==TK_LT;
+        if(has_lt&&!strcmp(txt,"matrix")){
+            advance(ts); expect(ts,TK_LT,"<");
+            parse_type(ts); /* element type ignored */
+            expect(ts,TK_COMMA,","); Token *rn=peek(ts); expect(ts,TK_ICONST,"matrix rows");
+            expect(ts,TK_COMMA,","); Token *cn=peek(ts); expect(ts,TK_ICONST,"matrix cols");
+            expect(ts,TK_GT,">");
+            t.kind=T_FLOAT; t.matn=(int)(rn->ival>cn->ival?rn->ival:cn->ival); return t;
+        }
+        if(has_lt&&!strcmp(txt,"vector")){
+            advance(ts); expect(ts,TK_LT,"<");
+            Type et=parse_type(ts);
+            expect(ts,TK_COMMA,","); Token *vn=peek(ts); expect(ts,TK_ICONST,"vector size");
+            expect(ts,TK_GT,">");
+            et.vecn=(int)vn->ival; if(et.vecn<2)et.vecn=1; return et;
+        }
+        if(has_lt&&(!strcmp(txt,"ConstantBuffer")||!strcmp(txt,"TextureBuffer"))){
+            advance(ts); expect(ts,TK_LT,"<");
+            Type et=parse_type(ts);
+            expect(ts,TK_GT,">");
+            et.is_ptr=1; et.as=AS_CONSTANT; et.array_n=0; et.array_m=0; return et;
+        }
+        if(has_lt){
+            /* template struct instantiation (Pair<float>) or a generic
+             * templated type (InputPatch<T,N>, OutputPatch<T,N>, ...) */
+            StructDef *tpl=NULL;
+            if(g_parse_prog) for(size_t i=0;i<g_parse_prog->nstructs;i++)
+                if(!strcmp(g_parse_prog->structs[i].tag,txt)&&g_parse_prog->structs[i].is_template){ tpl=&g_parse_prog->structs[i]; break; }
+            if(tpl){
+                advance(ts); expect(ts,TK_LT,"<");
+                Type inner=parse_type(ts); expect(ts,TK_GT,">");
+                if(inner.kind==T_TVAR||inner.tvar) die(peek(ts)->line,"template struct instantiation with a type variable is not supported");
+                if(inner.is_ptr) die(peek(ts)->line,"template struct instantiation with a pointer type is not supported");
+                StructDef *sd=inst_struct(g_parse_prog,tpl,&inner);
+                t.kind=T_STRUCT; t.struct_name=strdup(sd->tag);
+                return t;
+            }
+            /* generic templated type: consume <...> and treat as a struct */
+            advance(ts); expect(ts,TK_LT,"<");
+            parse_type(ts);
+            while(accept(ts,TK_COMMA)){ if(peek(ts)->kind==TK_ICONST) advance(ts); else parse_type(ts); }
+            expect(ts,TK_GT,">");
+            t.kind=T_STRUCT; t.struct_name=strdup(txt); t.is_ptr=0; return t;
+        }
+        if(!strcmp(txt,"min16float")||!strcmp(txt,"min10float")){ advance(ts); t.kind=T_FLOAT; return t; }
+        if(!strcmp(txt,"matrix")){ advance(ts); t.kind=T_FLOAT; t.matn=4; return t; } /* bare matrix == float4x4 */
+        if(!strcmp(txt,"vector")){ advance(ts); t.kind=T_FLOAT; t.vecn=4; return t; } /* bare vector == float4 */
+        if(!strcmp(txt,"min16int")||!strcmp(txt,"min16uint")){ advance(ts); t.kind=!strcmp(txt,"min16int")?T_INT32:T_UINT32; return t; }
+        if(!strcmp(txt,"int64_t")||!strcmp(txt,"int16_t")||!strcmp(txt,"int8_t")){ advance(ts); t.kind=T_INT32; return t; }
+        if(!strcmp(txt,"uint64_t")||!strcmp(txt,"uint16_t")||!strcmp(txt,"uint8_t")){ advance(ts); t.kind=T_UINT32; return t; }
+        if(!strcmp(txt,"dword")){ advance(ts); t.kind=T_UINT32; return t; } /* HLSL dword == uint32 */
+        if(!strcmp(txt,"word")){ advance(ts); t.kind=T_UINT32; return t; }
+        if(!strcmp(txt,"double")){ advance(ts); t.kind=T_FLOAT; return t; } /* double -> float for now */
+        if(!strncmp(txt,"half",4)&&txt[4]>='1'&&txt[4]<='4'&&txt[5]=='\0'){
+            advance(ts); t.kind=T_HALF; t.vecn=txt[4]-'0'; return t; }
+        /* struct types */
+        if(g_tvar && !strcmp(txt,g_tvar)){ advance(ts); t.kind=T_TVAR; t.tvar=strdup(g_tvar); }
+        else {
+            char *tag=strdup(advance(ts)->text);
+            if(accept(ts,TK_LT)){
+                /* template struct instantiation: Pair<float> */
+                Type inner=parse_type(ts); expect(ts,TK_GT,">");
+                StructDef *tpl=NULL;
+                if(g_parse_prog) for(size_t i=0;i<g_parse_prog->nstructs;i++)
+                    if(!strcmp(g_parse_prog->structs[i].tag,tag)&&g_parse_prog->structs[i].is_template){ tpl=&g_parse_prog->structs[i]; break; }
+                if(!tpl) die(peek(ts)->line,"%s is not a template struct",tag);
+                if(inner.kind==T_TVAR||inner.tvar) die(peek(ts)->line,"template struct instantiation with a type variable is not supported");
+                if(inner.is_ptr) die(peek(ts)->line,"template struct instantiation with a pointer type is not supported");
+                StructDef *sd=inst_struct(g_parse_prog,tpl,&inner);
+                t.kind=T_STRUCT; t.struct_name=strdup(sd->tag);
+            } else { t.kind=T_STRUCT; t.struct_name=tag; }
+        }
+    }
     else if(accept(ts,TK_KW_TEXTURE2D)){
         t.kind=T_TEXTURE;
-        expect(ts,TK_LT,"<");
-        Token *et=peek(ts);
-        if(!(et->kind==TK_IDENT||et->kind==TK_KW_FLOAT||et->kind==TK_KW_HALF||et->kind==TK_KW_INT||et->kind==TK_KW_UINT))
-            die(et->line,"expected a texture element type");
-        advance(ts);
-        if(et->kind==TK_KW_FLOAT) t.tex_elt=T_FLOAT;
-        else if(et->kind==TK_KW_HALF) t.tex_elt=T_HALF;
-        else if(et->kind==TK_KW_INT) t.tex_elt=T_INT32;
-        else if(et->kind==TK_KW_UINT) t.tex_elt=T_UINT32;
-        else if(et->kind==TK_IDENT&&!strcmp(et->text,"float")) t.tex_elt=T_FLOAT;
-        else die(et->line,"unsupported texture element type %s (use float, half, int, uint)",et->kind==TK_IDENT?et->text:"?");
-        expect(ts,TK_GT,">");
+        if(accept(ts,TK_LT)){
+            Token *et=peek(ts);
+            if(!(et->kind==TK_IDENT||et->kind==TK_KW_FLOAT||et->kind==TK_KW_HALF||et->kind==TK_KW_INT||et->kind==TK_KW_UINT))
+                die(et->line,"expected a texture element type");
+            advance(ts);
+            if(et->kind==TK_KW_FLOAT) t.tex_elt=T_FLOAT;
+            else if(et->kind==TK_KW_HALF) t.tex_elt=T_HALF;
+            else if(et->kind==TK_KW_INT) t.tex_elt=T_INT32;
+            else if(et->kind==TK_KW_UINT) t.tex_elt=T_UINT32;
+            else if(et->kind==TK_IDENT&&!strcmp(et->text,"float")) t.tex_elt=T_FLOAT;
+            else die(et->line,"unsupported texture element type %s (use float, half, int, uint)",et->kind==TK_IDENT?et->text:"?");
+            expect(ts,TK_GT,">");
+        } else t.tex_elt=T_FLOAT; /* bare Texture2D defaults to float */
     }
     else if(accept(ts,TK_KW_SAMPLER)) t.kind=T_SAMPLER;
     else if(peek(ts)->kind==TK_IDENT){
@@ -102,15 +179,27 @@ static Type parse_type(TokStream *ts){
     if(accept(ts,TK_STAR)){ t.is_ptr=1; if(t.as==0)t.as=AS_DEVICE; }
     return t;
 }
-static int starts_scalar_type(TokStream *ts){ TokKind k=peek(ts)->kind;
+int starts_scalar_type(TokStream *ts){ TokKind k=peek(ts)->kind;
+    if(k==TK_IDENT){ /* HLSL template-style type spellings */
+        const char *txt=peek(ts)->text;
+        if((!strcmp(txt,"matrix")||!strcmp(txt,"vector")||!strcmp(txt,"ConstantBuffer")||!strcmp(txt,"TextureBuffer"))&&
+           (ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_LT) return 1;
+        if(!strcmp(txt,"min16float")||!strcmp(txt,"min10float")||!strcmp(txt,"min16int")||!strcmp(txt,"min16uint")) return 1;
+        if(!strcmp(txt,"int64_t")||!strcmp(txt,"int16_t")||!strcmp(txt,"int8_t")) return 1;
+        if(!strcmp(txt,"uint64_t")||!strcmp(txt,"uint16_t")||!strcmp(txt,"uint8_t")||
+           !strcmp(txt,"dword")||!strcmp(txt,"word")||!strcmp(txt,"double")||
+           !strncmp(txt,"half",4)) return 1;
+    }
     return k==TK_KW_FLOAT||k==TK_KW_HALF||k==TK_KW_INT||k==TK_KW_UINT||k==TK_KW_BOOL||
-           k==TK_KW_COORD||k==TK_KW_GRID_EXTENT||k==TK_KW_MAT; }
+           k==TK_KW_COORD||k==TK_KW_GRID_EXTENT||k==TK_KW_MAT||
+           k==TK_KW_TEXTURE2D||k==TK_KW_RWTEXTURE2D||k==TK_KW_SAMPLER||
+           k==TK_KW_STRUCTURED||k==TK_KW_RWSTRUCTURED||k==TK_KW_BYTEADDR||k==TK_KW_RWBYTEADDR; }
 
-static Expr *E(ExprKind k,int line,int col){ Expr *e=calloc(1,sizeof(Expr)); e->kind=k; e->line=line; e->col=col; return e; }
-static Expr *parse_expr(TokStream *ts);
+Expr *E(ExprKind k,int line,int col){ Expr *e=calloc(1,sizeof(Expr)); e->kind=k; e->line=line; e->col=col; return e; }
+Expr *parse_expr(TokStream *ts);
 
 /* known struct tags, for disambiguating `Dog d;` local declarations */
-static int is_stag(const char *s){ for(size_t i=0;i<nstags;i++) if(!strcmp(stags[i],s)) return 1; return 0; }
+int is_stag(const char *s){ for(size_t i=0;i<nstags;i++) if(!strcmp(stags[i],s)) return 1; return 0; }
 
 static Expr *parse_primary(TokStream *ts){
     Token *t=peek(ts);
@@ -127,6 +216,11 @@ static Expr *parse_primary(TokStream *ts){
         advance(ts); Expr *e=E(E_IDENT,t->line,t->col); char nm[16];
         snprintf(nm,sizeof nm,"%s%d",t->kind==TK_KW_FLOAT?"float":t->kind==TK_KW_INT?"int":"uint",(int)t->ival);
         e->name=strdup(nm); return e; }
+    if(t->kind==TK_KW_FLOAT||t->kind==TK_KW_HALF||t->kind==TK_KW_INT||t->kind==TK_KW_UINT||t->kind==TK_KW_BOOL){
+        /* scalar constructor/cast: float(x) — synthesize the type name as the callee */
+        advance(ts); Expr *e=E(E_IDENT,t->line,t->col);
+        e->name=strdup(t->kind==TK_KW_FLOAT?"float":t->kind==TK_KW_HALF?"half":t->kind==TK_KW_INT?"int":t->kind==TK_KW_UINT?"uint":"bool");
+        return e; }
     if(t->kind==TK_IDENT){ advance(ts); Expr *e=E(E_IDENT,t->line,t->col); e->name=strdup(t->text); return e; }
     if(accept(ts,TK_LPAREN)){ Expr *e=parse_expr(ts); expect(ts,TK_RPAREN,")"); return e; }
     die(t->line,"expected an expression");
@@ -147,8 +241,11 @@ static Expr *parse_postfix(TokStream *ts){
             n->args=args; n->nargs=na; e=n; }
         else if(ot->kind==TK_LBRACK){ advance(ts); Expr *i=parse_expr(ts); expect(ts,TK_RBRACK,"]");
             Expr *n=E(E_INDEX,ot->line,ot->col); n->operand=e; n->rhs=i; e=n; }
-        else if(ot->kind==TK_DOT){ advance(ts); Token *f=peek(ts); expect(ts,TK_IDENT,"field after .");
-            Expr *n=E(E_FIELD,ot->line,ot->col); n->operand=e; n->field=strdup(f->text); e=n; }
+        else if(ot->kind==TK_DOT){ advance(ts); Token *f=peek(ts);
+            if(f->kind==TK_KW_SAMPLE){ /* Texture2DMS.sample[] property */ advance(ts);
+                Expr *n=E(E_FIELD,ot->line,ot->col); n->operand=e; n->field=strdup("sample"); e=n; }
+            else { expect(ts,TK_IDENT,"field after .");
+                Expr *n=E(E_FIELD,ot->line,ot->col); n->operand=e; n->field=strdup(f->text); e=n; } }
         else if(ot->kind==TK_ARROW){ advance(ts); Token *f=peek(ts); expect(ts,TK_IDENT,"field after ->");
             Expr *d=E(E_DEREF,ot->line,ot->col); d->operand=e; /* p->f == (*p).f == p[id].f */
             Expr *n=E(E_FIELD,ot->line,ot->col); n->operand=d; n->field=strdup(f->text); e=n; }
@@ -162,6 +259,7 @@ static Expr *parse_postfix(TokStream *ts){
 static int cast_type_start(TokStream *ts){
     TokKind k=(ts->i+1<ts->n)?ts->toks[ts->i+1].kind:TK_EOF;
     if(k==TK_IDENT&&g_tvar&&!strcmp(ts->toks[ts->i+1].text,g_tvar)) return 1; /* (T) in a template body */
+    if(k==TK_IDENT&&is_stag(ts->toks[ts->i+1].text)) return 1; /* (S) struct cast */
     return k==TK_KW_FLOAT||k==TK_KW_HALF||k==TK_KW_INT||k==TK_KW_UINT||k==TK_KW_BOOL;
 }
 static Expr *parse_unary(TokStream *ts){
@@ -180,9 +278,13 @@ static Expr *parse_unary(TokStream *ts){
         ts->i=save; /* not a cast: fall through to the parenthesized expression */
     }
     if(ut->kind==TK_MINUS){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_NEG,ut->line,ut->col); e->operand=o; return e; }
+    if(ut->kind==TK_PLUS){ advance(ts); return parse_unary(ts); } /* unary plus */
     if(ut->kind==TK_BANG){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_NOT,ut->line,ut->col); e->operand=o; return e; }
     if(ut->kind==TK_TILDE){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_COMPL,ut->line,ut->col); e->operand=o; return e; }
     if(ut->kind==TK_STAR){ advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_DEREF,ut->line,ut->col); e->operand=o; return e; }
+    if(ut->kind==TK_INC||ut->kind==TK_DEC){ /* prefix ++x / --x */
+        advance(ts); Expr *o=parse_unary(ts); Expr *e=E(E_INCDEC,ut->line,ut->col);
+        e->operand=o; e->bval = ut->kind==TK_DEC; return e; }
     return parse_postfix(ts);
 }
 static Expr *parse_mul(TokStream *ts){
@@ -259,24 +361,33 @@ static Expr *parse_assign(TokStream *ts){
     else return l;
     advance(ts); Expr *r=parse_assign(ts); Expr *e=E(E_ASSIGN,ot->line,ot->col); e->aop=op; e->operand=l; e->rhs=r; return e;
 }
-static Expr *parse_expr(TokStream *ts){ return parse_assign(ts); }
+Expr *parse_expr(TokStream *ts){ return parse_assign(ts); }
 
-static Stmt parse_stmt(TokStream *ts);
-static void blk_push(Block *b, Stmt s){
+Stmt parse_stmt(TokStream *ts);
+void blk_push(Block *b, Stmt s){
     b->stmts=realloc(b->stmts,(b->n+1)*sizeof(Stmt)); b->stmts[b->n++]=s;
 }
-static Block parse_braced(TokStream *ts){ /* assumes '{' consumed */
+Block parse_braced(TokStream *ts){ /* assumes '{' consumed */
     Stmt *s=NULL; size_t n=0,cap=0;
     while(peek(ts)->kind!=TK_RBRACE&&peek(ts)->kind!=TK_EOF){
         if(n==cap){cap=cap?cap*2:8;s=realloc(s,cap*sizeof(Stmt));} s[n++]=parse_stmt(ts); }
     expect(ts,TK_RBRACE,"}");
     return (Block){s,n};
 }
-static Block parse_block_or_stmt(TokStream *ts){
+Block parse_block_or_stmt(TokStream *ts){
     if(accept(ts,TK_LBRACE)) return parse_braced(ts);
     Stmt *s=malloc(sizeof(Stmt)); s[0]=parse_stmt(ts); return (Block){s,1};
 }
-static Stmt parse_stmt(TokStream *ts){
+Stmt parse_stmt(TokStream *ts){
+    /* HLSL statement attributes: [unroll] / [branch] / [flatten] ... */
+    while(peek(ts)->kind==TK_LBRACK && (ts->i+1<ts->n) && ts->toks[ts->i+1].kind==TK_IDENT){
+        int depth=0;
+        do{ Token *t=peek(ts);
+            if(t->kind==TK_LBRACK)depth++;
+            else if(t->kind==TK_RBRACK)depth--;
+            if(t->kind==TK_EOF) die(t->line,"unterminated attribute");
+            advance(ts); } while(depth>0);
+    }
     Token *kt=peek(ts);
     if(kt->kind==TK_KW_RETURN){ advance(ts); Stmt st={0}; st.kind=S_RETURN; st.line=kt->line; st.col=kt->col;
         if(peek(ts)->kind!=TK_SEMI) st.expr=parse_expr(ts);
@@ -350,6 +461,20 @@ static Stmt parse_stmt(TokStream *ts){
         expect(ts,TK_SEMI,";");
         Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init; return st;
     }
+    /* HLSL struct methods: `uint getData() { ... }` inside a struct body */
+    if(kt->kind==TK_IDENT && is_stag(kt->text) && (ts->i+1<ts->n) && ts->toks[ts->i+1].kind==TK_LPAREN){
+        /* method declaration/definition on a struct local: skip the body */
+        while(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_LBRACE&&peek(ts)->kind!=TK_EOF) advance(ts);
+        if(peek(ts)->kind==TK_LBRACE){
+            int depth=0;
+            do{ Token *t=peek(ts);
+                if(t->kind==TK_LBRACE)depth++;
+                else if(t->kind==TK_RBRACE)depth--;
+                if(t->kind==TK_EOF) die(t->line,"unterminated method body");
+                advance(ts); } while(depth>0);
+        } else if(peek(ts)->kind==TK_SEMI) advance(ts);
+        Stmt st={0}; st.kind=S_EXPR; st.line=kt->line; st.col=kt->col; return st;
+    }
     /* optional `const` qualifier on a local declaration */
     if(peek(ts)->kind==TK_KW_CONSTANT && ts->i+1<ts->n){
         TokKind nk=ts->toks[ts->i+1].kind;
@@ -360,14 +485,27 @@ static Stmt parse_stmt(TokStream *ts){
         Type ty=parse_type(ts); Token *nm=peek(ts); expect(ts,TK_IDENT,"name");
         if(accept(ts,TK_LBRACK)){ Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
             if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); } }
-        Expr *init=NULL; if(accept(ts,TK_EQ))init=parse_expr(ts); expect(ts,TK_SEMI,";");
+        Expr *init=NULL; if(accept(ts,TK_EQ)){
+            if(peek(ts)->kind==TK_LBRACE){ /* HLSL brace initializer: `float4 x = {1,2,3,4};` — skip */
+                int depth=0;
+                do{ Token *t=peek(ts);
+                    if(t->kind==TK_LBRACE)depth++;
+                    else if(t->kind==TK_RBRACE)depth--;
+                    if(t->kind==TK_EOF) die(t->line,"unterminated initializer");
+                    advance(ts); } while(depth>0);
+            } else init=parse_expr(ts);
+        }
+        if(peek(ts)->kind==TK_COLON){ /* HLSL local with : register(...) / : packoffset(...) */
+            while(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_EOF) advance(ts);
+        }
+        expect(ts,TK_SEMI,";");
         Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init;
         st.is_const = (kt->kind==TK_KW_CONSTANT); return st;
     }
     Expr *e=parse_expr(ts); expect(ts,TK_SEMI,";"); Stmt st={0}; st.kind=S_EXPR; st.line=e->line; st.col=e->col; st.expr=e; return st;
 }
 
-static void parse_function(TokStream *ts, Program *prog){
+void parse_function(TokStream *ts, Program *prog){
     Stage stage=ST_NONE; if(accept(ts,TK_KW_VERTEX))stage=ST_VERTEX; else if(accept(ts,TK_KW_FRAGMENT))stage=ST_FRAGMENT;
     int is_kernel=accept(ts,TK_KW_KERNEL);
     /* template<typename T> — single type parameter, active for the signature and body */
@@ -415,7 +553,7 @@ static void parse_function(TokStream *ts, Program *prog){
     prog->funcs=realloc(prog->funcs,(prog->nfuncs+1)*sizeof(Function));
     prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),params,np,body,is_kernel,stage,ret,nm->line,tvar!=NULL,tvar?strdup(tvar):NULL,{0}};
 }
-static void parse_struct(TokStream *ts, Program *prog){
+void parse_struct(TokStream *ts, Program *prog){
     /* template<typename T> struct ... */
     const char *tvar=NULL;
     if(accept(ts,TK_KW_TEMPLATE)){
@@ -428,8 +566,30 @@ static void parse_struct(TokStream *ts, Program *prog){
     Token *tag=peek(ts); expect(ts,TK_IDENT,"struct tag"); expect(ts,TK_LBRACE,"{");
     Field *f=NULL; size_t n=0,cap=0;
     while(peek(ts)->kind!=TK_RBRACE){
+        /* HLSL struct method? `type name ( ... ) { ... }` — skip the body */
+        if((ts->i+2<ts->n)&&ts->toks[ts->i+1].kind==TK_IDENT&&ts->toks[ts->i+2].kind==TK_LPAREN){
+            advance(ts); advance(ts); /* type + method name */
+            int mdepth=0;
+            do{ Token *t=peek(ts);
+                if(t->kind==TK_LPAREN)mdepth++;
+                else if(t->kind==TK_RPAREN)mdepth--;
+                if(t->kind==TK_EOF) die(t->line,"unterminated method signature");
+                advance(ts); } while(mdepth>0);
+            if(peek(ts)->kind==TK_LBRACE){
+                int bdepth=0;
+                do{ Token *t=peek(ts);
+                    if(t->kind==TK_LBRACE)bdepth++;
+                    else if(t->kind==TK_RBRACE)bdepth--;
+                    if(t->kind==TK_EOF) die(t->line,"unterminated method body");
+                    advance(ts); } while(bdepth>0);
+            } else if(peek(ts)->kind==TK_SEMI) advance(ts);
+            continue;
+        }
         Type ty=parse_type(ts); if(ty.is_ptr) die(peek(ts)->line,"pointer fields unsupported");
         do{ Token *fn=peek(ts); expect(ts,TK_IDENT,"field name");
+            /* optional HLSL-style semantic: `float4 pos : SV_POSITION;` */
+            char *fsem=NULL;
+            if(accept(ts,TK_COLON)){ Token *st=peek(ts); expect(ts,TK_IDENT,"semantic after :"); fsem=strdup(st->text); }
             /* optional [[...]] attribute: position / flat / color(N) / depth(any) / user(locnN) */
             int attr=0, attr_idx=0;
             if(accept(ts,TK_DBL_LBRACK)){
@@ -449,7 +609,7 @@ static void parse_struct(TokStream *ts, Program *prog){
             }
             if(accept(ts,TK_LBRACK)){ Token *dn=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_n=(int)dn->ival; expect(ts,TK_RBRACK,"]");
                 if(accept(ts,TK_LBRACK)){ Token *dm=peek(ts); expect(ts,TK_ICONST,"array extent"); ty.array_m=(int)dm->ival; expect(ts,TK_RBRACK,"]"); } }
-            if(n==cap){cap=cap?cap*2:8;f=realloc(f,cap*sizeof(Field));} f[n++]=(Field){strdup(fn->text),ty,attr,attr_idx};
+            if(n==cap){cap=cap?cap*2:8;f=realloc(f,cap*sizeof(Field));} f[n++]=(Field){strdup(fn->text),ty,attr,attr_idx,fsem};
         } while(accept(ts,TK_COMMA)); expect(ts,TK_SEMI,";");
     }
     expect(ts,TK_RBRACE,"}"); expect(ts,TK_SEMI,";");

@@ -24,7 +24,7 @@ static char *dup_n(const char *s, size_t n){ char *p=malloc(n+1); memcpy(p,s,n);
 typedef struct { const char *p; int line; const char *line_start; } L;
 static Token tk(TokKind k,int ln,int col){ Token t={k,NULL,0,0,ln,col}; return t; }
 
-void lex(const char *src, Token **out, size_t *out_n, int first_line){
+void lex(const char *src, Token **out, size_t *out_n, int first_line, int hlsl){
     L l={src,first_line,src}; Token *t=NULL; size_t n=0,cap=0;
     #define PUSH(x) do{ if(n==cap){cap=cap?cap*2:64;t=realloc(t,cap*sizeof(Token));} t[n++]=(x);}while(0)
     for(;;){
@@ -67,6 +67,11 @@ void lex(const char *src, Token **out, size_t *out_n, int first_line){
                    else if(*l.p=='='){l.p++;PUSH(tk(TK_PIPEEQ,ln,col));} else {PUSH(tk(TK_PIPE,ln,col));} continue;}
         if(c=='^'){l.p++; if(*l.p=='='){l.p++;PUSH(tk(TK_CARETEQ,ln,col));}else{PUSH(tk(TK_CARET,ln,col));} continue;}
         if(c=='~'){l.p++;PUSH(tk(TK_TILDE,ln,col));continue;}
+        if(c=='"'){ /* HLSL string literal (attributes, messages): lex as an identifier */
+            const char *s=l.p; l.p++;
+            while(*l.p&&*l.p!='"'){ if(*l.p=='\\')l.p++; l.p++; }
+            if(*l.p)l.p++;
+            Token x=tk(TK_IDENT,ln,col); x.text=dup_n(s,(size_t)(l.p-s)); PUSH(x); continue; }
         if(isdigit((unsigned char)c)){
             const char *s=l.p; int isint=1;
             if(l.p[0]=='0'&&(l.p[1]=='x'||l.p[1]=='X')){
@@ -77,6 +82,8 @@ void lex(const char *src, Token **out, size_t *out_n, int first_line){
             }
             while(*l.p&&(isdigit((unsigned char)*l.p)||*l.p=='.')){ if(*l.p=='.')isint=0; l.p++; }
             if(*l.p=='u'||*l.p=='U'){ isint=1; l.p++; }
+            if(*l.p=='h'||*l.p=='H'){ isint=0; l.p++; }  /* HLSL half literal (kept as float) */
+            else if(*l.p=='l'||*l.p=='L'){ isint=1; l.p++; if(*l.p=='l'||*l.p=='L')l.p++; }  /* HLSL int64 (kept as int32) */
             char *num=dup_n(s,(size_t)(l.p-s));
             if(*l.p=='f'||*l.p=='F'){ isint=0; l.p++; }
             Token x=tk(isint?TK_ICONST:TK_FCONST,ln,col);
@@ -91,6 +98,15 @@ void lex(const char *src, Token **out, size_t *out_n, int first_line){
             VW("float2",TK_KW_FLOAT,2) VW("float3",TK_KW_FLOAT,3) VW("float4",TK_KW_FLOAT,4)
             VW("int2",TK_KW_INT,2) VW("int3",TK_KW_INT,3) VW("int4",TK_KW_INT,4)
             VW("uint2",TK_KW_UINT,2) VW("uint3",TK_KW_UINT,3) VW("uint4",TK_KW_UINT,4)
+            VW("float2x2",TK_KW_MAT,2) VW("float2x3",TK_KW_MAT,2) VW("float2x4",TK_KW_MAT,2)
+            VW("float3x2",TK_KW_MAT,3) VW("float3x3",TK_KW_MAT,3) VW("float3x4",TK_KW_MAT,3)
+            VW("float4x2",TK_KW_MAT,4) VW("float4x3",TK_KW_MAT,4) VW("float4x4",TK_KW_MAT,4)
+            VW("float1x1",TK_KW_MAT,1) VW("float1x2",TK_KW_MAT,1) VW("float1x3",TK_KW_MAT,1) VW("float1x4",TK_KW_MAT,1)
+            VW("float2x1",TK_KW_MAT,2) VW("float3x1",TK_KW_MAT,3) VW("float4x1",TK_KW_MAT,4)
+            VW("int2x2",TK_KW_MAT,2) VW("int3x3",TK_KW_MAT,3) VW("int4x4",TK_KW_MAT,4)
+            VW("uint2x2",TK_KW_MAT,2) VW("uint3x3",TK_KW_MAT,3) VW("uint4x4",TK_KW_MAT,4)
+            VW("bool2x2",TK_KW_MAT,2) VW("bool3x3",TK_KW_MAT,3) VW("bool4x4",TK_KW_MAT,4)
+            VW("bool1x1",TK_KW_MAT,1) VW("bool2x1",TK_KW_MAT,2) VW("bool3x1",TK_KW_MAT,3) VW("bool4x1",TK_KW_MAT,4)
             KW("struct",TK_KW_STRUCT) KW("kernel",TK_KW_KERNEL) KW("void",TK_KW_VOID)
             KW("float",TK_KW_FLOAT) KW("half",TK_KW_HALF) KW("int",TK_KW_INT) KW("uint",TK_KW_UINT) KW("bool",TK_KW_BOOL)
             KW("return",TK_KW_RETURN) KW("if",TK_KW_IF) KW("else",TK_KW_ELSE) KW("for",TK_KW_FOR) KW("while",TK_KW_WHILE) KW("do",TK_KW_DO)
@@ -105,6 +121,19 @@ void lex(const char *src, Token **out, size_t *out_n, int first_line){
             KW("vertex",TK_KW_VERTEX) KW("fragment",TK_KW_FRAGMENT) KW("vertex_id",TK_KW_VERTEX_ID)
             KW("texture2d",TK_KW_TEXTURE2D) KW("sampler",TK_KW_SAMPLER)
             KW("template",TK_KW_TEMPLATE) KW("typename",TK_KW_TYPENAME)
+            /* HLSL-only surface (mode-gated: `out`/`in` are legal BinC identifiers) */
+            #define HLSLKW(w,k) if(hlsl&&strlen(w)==len&&!memcmp(w,s,len)){PUSH(tk(k,ln,col));goto done;}
+            HLSLKW("cbuffer",TK_KW_CBUFFER) HLSLKW("tbuffer",TK_KW_TBUFFER) HLSLKW("groupshared",TK_KW_GROUPSHARED)
+            HLSLKW("in",TK_KW_IN) HLSLKW("out",TK_KW_OUT) HLSLKW("inout",TK_KW_INOUT) HLSLKW("static",TK_KW_STATIC)
+            HLSLKW("register",TK_KW_REGISTER) HLSLKW("packoffset",TK_KW_PACKOFFSET)
+            HLSLKW("linear",TK_KW_LINEAR) HLSLKW("noperspective",TK_KW_NOPERSPECTIVE)
+            HLSLKW("centroid",TK_KW_CENTROID) HLSLKW("sample",TK_KW_SAMPLE)
+            HLSLKW("Texture2D",TK_KW_TEXTURE2D) HLSLKW("RWTexture2D",TK_KW_RWTEXTURE2D)
+            HLSLKW("SamplerState",TK_KW_SAMPLER) HLSLKW("SamplerComparisonState",TK_KW_SAMPLER)
+            HLSLKW("StructuredBuffer",TK_KW_STRUCTURED) HLSLKW("RWStructuredBuffer",TK_KW_RWSTRUCTURED)
+            HLSLKW("ByteAddressBuffer",TK_KW_BYTEADDR) HLSLKW("RWByteAddressBuffer",TK_KW_RWBYTEADDR)
+            HLSLKW("Buffer",TK_KW_STRUCTURED) HLSLKW("RWBuffer",TK_KW_RWSTRUCTURED)
+            #undef HLSLKW
             #undef KW
             Token x=tk(TK_IDENT,ln,col); x.text=dup_n(s,len); PUSH(x);
             done:; continue;

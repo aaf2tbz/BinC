@@ -53,15 +53,15 @@ DEVELOPER_DIR="$DEV" xcrun metal -c "$WORK/ref.metal" -o "$WORK/ref.air" 2>"$WOR
 DEVELOPER_DIR="$DEV" xcrun metallib "$WORK/ref.air" -o "$WORK/ref.metallib" || exit 1
 
 # spirv-cross renames entry points that collide with Metal's reserved 'main'
-# (main -> main0); the harness needs the real kernel name from the MSL.
+# (main -> main0); each side needs its own kernel name in the spec.
 KERN=$(grep -oE "kernel void [A-Za-z_][A-Za-z0-9_]*" "$WORK/ref.metal" | head -1 | awk '{print $3}')
 [ -n "${KERN:-}" ] || { echo "FAIL: no kernel found in generated MSL"; exit 1; }
 
-SPEC="$WORK/run.spec"
-printf "kernel %s\ngrid %d\nout %d %d\ndump %d\n" "$KERN" "$GRID" "$OUTIDX" "$WORDS" "$OUTIDX" > "$SPEC"
+printf "kernel %s\ngrid %d\nout %d %d\ndump %d\n" "$KERN" "$GRID" "$OUTIDX" "$WORDS" "$OUTIDX" > "$WORK/ref.spec"
+printf "kernel %s\ngrid %d\nout %d %d\ndump %d\n" "$ENTRY" "$GRID" "$OUTIDX" "$WORDS" "$OUTIDX" > "$WORK/ours.spec"
 
 run_ref() {
-  binc/harness "$WORK/ref.metallib" "$SPEC" 2>/dev/null | grep "^buf$OUTIDX:" || { echo "FAIL: reference dispatch"; exit 1; }
+  binc/harness "$WORK/ref.metallib" "$WORK/ref.spec" 2>/dev/null | grep "^buf$OUTIDX:" || { echo "FAIL: reference dispatch"; exit 1; }
 }
 REF_OUT=$(run_ref)
 echo "reference: $REF_OUT"
@@ -74,7 +74,7 @@ if ! binc/binc -E "$ENTRY" -T "$PROFILE" "$SRC" -o "$WORK/ours.metallib" 2>"$WOR
   echo "  ours.log: $(head -1 "$WORK/ours.log")"
   exit 0
 fi
-OURS_OUT=$(binc/harness "$WORK/ours.metallib" "$SPEC" 2>/dev/null | grep "^buf$OUTIDX:")
+OURS_OUT=$(binc/harness "$WORK/ours.metallib" "$WORK/ours.spec" 2>/dev/null | grep "^buf$OUTIDX:")
 echo "ours:      $OURS_OUT"
 
 python3 - "$REF_OUT" "$OURS_OUT" <<'EOF'
