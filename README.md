@@ -35,6 +35,28 @@ The project now includes a complete playable 3-D Pong example. The game simulati
 
 ---
 
+## HLSL frontend (DirectX → Metal)
+
+BinC also compiles **Direct3D shader sources** — HLSL for D3D10/11/12 and the
+D3D9 sm3 + `.fx` effects subset — directly to `.metallib` through the same
+AIR backend: `binc -E <entry> -T <profile> file.hlsl -o out.metallib`
+(mirrors DXC's interface; `vs_*`/`ps_*`/`cs_*` profiles, `--stage-all` for
+VS+PS pairs).
+
+- **Verified at scale**: differential GPU tests against DXC → SPIR-V →
+  spirv-cross (`make diff-suite`, `make render-diff`, `make diff-nbody`), the
+  corpus sweep with coverage table (`make diff-sweep`), and three pinned
+  D3D9 golden renders with hand-verified pixels (`make golden-d3d9`).
+- **Surface**: semantics (D3D9 + SV_*), cbuffers + D3D9 `$uniforms` packing,
+  row-major matrices with D3D9 `mul()` semantics, `half` fp16 storage,
+  texture/sampler/`textureCUBE`, `inverse()`, struct stage-in/out, 2-pass
+  `.fx` techniques.
+- **Docs**: `docs/hlsl-to-metal.md` (mapping guide + unsupported list),
+  `docs/hlsl-semantics.md` (semantic table), `examples/hlsl/` (gallery with
+  diff status).
+
+---
+
 ## Quick start
 
 Requirements:

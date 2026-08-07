@@ -9,6 +9,12 @@ acts as Metal**: syntax and semantics follow C where the GPU permits, and follow
 Metal Shading Language (MSL) where the hardware demands. There is no runtime, no
 heap, no recursion, and no dynamic dispatch.
 
+**Second frontend:** the same compiler also accepts Direct3D shader sources
+(HLSL sm4+ and the D3D9 sm3 + `.fx` effects subset) via `binc -E <entry> -T
+<profile> file.hlsl`, lowered onto the same AIR backend. That surface is
+specified separately in `docs/hlsl-to-metal.md` and `docs/hlsl-semantics.md`;
+this document specifies only the `.binc` language.
+
 ---
 
 ## 1. Lexical structure
