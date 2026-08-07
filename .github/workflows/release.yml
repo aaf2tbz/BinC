@@ -4,6 +4,9 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: write   # create the GitHub release + upload the package
+
 jobs:
   release:
     runs-on: macos-latest
