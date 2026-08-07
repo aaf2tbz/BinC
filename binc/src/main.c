@@ -35,7 +35,7 @@ static const char *tool(const char *env, const char *def){
  * at most once per compilation; include cycles are located errors. */
 static char *inc_dirs[32]; static size_t ninc_dirs;
 static void add_inc_dir(const char *d){ if(ninc_dirs<32) inc_dirs[ninc_dirs++]=strdup(d); }
-static char *inc_stack[32]; static int ninc_stack;
+static char *inc_stack[256]; static int ninc_stack;
 static char *once_files[64]; static size_t n_once;
 
 static char *dirname_of(const char *path){
@@ -46,8 +46,14 @@ static char *dirname_of(const char *path){
     return d;
 }
 static char *resolve_include(const char *curdir, const char *want){
-    if(curdir){ char p[1024]; snprintf(p,sizeof p,"%s/%s",curdir,want);
+    if(curdir && want[0]!='/' && want[0]!='\\'){ char p[1024]; snprintf(p,sizeof p,"%s/%s",curdir,want);
         if(!access(p,R_OK)) return strdup(p); }
+    /* UE virtual include paths: `/Engine/Public/X.ush` lives at
+     * <inc_dir>/Engine/Shaders/Public/X.ush (ShaderCompilerWorker mapping) */
+    if(!strncmp(want,"/Engine/",8)){
+        for(size_t i=0;i<ninc_dirs;i++){ char p[1024]; snprintf(p,sizeof p,"%s/Engine/Shaders/%s",inc_dirs[i],want+8);
+            if(!access(p,R_OK)) return strdup(p); }
+    }
     for(size_t i=0;i<ninc_dirs;i++){ char p[1024]; snprintf(p,sizeof p,"%s/%s",inc_dirs[i],want);
         if(!access(p,R_OK)) return strdup(p); }
     if(!access(want,R_OK)) return strdup(want);
@@ -67,6 +73,7 @@ static char *splice_file(const char *path){
     FILE *f=fopen(path,"rb"); if(!f){ fprintf(stderr,"binc: error: cannot open include file %s\n",path); return NULL; }
     fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
     char *text=malloc(n+1); if(n)fread(text,1,n,f); text[n]='\0'; fclose(f);
+    if(n>=3&&(unsigned char)text[0]==0xEF&&(unsigned char)text[1]==0xBB&&(unsigned char)text[2]==0xBF) memmove(text,text+3,n-2); /* UTF-8 BOM */
     char *dir=dirname_of(path);
     Buf out={0}; long line=0;
     /* iterate lines preserving blanks (strtok_r would collapse them and shift
@@ -104,6 +111,301 @@ static char *splice_file(const char *path){
 }
 
 /* prelude auto-include: search argv[0] dir, -I dirs, then cwd */
+/* ---- minimal preprocessor conditionals (UE .usf/.ush use #if heavily) ---- */
+typedef struct { char *name; char *val; char params[8][64]; int nparams; } Def;
+
+/* substitute one logical line with the LIVE defs table: object-like (whole
+ * word) + function-like NAME(args) expansion with `##` pasting. Repeats
+ * until stable (an expansion may introduce another macro's name). This runs
+ * during pp_process so `#define/#undef` scoping is position-correct
+ * (`#define FDFType FDFVector3 ... #undef FDFType` instantiations). */
+static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
+    Buf out={0}; const char *q=line;
+    int changed=1;
+    for(int round=0; changed&&round<16; round++){
+        Buf nxt={0};
+        for(size_t d=0;d<ndefs;d++){
+            size_t nl2=strlen(defs[d].name);
+            if(!nl2) continue;
+            Buf o2={0}; const char *s=nxt.p?nxt.p:q;
+            if(defs[d].nparams>0){
+                while(s&&*s){
+                    const char *hit=strstr(s,defs[d].name);
+                    if(!hit){ bput(&o2,s,strlen(s)); break; }
+                    int lb=hit==s||!(isalnum((unsigned char)hit[-1])||hit[-1]=='_');
+                    if(!lb||hit[nl2]!='('){ bput(&o2,s,(size_t)(hit-s+nl2)); s=hit+nl2; continue; }
+                    const char *p=hit+nl2+1; int dep=1; const char *argstart=p; int found=0;
+                    char argbuf[8][128]; int nargs=0;
+                    for(; *p; p++){
+                        if(*p=='(') dep++;
+                        else if(*p==')'){
+                            dep--;
+                            if(dep==0){ if(nargs<8){ size_t al=(size_t)(p-argstart); if(al>=128) al=127; memcpy(argbuf[nargs],argstart,al); argbuf[nargs][al]=0; nargs++; } found=1; break; }
+                        }
+                        else if(*p==','&&dep==1){ if(nargs<8){ size_t al=(size_t)(p-argstart); if(al>=128) al=127; memcpy(argbuf[nargs],argstart,al); argbuf[nargs][al]=0; nargs++; } argstart=p+1; }
+                    }
+                    if(!found){ bput(&o2,s,(size_t)(p-s)); break; }
+                    if(nargs!=defs[d].nparams){ bput(&o2,s,(size_t)(p+1-s)); s=p+1; continue; }
+                    char body[16384]; snprintf(body,sizeof body,"%s",defs[d].val);
+                    for(int ai=0;ai<nargs;ai++){
+                        size_t pl=strlen(defs[d].params[ai]);
+                        Buf b2={0}; char *bq=body;
+                        while(bq&&*bq){
+                            char *bh=strstr(bq,defs[d].params[ai]);
+                            if(!bh){ bput(&b2,bq,strlen(bq)); break; }
+                            int bl=bh==bq||!(isalnum((unsigned char)bh[-1])||bh[-1]=='_');
+                            int br=!(isalnum((unsigned char)bh[pl])||bh[pl]=='_');
+                            if(bh[pl]=='#'&&bh[pl+1]=='#'){
+                                bput(&b2,bq,(size_t)(bh-bq)); bput(&b2,argbuf[ai],strlen(argbuf[ai]));
+                                bq=bh+pl+2;
+                            } else if(pl>=2&&(bh-bq)>=2&&bh[-2]=='#'&&bh[-1]=='#'&&bl){
+                                if(b2.n>=2) b2.n-=2; b2.p[b2.n]=0; bput(&b2,argbuf[ai],strlen(argbuf[ai]));
+                                bq=bh+pl;
+                            } else if(bl&&br){
+                                bput(&b2,bq,(size_t)(bh-bq)); bput(&b2,argbuf[ai],strlen(argbuf[ai])); bq=bh+pl;
+                            } else { bput(&b2,bq,(size_t)(bh-bq+pl)); bq=bh+pl; }
+                        }
+                        snprintf(body,sizeof body,"%s",b2.p?b2.p:""); free(b2.p);
+                    }
+                    bput(&o2,s,(size_t)(hit-s)); bput(&o2,body,strlen(body));
+                    s=p+1;
+                }
+            } else {
+                while(s&&*s){
+                    const char *hit=strstr(s,defs[d].name);
+                    if(!hit){ bput(&o2,s,strlen(s)); break; }
+                    int lb=hit==s||!(isalnum((unsigned char)hit[-1])||hit[-1]=='_');
+                    int rb=!(isalnum((unsigned char)hit[nl2])||hit[nl2]=='_');
+                    if(lb&&rb){ bput(&o2,s,(size_t)(hit-s)); bput(&o2,defs[d].val,strlen(defs[d].val)); s=hit+nl2; }
+                    else { bput(&o2,s,(size_t)(hit-s+nl2)); s=hit+nl2; }
+                }
+            }
+            free(nxt.p); nxt=o2;
+        }
+        changed = !(nxt.p&&!strcmp(nxt.p,q));
+        if(!nxt.p){ free(out.p); return NULL; }
+        free(out.p); out=nxt; q=out.p;
+    }
+    return out.p;
+}
+
+static const Def *pp_find(const Def *defs, size_t nd, const char *name){
+    for(size_t i=0;i<nd;i++) if(!strcmp(defs[i].name,name)) return &defs[i];
+    return NULL;
+}
+static long pp_val(const Def *defs, size_t nd, const char *nm){
+    const Def *d=pp_find(defs,nd,nm);
+    if(!d) return 0;
+    return strtol(d->val,NULL,0);
+}
+/* recursive-descent over: ident | number | defined(ident)|defined ident | ! - ( ) && || == != < > <= >= + - * / % */
+typedef struct { const char *p; const Def *defs; size_t nd; } PP;
+static long pp_or(PP *pp);
+static int pp_ident(PP *pp, char *out, size_t n){
+    const char *s=pp->p; size_t i=0;
+    while((*s>='a'&&*s<='z')||(*s>='A'&&*s<='Z')||*s=='_'||(i&&*s>='0'&&*s<='9')){
+        if(i+1<n) out[i]=*s; i++; s++;
+    }
+    if(!i) return 0; out[i<n?i:n-1]='\0'; pp->p=s; return 1;
+}
+static long pp_unary(PP *pp){
+    while(*pp->p==' '||*pp->p=='\t') pp->p++;
+    if(*pp->p=='!'){ pp->p++; return !pp_unary(pp); }
+    if(*pp->p=='-'){ pp->p++; return -pp_unary(pp); }
+    if(*pp->p=='('){ pp->p++; long v=pp_or(pp); while(*pp->p==' '||*pp->p=='\t')pp->p++; if(*pp->p==')')pp->p++; return v; }
+    if(!strncmp(pp->p,"defined",7)){
+        const char *s=pp->p+7; while(*s==' '||*s=='\t')s++;
+        int paren=0; if(*s=='('){ paren=1; s++; while(*s==' '||*s=='\t')s++; }
+        char nm[128]; const char *save=pp->p; pp->p=s;
+        int ok=pp_ident(pp,nm,sizeof nm);
+        pp->p=save;
+        if(ok){ long v=pp_find(pp->defs,pp->nd,nm)?1:0;
+            pp->p=s+strlen(nm); if(paren){ while(*pp->p==' '||*pp->p=='\t')pp->p++; if(*pp->p==')')pp->p++; }
+            return v; }
+        return 0;
+    }
+    if(*pp->p>='0'&&*pp->p<='9'){ char *e; long v=strtol(pp->p,&e,0); pp->p=e; return v; }
+    char nm[128];
+    if(pp_ident(pp,nm,sizeof nm)) return pp_val(pp->defs,pp->nd,nm);
+    return 0;
+}
+static long pp_mul(PP *pp){ long v=pp_unary(pp);
+    for(;;){ while(*pp->p==' '||*pp->p=='\t')pp->p++;
+        char op=*pp->p; if(op!='*'&&op!='/'&&op!='%') return v; pp->p++;
+        long r=pp_unary(pp); v = op=='*'?v*r : op=='/'?(r?v/r:0) : (r?v%r:0); } }
+static long pp_add(PP *pp){ long v=pp_mul(pp);
+    for(;;){ while(*pp->p==' '||*pp->p=='\t')pp->p++;
+        char op=*pp->p; if(op!='+'&&op!='-') return v; pp->p++;
+        long r=pp_mul(pp); v = op=='+'?v+r:v-r; } }
+static long pp_rel(PP *pp){ long v=pp_add(pp);
+    for(;;){ while(*pp->p==' '||*pp->p=='\t')pp->p++;
+        if(!strncmp(pp->p,"<=",2)){ pp->p+=2; v = v<=pp_add(pp); }
+        else if(!strncmp(pp->p,">=",2)){ pp->p+=2; v = v>=pp_add(pp); }
+        else if(*pp->p=='<'){ pp->p++; v = v<pp_add(pp); }
+        else if(*pp->p=='>'){ pp->p++; v = v>pp_add(pp); }
+        else return v; } }
+static long pp_eq(PP *pp){ long v=pp_rel(pp);
+    for(;;){ while(*pp->p==' '||*pp->p=='\t')pp->p++;
+        if(!strncmp(pp->p,"==",2)){ pp->p+=2; v = v==pp_rel(pp); }
+        else if(!strncmp(pp->p,"!=",2)){ pp->p+=2; v = v!=pp_rel(pp); }
+        else return v; } }
+static long pp_and(PP *pp){ long v=pp_eq(pp);
+    for(;;){ while(*pp->p==' '||*pp->p=='\t')pp->p++;
+        if(!strncmp(pp->p,"&&",2)){ pp->p+=2; long r=pp_eq(pp); v = v&&r; } else return v; } }
+static long pp_or(PP *pp){ long v=pp_and(pp);
+    for(;;){ while(*pp->p==' '||*pp->p=='\t')pp->p++;
+        if(!strncmp(pp->p,"||",2)){ pp->p+=2; long r=pp_and(pp); v = v||r; } else return v; } }
+static long pp_eval(const char *expr, const Def *defs, size_t nd){
+    PP pp={expr,defs,nd}; return pp_or(&pp);
+}
+
+/* recursive HLSL preprocessor: #if/#ifdef/#ifndef/#elif/#else/#endif (evaluated
+ * over the collected defines), #define (active branches only), #include
+ * (active branches only — spliced recursively with once/cycle guards),
+ * #pragma once (include-once marker), everything else dropped. Non-# lines
+ * pass through when the enclosing branch is active. UE .usf/.ush rely on all
+ * of this (6.7k #if blocks, 4.3k includes, no include semicolons). */
+static void pp_process(const char *path, const char *src, Buf *out, Def *defs, size_t *ndefs){
+    char *dir=dirname_of(path);
+    int pp_stack[64]; int pp_depth=0; /* stack of (active<<1|taken) */
+    const char *ls=src;
+    while(ls&&*ls){
+        /* logical line: join backslash line-continuations (UE multiline macros) */
+        char linebuf[16384]; size_t llen=0;
+        const char *cur=ls;
+        for(;;){
+            const char *nl2=strchr(cur,'\n');
+            size_t l2=nl2?(size_t)(nl2-cur):strlen(cur);
+            /* line-continuation: trailing `\` (or `\` before CRLF) */
+            int has_cont = l2>0&&nl2&&(cur[l2-1]=='\\'||(l2>1&&cur[l2-2]=='\\'&&cur[l2-1]=='\r'));
+            size_t take = has_cont ? l2-(cur[l2-1]=='\\'?1:2) : l2;
+            if(llen+take<sizeof linebuf-1){ memcpy(linebuf+llen,cur,take); llen+=take; }
+            if(!has_cont){ ls = nl2?nl2+1:NULL; break; }
+            cur = nl2+1;
+        }
+        linebuf[llen]='\0';
+        const char *L=linebuf; size_t len=llen;
+        const char *first=L; while(*first==' '||*first=='\t'||*first=='\r') first++;
+        int is_hash = len&&*first=='#';
+        int active = pp_depth==0 || ((pp_stack[pp_depth-1]>>1)&1);
+        if(is_hash){
+            char *ln=strndup(first,len-(size_t)(first-ls));
+            char *p=ln+1; while(*p==' '||*p=='\t') p++;
+            /* UE writes `#if\tX`, `#define\tX` (tab after the directive word).
+             * Normalize the whole directive line so the word matchers below
+             * see `#if X` / `#define X` (values may contain tabs — harmless). */
+            for(char *t=p;*t;t++) if(*t=='\t') *t=' ';
+            if(!strncmp(p,"ifdef ",6)||!strncmp(p,"ifndef ",7)){
+                int neg = p[2]=='n'; /* "ifndef": i-f-n-d-e-f — the 'n' is at p[2] */
+                char *nm=p+(neg?7:6); while(*nm==' '||*nm=='\t')nm++;
+                char *e=nm; while(*e&&*e!=' '&&*e!='\t'&&*e!='\r') e++; *e=0;
+                long c = pp_find(defs,*ndefs,nm)?1:0; if(neg) c=!c;
+                if(getenv("BINC_DUMP_PP")&&!strcmp(nm,"SM6_PROFILE")) fprintf(stderr,"DBG ifndef SM6_PROFILE: found=%ld -> c=%ld ndefs=%zu\n",pp_find(defs,*ndefs,nm)?1:0,c,*ndefs);
+                int en = active&&c;
+                if(pp_depth<64) pp_stack[pp_depth++]=(en<<1)|en;
+            } else if(!strncmp(p,"if ",3)){
+                long c=pp_eval(p+3,defs,*ndefs);
+                int en = active&&c;
+                if(pp_depth<64) pp_stack[pp_depth++]=(en<<1)|en;
+            } else if(!strncmp(p,"elif ",5)){
+                if(pp_depth>0){
+                    int pa = pp_depth>1?((pp_stack[pp_depth-2]>>1)&1):1;
+                    int taken = pp_stack[pp_depth-1]&1;
+                    int en = pa&&!taken&&pp_eval(p+5,defs,*ndefs);
+                    pp_stack[pp_depth-1]=(en<<1)|(taken||en);
+                }
+            } else if(!strncmp(p,"else",4)&&(p[4]=='\0'||p[4]==' ')){
+                if(pp_depth>0){
+                    int pa = pp_depth>1?((pp_stack[pp_depth-2]>>1)&1):1;
+                    int taken = pp_stack[pp_depth-1]&1;
+                    int en = pa&&!taken;
+                    pp_stack[pp_depth-1]=(en<<1)|(taken||en);
+                }
+            } else if(!strncmp(p,"endif",5)){
+                if(pp_depth>0) pp_depth--;
+            } else if(active&&!strncmp(p,"include ",8)){
+                char *q=p+8; while(*q==' '||*q=='\t')q++;
+                if(*q=='"'){
+                    q++; char *end=strchr(q,'"');
+                    if(end){
+                        *end='\0'; char *want=q;
+                        char *res=resolve_include(dir,want);
+                        if(!res){ fprintf(stderr,"binc: warning: cannot find include file \"%s\"\n",want); }
+                        else {
+                            int cyc=0; for(int i=0;i<ninc_stack;i++) if(!strcmp(inc_stack[i],res)){ cyc=1; break; }
+                            if(!cyc&&!is_once(res)){
+                                FILE *f=fopen(res,"rb");
+                                if(f){
+                                    fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
+                                    char *txt=malloc((size_t)n+1); if(n)fread(txt,1,n,f); txt[n]='\0'; fclose(f);
+                                    if(n>=3&&(unsigned char)txt[0]==0xEF&&(unsigned char)txt[1]==0xBB&&(unsigned char)txt[2]==0xBF) memmove(txt,txt+3,(size_t)n-2);
+                                    if(strstr(txt,"#pragma once")) mark_once(res);
+                                    inc_stack[ninc_stack++]=res;
+                                    pp_process(res,txt,out,defs,ndefs);
+                                    ninc_stack--;
+                                    free(txt);
+                                }
+                            }
+                            free(res);
+                        }
+                    }
+                }
+            } else if(active&&!strncmp(p,"define ",7)){
+                char *nm=p+7; char *sp=nm;
+                while(*sp&&*sp!=' '&&*sp!='\t'&&*sp!='(') sp++;
+                char *val=sp; while(*val==' '||*val=='\t') val++;
+                if(sp>nm&&*ndefs<1024){
+                    char params[8][64]; int nparams=0; int fl=0;
+                    if(*sp=='('){ /* function-like macro: NAME(a, b) body */
+                        fl=1;
+                        char *q2=sp+1;
+                        while(*q2&&*q2!=')'){
+                            while(*q2==' '||*q2=='\t'||*q2==',') q2++;
+                            if(*q2==')') break;
+                            char *pe=q2; while(*pe&&*pe!=' '&&*pe!='\t'&&*pe!=','&&*pe!=')') pe++;
+                            if(nparams<8&&(size_t)(pe-q2)<64){ memcpy(params[nparams],q2,(size_t)(pe-q2)); params[nparams][pe-q2]=0; nparams++; }
+                            q2=pe;
+                        }
+                        char *close=strchr(sp,')'); val=close?close+1:val;
+                        while(*val==' '||*val=='\t') val++;
+                    }
+                    *sp=0;
+                    char *ve=val+strlen(val);
+                    while(ve>val&&(ve[-1]==' '||ve[-1]=='\t'||ve[-1]=='\r')) *--ve=0;
+                    char *cm=val; while((cm=strstr(cm,"//"))){ *cm=0; break; }
+                    /* replace a same-name define (UE redefines per config) */
+                    Def *old=(Def*)pp_find(defs,*ndefs,nm);
+                    if(old){ free(old->name); free(old->val); old->name=strdup(nm); old->val=strdup(val); old->nparams=nparams;
+                        for(int pi=0;pi<nparams;pi++) memcpy(old->params[pi],params[pi],64); }
+                    else { defs[*ndefs].name=strdup(nm); defs[*ndefs].val=strdup(val); defs[*ndefs].nparams=nparams;
+                        for(int pi=0;pi<nparams;pi++) memcpy(defs[*ndefs].params[pi],params[pi],64);
+                        (*ndefs)++; }
+                    if(getenv("BINC_DUMP_PP")&&fl) fprintf(stderr,"DBG col: %s np=%d\n",nm,nparams);
+                    (void)fl;
+                }
+            } else if(active&&!strncmp(p,"error ",6)){
+                fprintf(stderr,"binc: warning: #error %s\n",p+6);
+            } else if(active&&!strncmp(p,"undef ",6)){
+                char *nm=p+6; while(*nm==' '||*nm=='\t')nm++;
+                char *e=nm; while(*e&&*e!=' '&&*e!='\t') e++; *e=0;
+                for(size_t di=0;di<*ndefs;di++) if(!strcmp(defs[di].name,nm)){
+                    free(defs[di].name); free(defs[di].val);
+                    defs[di]=defs[*ndefs-1]; (*ndefs)--;
+                    break;
+                }
+            }
+            free(ln);
+        } else if(active){
+            /* substitute with the live defs table (position-correct scoping:
+             * `#define FDFType FDFVector3 ... #undef FDFType` instantiations) */
+            char *sub=pp_subst_line(L,defs,*ndefs);
+            bput(out,sub?sub:L,strlen(sub?sub:L)); free(sub);
+            bput(out,"\n",1);
+        }
+    }
+    free(dir);
+}
+
 static char *find_prelude(const char *argv0){
     const char *slash=strrchr(argv0,'/');
     if(slash){ char d[512]; size_t l=(size_t)(slash-argv0); if(l>sizeof d-1)l=sizeof d-1;
@@ -167,9 +469,11 @@ int main(int argc, char **argv) {
     }
     const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0; int no_prelude = 0; int interpret = 0; int syntax_only = 0; int stage_all = 0; int reflect = 0;
     const char *hlsl_entry = NULL; const char *hlsl_profile = NULL;
+    char *ddefs[32]; size_t nddefs=0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i+1 < argc) outfile = argv[++i];
         else if (!strcmp(argv[i], "-I") && i+1 < argc) add_inc_dir(argv[++i]);
+        else if (!strcmp(argv[i], "-D") && i+1 < argc && nddefs < 32) ddefs[nddefs++] = argv[++i];
         else if (!strcmp(argv[i], "--emit-ll")) emit_ll_only = 1;
         else if (!strcmp(argv[i], "-no-prelude")) no_prelude = 1;
         else if (!strcmp(argv[i], "-i")) interpret = 1;
@@ -202,7 +506,8 @@ int main(int argc, char **argv) {
     const char *entry = hlsl_entry ? hlsl_entry : "main";
     const char *profile = hlsl_profile;
     const char *ext = strrchr(infile, '.');
-    int is_hlsl = ext && (!strcmp(ext, ".hlsl") || !strcmp(ext, ".fx") || !strcmp(ext, ".fxh"));
+    int is_hlsl = ext && (!strcmp(ext, ".hlsl") || !strcmp(ext, ".fx") || !strcmp(ext, ".fxh")
+                          || !strcmp(ext, ".usf") || !strcmp(ext, ".ush"));
     if (is_hlsl && !profile) {
         fprintf(stderr, "binc: %s looks like an HLSL shader — compile with -T <profile> (e.g. -T vs_5_0)\n", infile);
         return 3;
@@ -221,52 +526,27 @@ int main(int argc, char **argv) {
     if (is_hlsl) {
         char *main_spl=splice_file(infile);
         if(!main_spl) return 1;
-        /* crude Phase-1 # handling: drop #include/#define/#pragma/#line lines;
-         * collect `#define NAME value` for a minimal token substitution */
+        /* HLSL preprocessor: #if/#ifdef/#elif/#else/#endif evaluated over the
+         * collected defines; #include spliced recursively (active branches
+         * only); #define NAME value collected for whole-word substitution. */
         Buf all={0};
-        typedef struct { char *name; char *val; } Def;
-        Def defs[64]; size_t ndefs=0;
-        char *ls=main_spl;
-        while(ls&&*ls){
-            char *nl=strchr(ls,'\n');
-            size_t len=nl?(size_t)(nl-ls):strlen(ls);
-            char *first=ls; while(*first==' '||*first=='\t'||*first=='\r') first++;
-            if(len&&*first=='#'){ /* skip the directive line (allow leading whitespace) */
-                char *ln=strndup(first,len-(size_t)(first-ls));
-                char *p=ln+1; while(*p==' ') p++;
-                if(!strncmp(p,"define ",7)){
-                    char *nm=p+7; char *sp=nm; while(*sp&&*sp!=' '&&*sp!='\t') sp++;
-                    char *val=sp; while(*val==' '||*val=='\t') val++;
-                    if(sp>nm&&*val&&ndefs<64){
-                        *sp=0; char *ve=val+strlen(val);
-                        while(ve>val&&(ve[-1]==' '||ve[-1]=='\t'||ve[-1]=='\r')) *--ve=0;
-                        /* strip a trailing // comment from the value */
-                        char *cm=val; while((cm=strstr(cm,"//"))){ *cm=0; break; }
-                        defs[ndefs].name=strdup(nm); defs[ndefs].val=strdup(val); ndefs++;
-                    }
-                }
-                free(ln);
-            }
-            else { bput(&all,ls,len); bput(&all,"\n",1); }
-            ls = nl?nl+1:NULL;
+        Def defs[1024]; size_t ndefs=0;
+        /* -D NAME[=value] command-line defines (UE's ShaderCompileWorker passes
+         * dozens: COMPILER_DXC, PLATFORM_*, ENGINE_*, ...) */
+        for(size_t dd=0;dd<nddefs&&ndefs<1024;dd++){
+            const char *dv=ddefs[dd]; const char *eq=strchr(dv,'=');
+            char nm[256]; size_t nl=eq?(size_t)(eq-dv):strlen(dv);
+            if(nl>=sizeof nm) nl=sizeof nm-1;
+            memcpy(nm,dv,nl); nm[nl]=0;
+            defs[ndefs].name=strdup(nm); defs[ndefs].val=strdup(eq?eq+1:"1"); defs[ndefs].nparams=0;
+            ndefs++;
         }
+        pp_process(infile,main_spl,&all,defs,&ndefs);
         free(main_spl);
-        /* substitute the collected defines (whole-word) */
-        for(size_t d=0;d<ndefs;d++){
-            size_t nl2=strlen(defs[d].name);
-            Buf out={0};
-            char *q=all.p;
-            while(q&&*q){
-                char *hit=strstr(q,defs[d].name);
-                if(!hit){ bput(&out,q,strlen(q)); break; }
-                int lb=hit==q||!(isalnum((unsigned char)hit[-1])||hit[-1]=='_');
-                int rb=!(isalnum((unsigned char)hit[nl2])||hit[nl2]=='_');
-                if(lb&&rb){ bput(&out,q,(size_t)(hit-q)); bput(&out,defs[d].val,strlen(defs[d].val)); q=hit+nl2; }
-                else { bput(&out,q,(size_t)(hit-q+nl2)); q=hit+nl2; }
-            }
-            free(all.p); all=out;
-        }
+        if(getenv("BINC_DUMP_PP")){ FILE *pp0=fopen("/tmp/binc_pp0.txt","wb"); fwrite(all.p,1,strlen(all.p),pp0); fclose(pp0); }
         src=all.p;
+        if(getenv("BINC_DUMP_PP")){ FILE *pp=fopen("/tmp/binc_pp.txt","wb"); fwrite(src,1,strlen(src),pp); fclose(pp);
+            for(size_t d=0;d<ndefs;d++){ fprintf(stderr,"DBG def: %s np=%d p0=%s val=%.30s\n",defs[d].name,defs[d].nparams,defs[d].nparams?defs[d].params[0]:"-",defs[d].val); } }
     } else {
     {
         Buf all={0};

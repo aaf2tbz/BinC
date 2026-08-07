@@ -107,6 +107,7 @@ numcase:
             VW("float2",TK_KW_FLOAT,2) VW("float3",TK_KW_FLOAT,3) VW("float4",TK_KW_FLOAT,4)
             VW("int2",TK_KW_INT,2) VW("int3",TK_KW_INT,3) VW("int4",TK_KW_INT,4)
             VW("uint2",TK_KW_UINT,2) VW("uint3",TK_KW_UINT,3) VW("uint4",TK_KW_UINT,4)
+            VW("bool2",TK_KW_BOOL,2) VW("bool3",TK_KW_BOOL,3) VW("bool4",TK_KW_BOOL,4)
             VW("float2x2",TK_KW_MAT,2) VW("float2x3",TK_KW_MAT,2) VW("float2x4",TK_KW_MAT,2)
             VW("float3x2",TK_KW_MAT,3) VW("float3x3",TK_KW_MAT,3) VW("float3x4",TK_KW_MAT,3)
             VW("float4x2",TK_KW_MAT,4) VW("float4x3",TK_KW_MAT,4) VW("float4x4",TK_KW_MAT,4)
@@ -133,7 +134,7 @@ numcase:
             /* HLSL-only surface (mode-gated: `out`/`in` are legal BinC identifiers) */
             #define HLSLKW(w,k) if(hlsl&&strlen(w)==len&&!memcmp(w,s,len)){Token x=tk(k,ln,col);x.text=dup_n(s,len);PUSH(x);goto done;}
             HLSLKW("cbuffer",TK_KW_CBUFFER) HLSLKW("tbuffer",TK_KW_TBUFFER) HLSLKW("groupshared",TK_KW_GROUPSHARED)
-            HLSLKW("in",TK_KW_IN) HLSLKW("out",TK_KW_OUT) HLSLKW("inout",TK_KW_INOUT) HLSLKW("static",TK_KW_STATIC)
+            HLSLKW("in",TK_KW_IN) HLSLKW("out",TK_KW_OUT) HLSLKW("inout",TK_KW_INOUT) HLSLKW("static",TK_KW_STATIC) HLSLKW("precise",TK_KW_CONSTANT)
             HLSLKW("register",TK_KW_REGISTER) HLSLKW("packoffset",TK_KW_PACKOFFSET)
             HLSLKW("linear",TK_KW_LINEAR) HLSLKW("noperspective",TK_KW_NOPERSPECTIVE)
             HLSLKW("centroid",TK_KW_CENTROID) HLSLKW("sample",TK_KW_SAMPLE)

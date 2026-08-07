@@ -431,7 +431,8 @@ static int vec_name(const char *s,TypeKind *k,int *n){
     size_t l=strlen(s); if(l<2) return 0; char w=s[l-1]; if(w<'2'||w>'4') return 0;
     char base[8]; if(l-1>=sizeof base) return 0; memcpy(base,s,l-1); base[l-1]=0;
     if(!strcmp(base,"float"))*k=T_FLOAT; else if(!strcmp(base,"int"))*k=T_INT32;
-    else if(!strcmp(base,"uint"))*k=T_UINT32; else if(!strcmp(base,"half"))*k=T_HALF; else return 0;
+    else if(!strcmp(base,"uint"))*k=T_UINT32; else if(!strcmp(base,"half"))*k=T_HALF;
+    else if(!strcmp(base,"bool"))*k=T_BOOL; else return 0;
     *n=w-'0'; return 1;
 }
 /* component name -> index, or -1; multi-char swizzles return -1 here */
@@ -924,7 +925,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         if(r==R_CONST){ ConstDef *cd=&c->prog->consts[idx];
             *k = cd->ty.kind==T_BOOL?VK_I1:(cd->ty.kind==T_FLOAT||cd->ty.kind==T_HALF)?VK_F32:(cd->ty.kind==T_UINT32?VK_U32:VK_I32);
             c->rvw=0;
-            char ll[16]; ll_of(ll,sizeof ll,cd->ty.kind,0);
+            char ll[64];
+            if(cd->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",cd->ty.struct_name);
+            else ll_of(ll,sizeof ll,cd->ty.kind,0);
             const char *v=newtmp(c);
             emit(c,"  %s = load %s, %s addrspace(2)* @_binc_const_%s, align %d\n",v,ll,ll,cd->name,type_align(cd->ty.kind,0));
             if(cd->ty.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,v); v=w; }
@@ -1530,14 +1533,34 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             const char *r=newtmp(c); emit(c,"  %s = call %s @%s(%s addrspace(1)* %s, %s %s, i32 0, i32 2, i32 0, i1 false)\n",r,scalar_ll(ak),intr,scalar_ll(ak),pp,scalar_ll(ak),v);
             atomic_add_used[ak==T_FLOAT?0:1]=1; *k=want; c->rvw=0; return r;
         }
-        /* matrix constructor mat2/3/4(...) */
+        /* matrix constructor mat2/3/4(...) / float2x2..float4x4(...) */
         {
             int mn=0;
             if(!strcmp(e->name,"mat2")) mn=2; else if(!strcmp(e->name,"mat3")) mn=3; else if(!strcmp(e->name,"mat4")) mn=4;
+            else if(strlen(e->name)==8&&!strncmp(e->name,"float",5)&&e->name[6]=='x'&&!e->name[8]){
+                int n1=e->name[5]-'0', n2=e->name[7]-'0';
+                if(n1>=2&&n1<=4&&n2>=2&&n2<=4) mn=n1>n2?n1:n2; /* square narrowing target */
+            }
             if(mn){
                 if((int)e->nargs==1){
-                    /* diagonal matrix from one scalar */
                     ValKind ak; const char *av=gen_rval(c,e->args[0],&ak);
+                    if(c->rmat){ /* matrix argument: cast/narrow (float3x3(m) == (float3x3)m) */
+                        if(c->rmat==mn){ *k=VK_F32; c->rvw=0; c->rmat=mn; return av; }
+                        if(c->rmat<mn) die(0,"float%dx%d: cannot widen a matrix",mn,mn);
+                        const char *res="undef";
+                        for(int cc=0;cc<mn;cc++){
+                            const char *colv="undef";
+                            for(int rr=0;rr<mn;rr++){
+                                const char *me=mat_elem(c,av,c->rmat,cc,rr);
+                                const char *ins=newtmp(c);
+                                emit(c,"  %s = insertelement <%d x float> %s, float %s, i32 %d\n",ins,mn,colv,me,rr);
+                                colv=ins;
+                            }
+                            res=mat_setcol(c,res,mn,cc,colv);
+                        }
+                        *k=VK_F32; c->rvw=0; c->rmat=mn; return res;
+                    }
+                    /* diagonal matrix from one scalar */
                     if(c->rvw) die(0,"mat%d: single-argument form takes a scalar",mn);
                     const char *res="undef";
                     for(int cc=0;cc<mn;cc++){
@@ -2369,9 +2392,17 @@ void emit_air(FILE *out, Program *prog){
     fprintf(out,"target triple = \"%s\"\n\n",g_air_triple);
     /* module-level constant globals: scalar numeric values in address space 2 */
     for(size_t i=0;i<prog->nconsts;i++){ ConstDef *cd=&prog->consts[i];
-        char ll[16]; ll_of(ll,sizeof ll,cd->ty.kind,0);
+        if(cd->ty.kind==T_STRUCT){ /* struct type from a missing generated include: skip */
+            int known=0;
+            for(size_t j=0;j<prog->nstructs;j++) if(!strcmp(prog->structs[j].tag,cd->ty.struct_name)){ known=1; break; }
+            if(!known) continue;
+        }
+        char ll[64];
+        if(cd->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",cd->ty.struct_name);
+        else ll_of(ll,sizeof ll,cd->ty.kind,0);
         char val[64];
-        if(cd->ty.kind==T_BOOL) snprintf(val,sizeof val,"%s",cd->ival?"true":"false");
+        if(cd->ty.kind==T_STRUCT) snprintf(val,sizeof val,"zeroinitializer");
+        else if(cd->ty.kind==T_BOOL) snprintf(val,sizeof val,"%s",cd->ival?"true":"false");
         else if(cd->ty.kind==T_FLOAT||cd->ty.kind==T_HALF){
             float fv=(float)(cd->is_int?(double)cd->ival:cd->fval); unsigned bits; memcpy(&bits,&fv,4);
             if(cd->ty.kind==T_HALF) snprintf(val,sizeof val,"fptrunc (float bitcast (i32 %u to float) to half)",bits);
@@ -2382,20 +2413,90 @@ void emit_air(FILE *out, Program *prog){
                 cd->name,ll,val,type_align(cd->ty.kind,0));
     }
     if(prog->nconsts) fprintf(out,"\n");
-    for(size_t i=0;i<prog->nstructs;i++){ StructDef *s=&prog->structs[i];
-        if(s->is_template) continue; /* template defs emit nothing; uses instantiate concrete defs */
-        fprintf(out,"%%struct.%s = type { ",s->tag);
-        for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[64];
-            char elt[32];
-            if(s->fields[j].ty.kind==T_STRUCT&&s->fields[j].ty.struct_name) snprintf(elt,sizeof elt,"%%struct.%s",s->fields[j].ty.struct_name);
-            else if(s->fields[j].ty.matn) mll_of(elt,sizeof elt,s->fields[j].ty.matn,s->fields[j].ty.matm);
-            else ll_of(elt,sizeof elt,s->fields[j].ty.kind,s->fields[j].ty.vecn);
-            if(s->fields[j].ty.array_n){
-                if(s->fields[j].ty.array_m) snprintf(fl,sizeof fl,"[%d x [%d x %s]]",s->fields[j].ty.array_n,s->fields[j].ty.array_m,elt);
-                else snprintf(fl,sizeof fl,"[%d x %s]",s->fields[j].ty.array_n,elt);
-            } else snprintf(fl,sizeof fl,"%s",elt);
-            fprintf(out,"%s",fl); }
-        fprintf(out," }\n"); }
+    /* struct usage: emit only structs reachable from the emitted functions +
+     * const globals (dead structs may reference types from missing generated
+     * includes, e.g. FNanite* headers). Closure over field types. */
+    {
+        int *sused=calloc(prog->nstructs?prog->nstructs:1,sizeof(int));
+        /* mark from consts */
+        for(size_t i=0;i<prog->nconsts;i++) if(prog->consts[i].ty.kind==T_STRUCT)
+            for(size_t j=0;j<prog->nstructs;j++)
+                if(!strcmp(prog->structs[j].tag,prog->consts[i].ty.struct_name)){ sused[j]=1; break; }
+        /* mark from function signatures + locals */
+        for(size_t fi=0;fi<prog->nfuncs;fi++){
+            Function *fn=&prog->funcs[fi];
+            Type *tys[8]; size_t nty=0;
+            Type rts[1]; rts[0]=fn->ret;
+            if(fn->ret.kind==T_STRUCT&&fn->ret.struct_name&&nty<8) tys[nty++]=&rts[0];
+            for(size_t p=0;p<fn->nparams&&nty<8;p++)
+                if(fn->params[p].ty.kind==T_STRUCT&&fn->params[p].ty.struct_name) tys[nty++]=&fn->params[p].ty;
+            for(size_t t=0;t<nty;t++)
+                for(size_t j=0;j<prog->nstructs;j++)
+                    if(!strcmp(prog->structs[j].tag,tys[t]->struct_name)){ sused[j]=1; break; }
+            for(size_t s=0;s<fn->body.n;s++){
+                Stmt *st=&fn->body.stmts[s];
+                if(st->kind==S_DECL&&st->ty.kind==T_STRUCT&&st->ty.struct_name)
+                    for(size_t j=0;j<prog->nstructs;j++)
+                        if(!strcmp(prog->structs[j].tag,st->ty.struct_name)){ sused[j]=1; break; }
+            }
+        }
+        /* closure: a used struct's struct-typed fields pull their structs in */
+        for(int pass=0;pass<16;pass++){
+            int changed=0;
+            for(size_t i=0;i<prog->nstructs;i++) if(sused[i])
+                for(size_t f=0;f<prog->structs[i].nfields;f++)
+                    if(prog->structs[i].fields[f].ty.kind==T_STRUCT&&prog->structs[i].fields[f].ty.struct_name)
+                        for(size_t j=0;j<prog->nstructs;j++)
+                            if(!strcmp(prog->structs[j].tag,prog->structs[i].fields[f].ty.struct_name)&&!sused[j]){ sused[j]=1; changed=1; }
+            if(!changed) break;
+        }
+        /* structs in dependency order (a struct may reference another struct's
+         * type; LLVM needs definitions before use — DFS post-order) */
+    {
+        int *seen=calloc(prog->nstructs?prog->nstructs:1,sizeof(int));
+        int *done=calloc(prog->nstructs?prog->nstructs:1,sizeof(int));
+        int *order=calloc(prog->nstructs?prog->nstructs:1,sizeof(int));
+        size_t norder=0;
+        /* find_struct index by tag */
+        for(size_t i=0;i<prog->nstructs;i++){
+            if(seen[i]||!sused[i]) continue;
+            /* iterative DFS */
+            size_t *stk=calloc(prog->nstructs?prog->nstructs:1,sizeof(size_t));
+            size_t sp=0; stk[sp++]=i; seen[i]=1;
+            while(sp){
+                size_t cur=stk[sp-1];
+                StructDef *s=&prog->structs[cur];
+                int pushed=0;
+                for(size_t f=0;f<s->nfields&&!pushed;f++){
+                    if(s->fields[f].ty.kind!=T_STRUCT) continue;
+                    for(size_t j=0;j<prog->nstructs;j++)
+                        if(!strcmp(prog->structs[j].tag,s->fields[f].ty.struct_name)&&!seen[j]){
+                            seen[j]=1; stk[sp++]=j; pushed=1; break;
+                        }
+                }
+                if(!pushed){ order[norder++]=cur; done[cur]=1; sp--; }
+            }
+            free(stk);
+        }
+        for(size_t k=0;k<norder;k++){
+            StructDef *s=&prog->structs[order[k]];
+            if(s->is_template||!sused[order[k]]) continue;
+            fprintf(out,"%%struct.%s = type { ",s->tag);
+            for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[64];
+                char elt[32];
+                if(s->fields[j].ty.kind==T_STRUCT&&s->fields[j].ty.struct_name) snprintf(elt,sizeof elt,"%%struct.%s",s->fields[j].ty.struct_name);
+                else if(s->fields[j].ty.matn) mll_of(elt,sizeof elt,s->fields[j].ty.matn,s->fields[j].ty.matm);
+                else ll_of(elt,sizeof elt,s->fields[j].ty.kind,s->fields[j].ty.vecn);
+                if(s->fields[j].ty.array_n){
+                    if(s->fields[j].ty.array_m) snprintf(fl,sizeof fl,"[%d x [%d x %s]]",s->fields[j].ty.array_n,s->fields[j].ty.array_m,elt);
+                    else snprintf(fl,sizeof fl,"[%d x %s]",s->fields[j].ty.array_n,elt);
+                } else snprintf(fl,sizeof fl,"%s",elt);
+                fprintf(out,"%s",fl); }
+            fprintf(out," }\n");
+        }
+        free(seen); free(done); free(order); free(sused);
+    }
+    }
     for(size_t fi=0;fi<prog->nfuncs;fi++) for(size_t pi=0;pi<prog->funcs[fi].nparams;pi++){
         Param *p=&prog->funcs[fi].params[pi]; if(!p->ty.array_n)continue;
         char gn[128],elt[64]; snprintf(gn,sizeof gn,"@_binc_smem_%s_%s",prog->funcs[fi].name,p->name); ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn);
@@ -2430,7 +2531,7 @@ void emit_air(FILE *out, Program *prog){
         /* signature: explicit domains carry coordinate/grid built-ins by value;
          * implicit kernels retain the historical hidden scalar thread id. */
         g_last_line=fn->line; g_last_col=0;
-        char sig[2048]; size_t so=0;
+        char sig[65536]; size_t so=0;
         if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,"define void @%s(",fn->link_name?fn->link_name:fn->name);
         else { char rl[256];
             if(fn->ret.kind==T_VOID) snprintf(rl,sizeof rl,"void");

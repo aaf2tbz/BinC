@@ -304,6 +304,35 @@ static void ax_block(Block *b){ for(size_t i=0;i<b->n;i++){
     for(size_t c=0;c<st->ncases;c++){ ax_expr(st->cases[c].val); ax_block(&st->cases[c].body); }
     ax_block(&st->def_body);
 } }
+static void cc_expr(Expr *e, char ***calls, size_t *nc);
+static void cc_block(Block *b, char ***calls, size_t *nc){
+    for(size_t i=0;i<b->n;i++){
+        Stmt *st=&b->stmts[i];
+        if(st->expr) cc_expr(st->expr,calls,nc);
+        if(st->init) cc_expr(st->init,calls,nc);
+        if(st->cond) cc_expr(st->cond,calls,nc);
+        if(st->for_incr) cc_expr(st->for_incr,calls,nc);
+        if(st->for_init&&st->for_init->expr) cc_expr(st->for_init->expr,calls,nc);
+        cc_block(&st->then_b,calls,nc); cc_block(&st->else_b,calls,nc);
+        for(size_t c=0;c<st->ncases;c++){ cc_expr(st->cases[c].val,calls,nc); cc_block(&st->cases[c].body,calls,nc); }
+        cc_block(&st->def_body,calls,nc);
+    }
+}
+/* call-graph edge collector: every function name invoked by an expression */
+static void cc_expr(Expr *e, char ***calls, size_t *nc){
+    if(!e) return;
+    if(e->kind==E_CALL&&e->name){
+        int dup=0;
+        for(size_t i=0;i<*nc;i++) if(!strcmp((*calls)[i],e->name)){ dup=1; break; }
+        if(!dup){
+            char **nn=realloc(*calls,(*nc+1)*sizeof(char*));
+            if(nn){ *calls=nn; (*calls)[(*nc)++]=strdup(e->name); }
+        }
+    }
+    cc_expr(e->operand,calls,nc); cc_expr(e->lhs,calls,nc); cc_expr(e->rhs,calls,nc);
+    if(e->callee) cc_expr(e->callee,calls,nc);
+    for(size_t i=0;i<e->nargs;i++) cc_expr(e->args[i],calls,nc);
+}
 static void iw_stmt(Stmt *st, const char *fnname){
     switch(st->kind){
     case S_EXPR: iw_expr(st->expr,fnname); break;
@@ -341,6 +370,15 @@ static void iw_expr(Expr *e, const char *fnname){
     for(size_t i=0;i<e->nargs;i++) iw_expr(e->args[i],fnname);
 }
 static void prog_add_struct(StructDef sd){
+    for(size_t i=0;i<g_prog.nstructs;i++)
+        if(!strcmp(g_prog.structs[i].tag,sd.tag)){
+            if(g_prog.structs[i].is_template&&!sd.is_template){
+                /* the concrete instantiation replaces the template forward def */
+                free(g_prog.structs[i].fields);
+                g_prog.structs[i]=sd;
+            }
+            return; /* dedup by tag */
+        }
     g_prog.structs=realloc(g_prog.structs,(g_prog.nstructs+1)*sizeof(StructDef));
     g_prog.structs[g_prog.nstructs++]=sd;
 }
@@ -726,8 +764,32 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         while(j>0&&res[j-1].reg>t.reg){ res[j]=res[j-1]; j--; } res[j]=t; }
     /* functions: all of them, plain; the entry gets its stage */
     int entry_found=0;
+    /* reachability (single-entry mode): only functions reachable from the
+     * entry are lowered/emitted. UE files carry thousands of dead helpers
+     * (DFMath, LTC, noise) whose unsupported constructs would otherwise fail
+     * codegen for every entry. stage_all keeps the historical full emit. */
+    int *reach=NULL;
+    if(!stage_all){
+        reach=calloc(hp->nfuncs,sizeof(int));
+        size_t *q=calloc(hp->nfuncs?hp->nfuncs:1,sizeof(size_t));
+        size_t head=0,tail=0;
+        for(size_t i=0;i<hp->nfuncs;i++) if(!strcmp(hp->funcs[i].name,entry)){ reach[i]=1; q[tail++]=i; }
+        while(head<tail){
+            size_t fi=q[head++];
+            char **calls=NULL; size_t nc=0;
+            cc_block(&hp->funcs[fi].body,&calls,&nc);
+            for(size_t c=0;c<nc;c++){
+                for(size_t j=0;j<hp->nfuncs;j++)
+                    if(!reach[j]&&!strcmp(hp->funcs[j].name,calls[c])){ reach[j]=1; q[tail++]=j; }
+                free(calls[c]);
+            }
+            free(calls);
+        }
+        free(q);
+    }
     for(size_t i=0;i<hp->nfuncs;i++){
         HLSLFunc *hf=&hp->funcs[i];
+        if(reach&&!reach[i]) continue; /* dead helper: skip entirely */
         Function fn={0};
         fn.name=strdup(hf->name); fn.line=hf->line;
         fn.ret=hf->ret; fn.body=hf->body;
@@ -743,8 +805,24 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
          * value return; the call sites are rewritten to `a = f(b, ...)` */
         {
             int io=-1;
+            int skip=0;
             for(size_t p=0;p<hf->np;p++) if(hf->params[p].inq==2||hf->params[p].inq==3){
-                if(io>=0) die(hf->line,"multiple inout params not supported yet"); io=(int)p;
+                if(io>=0){ /* multiple out/inout params: no Metal value-return
+                            * translation yet — emit as plain value params with a
+                            * warning (semantics wrong if actually called) */
+                    fprintf(stderr,"binc: warning: %s: multiple out/inout params not supported (values won't propagate) — line %d\n",hf->name,hf->line);
+                    skip=1; break;
+                }
+                io=(int)p;
+            }
+            if(io>=0&&hf->ret.kind!=T_VOID){ /* value-returning fn with an out param
+                                              * would need a struct return — skip */
+                fprintf(stderr,"binc: warning: %s: out param on a value-returning function not supported (value won't propagate) — line %d\n",hf->name,hf->line);
+                skip=1;
+            }
+            if(skip){ /* reset to plain value params so the signature is at least emit-table */
+                for(size_t p=0;p<hf->np;p++) hf->params[p].inq=0;
+                io=-1;
             }
             if(io>=0){
                 if(hf->ret.kind!=T_VOID) die(hf->line,"inout param on a value-returning function not supported yet");
@@ -771,6 +849,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             }
         }
         int is_entry = !strcmp(hf->name,entry);
+        if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG fn: %s is_entry=%d np=%zu\n",hf->name,is_entry,hf->np);
         int s_vs=0, s_ps=0;
         if(stage_all){
             /* infer the stage from the return semantics: SV_Target -> fragment;
@@ -840,6 +919,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         g_prog.funcs[g_prog.nfuncs++]=fn;
     }
     if(!entry_found&&!stage_all) die(0,"entry point '%s' not found in the shader",entry);
+    free(reach);
     /* rewrite every inout-helper call site across all functions */
     for(size_t h=0;h<niw;h++) for(size_t i=0;i<g_prog.nfuncs;i++) iw_block(&g_prog.funcs[i].body,iw_helpers[h]);
     /* overloaded names get mangled link names (name$N); `name` stays the

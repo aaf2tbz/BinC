@@ -17,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TP = os.path.normpath(os.path.join(HERE, "..", "..", "third_party"))
 OUT = os.path.join(HERE, "corpus.json")
 
-SHADER_EXTS = (".hlsl", ".fx", ".fxh")
+SHADER_EXTS = (".hlsl", ".fx", ".fxh", ".usf", ".ush")
 TEX_EXTS = (".dds", ".ktx", ".tga", ".png", ".bmp", ".jpg")
 LIT_ROOT = os.path.join("DirectXShaderCompiler", "tools", "clang", "test", "HLSL")
 
@@ -25,6 +25,9 @@ FX_COMPILE = re.compile(r"compile\s+(vs|ps|cs|gs|hs|ds)_(\d+)_(\d+)\s+(\w+)")
 SHADER_ATTR = re.compile(r'\[shader\("(\w+)"\)\]')
 STAGE_FROM_ATTR = {"vertex": "vs", "fragment": "ps", "compute": "cs",
                    "geometry": "gs", "hull": "hs", "domain": "ds", "mesh": "ms", "amplification": "as"}
+NUMTHREADS_ENTRY = re.compile(r"\[numthreads[^\]]*\]\s*\n\s*void\s+(\w+)")
+SEM_ENTRY = re.compile(
+    r"\b(?:void|float\d?|float\d+x\d+|uint\d?|int\d?|half\d?|bool|[A-Za-z_]\w*)\s+(\w+)\s*\(([^)]*)\)")
 
 
 def git_head(repo):
@@ -79,6 +82,17 @@ def main():
                     profiles = [f"{attr_stages}_5_0"]
                 if not profiles and fn.endswith(".fx"):
                     profiles = ["fx_2_0"]  # legacy placeholder; refined by hand later
+                if not profiles and fn.endswith((".usf", ".ush")):
+                    # UE shaders carry no embedded profiles; the entry is the
+                    # [numthreads] kernel or the first semantic-bearing function
+                    m = NUMTHREADS_ENTRY.search(txt)
+                    if m:
+                        profiles = ["cs_5_0"]; entries.append(m.group(1))
+                    else:
+                        for sm in SEM_ENTRY.finditer(txt):
+                            if re.search(r":\s*(SV_|POSITION|COLOR|TEXCOORD|NORMAL|TANGENT)", sm.group(2)):
+                                entries.append(sm.group(1)); break
+                        profiles = ["vs_5_0"]
                 shaders.append({
                     "file": rel,
                     "ext": fn.rsplit(".", 1)[-1],
@@ -96,6 +110,8 @@ def main():
             "DirectX-SDK-Samples": {"commit": git_head("DirectX-SDK-Samples")},
             "DirectXShaderCompiler": {"commit": git_head("DirectXShaderCompiler")},
             "ShaderConductor": {"commit": git_head("ShaderConductor")},
+            "UnrealEngine": {"commit": git_head("UnrealEngine"),
+                             "note": "private Epic repo; sparse: Engine/Shaders + Engine/Config/Shader*"},
         },
         "toolchain": {
             "dxc": tool_version("dxc", ["dxc", "--version"]),

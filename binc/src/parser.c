@@ -187,7 +187,7 @@ Type parse_type(TokStream *ts){
             } else { t.kind=T_STRUCT; t.struct_name=tag; }
         }
     }
-    else die(peek(ts)->line,"expected a type");
+    else die(peek(ts)->line,"expected a type (got kind %d '%s')",peek(ts)->kind,peek(ts)->text);
     if(accept(ts,TK_STAR)){ t.is_ptr=1; if(t.as==0)t.as=AS_DEVICE; }
     return t;
 }
@@ -209,6 +209,7 @@ static long fold_ext(Expr *e){
 }
 /* `[expr]` array extent: a constant expression (MAX_POINTS/4, 3*4, ...) */
 int parse_array_extent(TokStream *ts){
+    if(peek(ts)->kind==TK_RBRACK) return 0; /* unsized `float a[] = {...}` */
     Expr *e=parse_expr(ts);
     return (int)fold_ext(e);
 }
@@ -245,10 +246,10 @@ static Expr *parse_primary(TokStream *ts){
         advance(ts); Expr *e=E(E_IDENT,t->line,t->col); char nm[16];
         snprintf(nm,sizeof nm,"mat%d",(int)t->ival);
         e->name=strdup(nm); return e; }
-    if((t->kind==TK_KW_FLOAT||t->kind==TK_KW_INT||t->kind==TK_KW_UINT)&&t->ival>1){
-        /* vector constructor: float4(...) etc. — synthesize the type name as the callee */
+    if((t->kind==TK_KW_FLOAT||t->kind==TK_KW_INT||t->kind==TK_KW_UINT||t->kind==TK_KW_BOOL)&&t->ival>1){
+        /* vector constructor: float4(...) / bool3(...) etc. — synthesize the type name as the callee */
         advance(ts); Expr *e=E(E_IDENT,t->line,t->col); char nm[16];
-        snprintf(nm,sizeof nm,"%s%d",t->kind==TK_KW_FLOAT?"float":t->kind==TK_KW_INT?"int":"uint",(int)t->ival);
+        snprintf(nm,sizeof nm,"%s%d",t->kind==TK_KW_FLOAT?"float":t->kind==TK_KW_INT?"int":t->kind==TK_KW_UINT?"uint":"bool",(int)t->ival);
         e->name=strdup(nm); return e; }
     if(t->kind==TK_KW_FLOAT||t->kind==TK_KW_HALF||t->kind==TK_KW_INT||t->kind==TK_KW_UINT||t->kind==TK_KW_BOOL){
         /* scalar constructor/cast: float(x) — synthesize the type name as the callee */
@@ -261,7 +262,7 @@ static Expr *parse_primary(TokStream *ts){
         /* HLSL code reuses in/out/inout/sample/... as variable names (`MRT out;`) */
         advance(ts); Expr *e=E(E_IDENT,t->line,t->col); e->name=strdup(t->text); return e; }
     if(accept(ts,TK_LPAREN)){ Expr *e=parse_expr(ts); expect(ts,TK_RPAREN,")"); return e; }
-    die(t->line,"expected an expression");
+    die(t->line,"expected an expression (token kind %d '%s')",t->kind,t->text);
 }
 static Expr *parse_postfix(TokStream *ts){
     Expr *e=parse_primary(ts);
@@ -298,11 +299,17 @@ static int cast_type_start(TokStream *ts){
     TokKind k=(ts->i+1<ts->n)?ts->toks[ts->i+1].kind:TK_EOF;
     if(k==TK_IDENT&&g_tvar&&!strcmp(ts->toks[ts->i+1].text,g_tvar)) return 1; /* (T) in a template body */
     if(k==TK_IDENT&&is_stag(ts->toks[ts->i+1].text)) return 1; /* (S) struct cast */
+    /* unknown struct cast `(ViewState)0.0f` (struct from a dropped include):
+     * treat as a cast only when the operand is a literal — never steal
+     * parenthesized variables like `(bits) & ...` */
+    if(k==TK_IDENT&&(ts->i+3<ts->n)&&ts->toks[ts->i+2].kind==TK_RPAREN&&(ts->toks[ts->i+3].kind==TK_FCONST||ts->toks[ts->i+3].kind==TK_ICONST||ts->toks[ts->i+3].kind==TK_MINUS)) return 1;
     return k==TK_KW_FLOAT||k==TK_KW_HALF||k==TK_KW_INT||k==TK_KW_UINT||k==TK_KW_BOOL||k==TK_KW_MAT;
 }
 static Expr *parse_unary(TokStream *ts){
     Token *ut=peek(ts);
+    if(getenv("BINC_DEBUG_D3D9")&&ut->kind==TK_LPAREN) fprintf(stderr,"DBG unary-paren line %d cts=%d k1=%d t1='%s' k2=%d t2='%s'\n",ut->line,cast_type_start(ts),(ts->i+1<ts->n)?ts->toks[ts->i+1].kind:-1,(ts->i+1<ts->n)?ts->toks[ts->i+1].text:"-",(ts->i+2<ts->n)?ts->toks[ts->i+2].kind:-1,(ts->i+2<ts->n)?ts->toks[ts->i+2].text:"-");
     if(ut->kind==TK_LPAREN&&cast_type_start(ts)){
+        if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG cast? at line %d tok1='%s' tok2='%s'\n",ut->line,(ts->i+1<ts->n)?ts->toks[ts->i+1].text:"-",(ts->i+2<ts->n)?ts->toks[ts->i+2].text:"-");
         size_t save=ts->i;
         advance(ts); Type ty=parse_type(ts);
         /* only a cast when the type is immediately followed by ')': (float)x.
@@ -528,6 +535,20 @@ Stmt parse_stmt(TokStream *ts){
                     advance(ts); } while(depth>0);
             } else init=parse_expr(ts);
         }
+        if(accept(ts,TK_COMMA)){ /* struct comma-decl: `S x, y, z;` */
+            Block b={0}; b.stmts=calloc(2,sizeof(Stmt));
+            b.stmts[0]=(Stmt){.kind=S_DECL,.line=nm->line,.col=nm->col,.ty=ty,.name=strdup(nm->text),.init=init}; b.n=1;
+            do{
+                Token *nm2=peek(ts); expect_name(ts,"name");
+                Type ty2=ty;
+                if(accept(ts,TK_LBRACK)){ ty2.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); }
+                Expr *init2=NULL; if(accept(ts,TK_EQ)) init2=parse_expr(ts);
+                b.stmts=realloc(b.stmts,(b.n+1)*sizeof(Stmt));
+                b.stmts[b.n++]=(Stmt){.kind=S_DECL,.line=nm2->line,.col=nm2->col,.ty=ty2,.name=strdup(nm2->text),.init=init2};
+            } while(accept(ts,TK_COMMA));
+            expect(ts,TK_SEMI,";");
+            Stmt bl={0}; bl.kind=S_BLOCK; bl.line=nm->line; bl.col=nm->col; bl.then_b=b; return bl;
+        }
         expect(ts,TK_SEMI,";");
         Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init; return st;
     }
@@ -548,8 +569,8 @@ Stmt parse_stmt(TokStream *ts){
     /* optional `const` qualifier on a local declaration */
     if(peek(ts)->kind==TK_KW_CONSTANT && ts->i+1<ts->n){
         TokKind nk=ts->toks[ts->i+1].kind;
-        if(nk==TK_KW_FLOAT||nk==TK_KW_HALF||nk==TK_KW_INT||nk==TK_KW_UINT||nk==TK_KW_BOOL||nk==TK_KW_MAT)
-            advance(ts); /* consume 'const', the type follows */
+        if(nk==TK_KW_FLOAT||nk==TK_KW_HALF||nk==TK_KW_INT||nk==TK_KW_UINT||nk==TK_KW_BOOL||nk==TK_KW_MAT||nk==TK_IDENT||nk==TK_KW_STRUCT)
+            advance(ts); /* consume 'const', the type follows (incl. struct types) */
     }
     if((peek(ts)->kind==TK_KW_FLOAT||peek(ts)->kind==TK_KW_HALF||peek(ts)->kind==TK_KW_INT||peek(ts)->kind==TK_KW_UINT||peek(ts)->kind==TK_KW_MAT)&&
        (ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_LPAREN){
@@ -557,7 +578,8 @@ Stmt parse_stmt(TokStream *ts){
         Expr *e=parse_expr(ts); expect(ts,TK_SEMI,";");
         Stmt st={0}; st.kind=S_EXPR; st.line=e->line; st.col=e->col; st.expr=e; return st;
     }
-    if(starts_scalar_type(ts)||(peek(ts)->kind==TK_IDENT&&g_tvar&&!strcmp(peek(ts)->text,g_tvar))){
+    if(starts_scalar_type(ts)||(peek(ts)->kind==TK_IDENT&&((g_tvar&&!strcmp(peek(ts)->text,g_tvar))||is_stag(peek(ts)->text)
+        ||((ts->i+1<ts->n)&&is_name_kind(ts->toks[ts->i+1].kind))))){
         Type ty=parse_type(ts); Token *nm=peek(ts); expect_name(ts,"name");
         if(accept(ts,TK_LBRACK)){ ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
             if(accept(ts,TK_LBRACK)){ ty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); } }
@@ -594,6 +616,7 @@ Stmt parse_stmt(TokStream *ts){
                 b.stmts=realloc(b.stmts,(b.n+1)*sizeof(Stmt));
                 b.stmts[b.n++]=(Stmt){.kind=S_DECL,.line=nm2->line,.col=nm2->col,.ty=ty2,.name=strdup(nm2->text),.init=init2,.is_const=st.is_const};
             } while(accept(ts,TK_COMMA));
+            if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG declblock: next token kind=%d '%s' line=%d\n",peek(ts)->kind,peek(ts)->text,peek(ts)->line);
             expect(ts,TK_SEMI,";");
             Stmt bl={0}; bl.kind=S_BLOCK; bl.line=st.line; bl.col=st.col; bl.then_b=b; return bl;
         }
@@ -683,8 +706,10 @@ void parse_struct(TokStream *ts, Program *prog){
             } else if(peek(ts)->kind==TK_SEMI) advance(ts);
             continue;
         }
-        while(peek(ts)->kind==TK_IDENT&&(!strcmp(peek(ts)->text,"row_major")||!strcmp(peek(ts)->text,"column_major")||
-                                         !strcmp(peek(ts)->text,"precise")||!strcmp(peek(ts)->text,"shared")))
+        while((peek(ts)->kind==TK_IDENT&&(!strcmp(peek(ts)->text,"row_major")||!strcmp(peek(ts)->text,"column_major")||
+                                         !strcmp(peek(ts)->text,"precise")||!strcmp(peek(ts)->text,"shared")))||
+              peek(ts)->kind==TK_KW_LINEAR||peek(ts)->kind==TK_KW_NOPERSPECTIVE||
+              peek(ts)->kind==TK_KW_CENTROID||peek(ts)->kind==TK_KW_SAMPLE)
             advance(ts); /* HLSL field storage/interpolation modifiers */
         Type ty=parse_type(ts); if(ty.is_ptr) die(peek(ts)->line,"pointer fields unsupported");
         do{ Token *fn=peek(ts); expect_name(ts,"field name");

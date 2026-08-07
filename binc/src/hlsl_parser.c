@@ -192,6 +192,17 @@ HLSLProg hlsl_parse(TokStream *ts){
         HLSLFunc attrs={0};
         parse_attributes(ts,&attrs);
         Token *kt=peek(ts);
+        if(kt->kind==TK_SEMI){ advance(ts); continue; } /* stray top-level ; (UE emits ;; after structs) */
+        if(kt->kind==TK_IDENT&&!strcmp(kt->text,"_Static_assert")){ /* C11 layout assertion: skip to ; */
+            while(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_EOF) advance(ts);
+            if(peek(ts)->kind==TK_SEMI) advance(ts);
+            continue;
+        }
+        if(kt->kind==TK_IDENT&&!strcmp(kt->text,"typedef")){ /* C-style typedef: skip to ; (uses fall back to generic struct typing) */
+            while(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_EOF) advance(ts);
+            if(peek(ts)->kind==TK_SEMI) advance(ts);
+            continue;
+        }
 
         /* D3D9 effect globals: `sampler X = sampler_state {...};` and
          * `texture X <...> : register(...);` — the sampler_state block carries
@@ -373,9 +384,25 @@ HLSLProg hlsl_parse(TokStream *ts){
             hpush((void**)&hp.cbufs,&hp.ncbufs,&ccap,&cb,sizeof cb);
             continue;
         }
-        if(kt->kind==TK_KW_GROUPSHARED||kt->kind==TK_KW_STATIC||kt->kind==TK_KW_CONSTANT){            int gs=accept(ts,TK_KW_GROUPSHARED);
-            int st=accept(ts,TK_KW_STATIC);
-            int cn=accept(ts,TK_KW_CONSTANT);
+        if(kt->kind==TK_KW_GROUPSHARED||kt->kind==TK_KW_STATIC||kt->kind==TK_KW_CONSTANT){
+            int gs=0, st=0, cn=0;
+            for(;;){
+                if(accept(ts,TK_KW_GROUPSHARED)) gs=1;
+                else if(accept(ts,TK_KW_STATIC)) st=1;
+                else if(accept(ts,TK_KW_CONSTANT)) cn=1;
+                else break;
+            }
+            /* const/precise-qualified FUNCTION (`precise float F(...)`) falls
+             * through to the function path — probe type+name+'(' */
+            {
+                size_t psave=ts->i;
+                Type qty=hlsl_type(ts);
+                if(peek(ts)->kind==TK_IDENT&&(ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_LPAREN){
+                    ts->i=psave;
+                    goto fn_path;
+                }
+                ts->i=psave;
+            }
             if(peek(ts)->kind==TK_KW_STRUCT&&(ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_LBRACE){
                 /* static const struct { ... } x = {...}; — anonymous: skip to ';' */
                 advance(ts); /* struct */
@@ -444,16 +471,20 @@ HLSLProg hlsl_parse(TokStream *ts){
                     if(t->kind==TK_EOF) die(t->line,"unterminated annotation");
                     advance(ts); } while(d>0);
             }
+            if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG global %s: next kind=%d '%s'\n",gg.name,peek(ts)->kind,peek(ts)->text);
             expect(ts,TK_SEMI,";");
             hpush((void**)&hp.globals,&hp.nglobals,&gcap,&gg,sizeof gg);
             continue;
         }
         /* function definition, or an unqualified module global
          * (StructuredBuffer<>, SamplerState, plain typed vars, ...) */
+        fn_path:
+        if(peek(ts)->kind==TK_IDENT&&!strcmp(peek(ts)->text,"inline")) advance(ts); /* HLSL `inline` qualifier */
         size_t save = ts->i;
         HLSLFunc hf=attrs; /* attributes (numthreads) carried over */
         hf.is_export=accept(ts,TK_KW_STATIC);
         accept(ts,TK_KW_IN); /* legal `in` before the return type */
+        accept(ts,TK_KW_CONSTANT); /* `precise`/`const` return qualifier */
         hf.ret=hlsl_type(ts);
         Token *fn=peek(ts);
         int is_fn = fn->kind==TK_IDENT && (ts->i+1<ts->n) && ts->toks[ts->i+1].kind==TK_LPAREN;
@@ -462,6 +493,29 @@ HLSLProg hlsl_parse(TokStream *ts){
             Type gty=hlsl_type(ts);
             HLSLGlobal gg={0};
             Token *gn=peek(ts); expect(ts,TK_IDENT,"global name");
+            if(peek(ts)->kind==TK_COLON&&(ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_COLON){
+                /* C++-style out-of-line method: `RetType Struct::Method(args) { body }`
+                 * — UE defines struct methods out-of-line in .ush files. Skip it. */
+                advance(ts); advance(ts); /* :: */
+                if(peek(ts)->kind==TK_IDENT) advance(ts); /* method name */
+                if(peek(ts)->kind==TK_LPAREN){
+                    int d=0;
+                    do{ Token *t=peek(ts);
+                        if(t->kind==TK_LPAREN)d++;
+                        else if(t->kind==TK_RPAREN)d--;
+                        if(t->kind==TK_EOF) die(t->line,"unterminated method signature");
+                        advance(ts); } while(d>0);
+                }
+                if(peek(ts)->kind==TK_LBRACE){
+                    int bd=0;
+                    do{ Token *t=peek(ts);
+                        if(t->kind==TK_LBRACE)bd++;
+                        else if(t->kind==TK_RBRACE)bd--;
+                        if(t->kind==TK_EOF) die(t->line,"unterminated method body");
+                        advance(ts); } while(bd>0);
+                } else if(peek(ts)->kind==TK_SEMI) advance(ts);
+                continue;
+            }
             gg.name=strdup(gn->text); gg.ty=gty; gg.line=gn->line;
             skip_register_suffix(ts); /* semantic/register may precede the annotation+init */
             if(peek(ts)->kind==TK_LT){ /* D3D9 effect annotation before the initializer: < ... > */
@@ -537,6 +591,17 @@ HLSLProg hlsl_parse(TokStream *ts){
                 hp.ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
             }
             if(accept(ts,TK_COLON)){ Token *st=peek(ts); expect(ts,TK_IDENT,"semantic after :"); hp.sem=strdup(st->text); }
+            /* HLSL default arguments (`float DepthC = 0.0f`): parsed and ignored
+             * (calls omitting a defaulted arg are not yet supported) */
+            if(accept(ts,TK_EQ)){
+                int dep=0;
+                for(;;){ TokKind k=peek(ts)->kind;
+                    if(k==TK_LPAREN||k==TK_LBRACK) dep++;
+                    else if(k==TK_RPAREN||k==TK_RBRACK){ if(!dep) break; dep--; }
+                    else if(k==TK_COMMA&&!dep) break;
+                    else if(k==TK_SEMI||k==TK_EOF) break;
+                    advance(ts); }
+            }
             hpush((void**)&ps,&np,&pcap,&hp,sizeof hp);
             if(!accept(ts,TK_COMMA))break;
         }

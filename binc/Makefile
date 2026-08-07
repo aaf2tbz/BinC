@@ -34,6 +34,22 @@ test-negative: binc
 	chmod +x check_negative.sh
 	./check_negative.sh
 
+# UE-frontend regression: the preprocessor constructs that fixed real bugs
+# must keep compiling to a metallib (tab directives, #ifndef, #define/#undef
+# scoping, function-like macro chains, precise, typedef, _Static_assert, ::)
+test-ue: binc
+	@set -e; \
+	for t in tests/hlsl/pp_regress.hlsl ../third_party/UnrealEngine/Engine/Shaders/Private/NullPixelShader.usf ../third_party/UnrealEngine/Engine/Shaders/Private/LateZDummyPS.usf; do \
+		case "$$t" in \
+		*.hlsl) entry=main; prof=cs_5_0; defs="-D SM6_PROFILE";; \
+		*NullPixelShader.usf) entry=Main; prof=ps_5_0; defs="-D COMPILER_DXC -D PLATFORM_WINDOWS -D SM6_PROFILE -D COMPILER_SUPPORTS_ATTRIBUTES -D A8_SAMPLE_MASK=.r";; \
+		*LateZDummyPS.usf) entry=MainPS; prof=ps_5_0; defs="-D COMPILER_DXC -D PLATFORM_WINDOWS -D SM6_PROFILE -D COMPILER_SUPPORTS_ATTRIBUTES -D A8_SAMPLE_MASK=.r";; \
+		esac; \
+		echo "test-ue: $$t"; \
+		./binc -E $$entry -T $$prof -I ../third_party/UnrealEngine $$defs "$$t" -o build/ue-test.metallib; \
+	done; \
+	echo "UE FRONTEND REGRESSIONS PASS"
+
 # Mutation fuzz smoke: the compiler must never crash or hang on malformed input
 test-fuzz: binc
 	python3 fuzz.py

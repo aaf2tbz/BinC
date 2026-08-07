@@ -18,6 +18,16 @@ clone_sparse() {
 [ -d ShaderConductor ]      || git clone --depth 1 https://github.com/microsoft/ShaderConductor.git
 clone_sparse DirectX-Graphics-Samples https://github.com/microsoft/DirectX-Graphics-Samples.git
 clone_sparse DirectX-SDK-Samples      https://github.com/microsoft/DirectX-SDK-Samples.git
+# UnrealEngine is a PRIVATE Epic repo — needs an org-authorized SSH key. The
+# sparse set is Engine/Shaders (the .usf/.ush corpus) + the shader config.
+if [ -d UnrealEngine ]; then
+  echo "skip UnrealEngine (exists)"
+else
+  git clone --depth 1 --filter=tree:0 --sparse --single-branch \
+    git@github.com:EpicGames/UnrealEngine.git UnrealEngine && \
+  ( cd UnrealEngine && git sparse-checkout set --no-cone \
+      'Engine/Shaders/**' 'Engine/Config/Shader**' ) && echo "ok UnrealEngine"
+fi
 
 echo "vendored corpus ready:"
-du -sh DirectXShaderCompiler ShaderConductor DirectX-Graphics-Samples DirectX-SDK-Samples 2>/dev/null
+du -sh DirectXShaderCompiler ShaderConductor DirectX-Graphics-Samples DirectX-SDK-Samples UnrealEngine 2>/dev/null
