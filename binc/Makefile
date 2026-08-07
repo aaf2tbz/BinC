@@ -111,6 +111,11 @@ RENDER_PAIRS := \
 render-diff:
 	@bash ../tools/hlsl-diff/render-suite.sh 2>&1 | tail -1
 
+# Phase-8 differential sweep: deterministic suites (compute + render + nbody)
+# plus the corpus compute probe -> coverage table; any crash/hang fails the gate
+diff-sweep:
+	@bash ../tools/hlsl-diff/diff-sweep.sh 2>&1 | tail -8
+
 # Phase-5: the D3D12 nBodyGravity gravity CS (groupshared + barriers +
 # four thread semantics + inout helper), ours vs DXC->SPIRV-Cross on GPU
 diff-nbody:

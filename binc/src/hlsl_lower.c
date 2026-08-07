@@ -681,7 +681,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         for(size_t i=0;i<hp->nglobals;i++){
             HLSLGlobal *gg=&hp->globals[i];
             if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG unif: %s kind=%d isc=%d vecn=%d an=%d\n",gg->name,gg->ty.kind,gg->is_const,gg->ty.vecn,gg->ty.array_n);
-            if(gg->is_const) continue;
+            if(gg->is_const||gg->is_groupshared) continue; /* groupshared stays threadgroup memory */
             if(gg->ty.is_ptr||gg->ty.kind==T_TEXTURE||gg->ty.kind==T_SAMPLER) continue;
             if(gg->ty.kind!=T_FLOAT&&gg->ty.kind!=T_INT32&&gg->ty.kind!=T_UINT32&&gg->ty.kind!=T_BOOL&&gg->ty.kind!=T_HALF&&gg->ty.kind!=T_STRUCT) continue;
             Type ft=gg->ty;
