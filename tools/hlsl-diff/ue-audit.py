@@ -24,6 +24,12 @@ UE_DEFS = ["-D", "COMPILER_DXC", "-D", "PLATFORM_WINDOWS", "-D", "SM6_PROFILE",
            "-D", "COMPILER_SUPPORTS_ATTRIBUTES", "-D", "A8_SAMPLE_MASK=.r"]
 
 
+def resolve(rel):
+    """corpus.json entries live under third_party/ (UnrealEngine/... ->
+    third_party/UnrealEngine/...)."""
+    return os.path.join(ROOT, "third_party", rel)
+
+
 def run(cmd, timeout=60, cwd=None):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
@@ -58,6 +64,7 @@ GAP_BUCKETS = [
     (r"entry point '[^']*' not found", "entry detection"),
     (r"internal: struct return", "struct return"),
     (r"expected a type", "type parse"),
+    (r"expected global name", "global name parse"),
     (r"cannot open include", "include missing"),
     (r"cannot find include file", "include missing (generated)"),
     (r"expected ;", "parse: expected ;"),
@@ -66,7 +73,12 @@ GAP_BUCKETS = [
 
 
 def bucket_error(err):
-    first = next((l.strip() for l in err.splitlines() if "error" in l), "")
+    # the real failure is a "binc: error" line; "#error ..." directives come
+    # out as warnings (UE config defines the audit does not pass) — skip them
+    first = next((l.strip() for l in err.splitlines()
+                  if "binc: error" in l and "#error" not in l), "")
+    if not first:
+        first = next((l.strip() for l in err.splitlines() if "error" in l), "")
     for rx, label in GAP_BUCKETS:
         m = re.search(rx, first)
         if m:
@@ -76,9 +88,23 @@ def bucket_error(err):
     return ("other: " + first[:80]) if first else "other"
 
 
+# Buckets that mean the PARSER itself failed (vs codegen-stage gaps after a
+# successful parse). Parse acceptance = COMPILES + codegen-stage gaps.
+PARSE_BUCKETS = {
+    "entry detection",
+    "type parse",
+    "global name parse",
+    "parse: expected ;",
+    "parse: semantic",
+    "numthreads parse",
+    "geometry-shader (mesh stage)",
+}
+
+
 def guess_entry(src):
     """Heuristic entry for UE shaders: MainPS/MainVS/MainCS/CSMain first,
-    else the first function with a stage semantic."""
+    else the first function with a stage semantic. Returns None for
+    include-only headers (no plausible entry)."""
     for want in ("MainPS", "MainVS", "MainCS", "CSMain", "main"):
         if re.search(r"\b" + want + r"\s*\(", src):
             return want
@@ -93,15 +119,16 @@ def guess_entry(src):
     m = re.search(r"\[numthreads[^\]]*\]\s*\n\s*void\s+(\w+)", src)
     if m:
         return m.group(1)
-    return "main"
+    return None
 
 
 def entry_profile(entry):
-    if entry.startswith("MainPS") or entry.startswith("PS"):
+    e = entry.lower()
+    if e.startswith("mainps") or e.startswith("ps") or e.endswith("ps"):
         return "ps_5_0"
-    if entry.startswith("MainVS") or entry.startswith("VS"):
+    if e.startswith("mainvs") or e.startswith("vs") or e.endswith("vs"):
         return "vs_5_0"
-    if entry.startswith("MainCS") or entry.startswith("CS"):
+    if e.startswith("maincs") or e.startswith("cs") or e.endswith("cs"):
         return "cs_5_0"
     return "ps_5_0"
 
@@ -115,6 +142,7 @@ def main():
 
     d = json.load(open(os.path.join(ROOT, "tools/vendor/corpus.json")))
     jobs = []
+    rows = []
     for s in d["shaders"]:
         f = s["file"]
         if not f.startswith("UnrealEngine/"):
@@ -122,10 +150,13 @@ def main():
         if not (f.endswith(".usf") or f.endswith(".ush")):
             continue
         try:
-            src = open(os.path.join(ROOT, f), "rb").read().decode("utf-8", "replace")
+            src = open(resolve(f), "rb").read().decode("utf-8", "replace")
         except OSError:
             continue
         entry = guess_entry(src)
+        if entry is None:
+            rows.append((f, "-", "-", "HEADER (no entry)"))
+            continue
         prof = entry_profile(entry)
         jobs.append((f, prof, entry, src))
     if limit:
@@ -134,10 +165,9 @@ def main():
     gap_count = collections.Counter()
     gap_files = collections.defaultdict(list)
     n_crash = 0
-    rows = []
     for rel, prof, entry, src in jobs:
         rc, _, err = run([BINC, "-E", entry, "-T", prof, "-I", UE_DIR] + UE_DEFS +
-                         [os.path.join(ROOT, rel), "-o", "/tmp/ue-audit.metallib"], 60)
+                         [resolve(rel), "-o", "/tmp/ue-audit.metallib"], 180)
         if rc in (134, 139):
             result = "CRASH"
             n_crash += 1
@@ -176,7 +206,10 @@ def main():
     print(f"ue-audit: {len(rows)} jobs -> {outmd}")
     for gap, n in gap_count.most_common(14):
         print(f"  {n:3d}  {gap}")
-    print(f"  compiles: {sum(1 for r in rows if r[3] == 'COMPILES')}")
+    ncomp = sum(1 for r in rows if r[3] == 'COMPILES')
+    nparse = sum(1 for r in rows if r[3].startswith('GAP:') and r[3][4:] not in PARSE_BUCKETS and not r[3].startswith('GAP:other'))
+    print(f"  compiles: {ncomp}")
+    print(f"  parse acceptance (compiles + codegen-stage gaps): {ncomp + nparse}/{len(rows)} = {100.0*(ncomp+nparse)/max(len(rows),1):.1f}%")
     if n_crash:
         print(f"FAIL: {n_crash} crashes/hangs")
         sys.exit(1)

@@ -121,13 +121,17 @@ typedef struct { char *name; char *val; char params[8][64]; int nparams; } Def;
  * (`#define FDFType FDFVector3 ... #undef FDFType` instantiations). */
 static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
     Buf out={0}; const char *q=line;
-    int changed=1;
+    int changed=1; int ever=0;
     for(int round=0; changed&&round<16; round++){
-        Buf nxt={0};
+        Buf nxt={0}; int did=0;
         for(size_t d=0;d<ndefs;d++){
             size_t nl2=strlen(defs[d].name);
             if(!nl2) continue;
-            Buf o2={0}; const char *s=nxt.p?nxt.p:q;
+            Buf o2={0};
+            /* after a substitution emptied the line (did=1, nxt.p=NULL), keep
+             * it empty — only fall back to the original line before any
+             * substitution in this round (the very first iteration) */
+            const char *s = nxt.p ? nxt.p : (did ? "" : q);
             if(defs[d].nparams>0){
                 while(s&&*s){
                     const char *hit=strstr(s,defs[d].name);
@@ -168,7 +172,7 @@ static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
                         snprintf(body,sizeof body,"%s",b2.p?b2.p:""); free(b2.p);
                     }
                     bput(&o2,s,(size_t)(hit-s)); bput(&o2,body,strlen(body));
-                    s=p+1;
+                    s=p+1; did=1;
                 }
             } else {
                 while(s&&*s){
@@ -176,17 +180,20 @@ static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
                     if(!hit){ bput(&o2,s,strlen(s)); break; }
                     int lb=hit==s||!(isalnum((unsigned char)hit[-1])||hit[-1]=='_');
                     int rb=!(isalnum((unsigned char)hit[nl2])||hit[nl2]=='_');
-                    if(lb&&rb){ bput(&o2,s,(size_t)(hit-s)); bput(&o2,defs[d].val,strlen(defs[d].val)); s=hit+nl2; }
+                    if(getenv("BINC_DUMP_PP")&&!strcmp(defs[d].name,"CALL_SITE_DEBUGLOC")) fprintf(stderr,"DBG obj: hit=%ld lb=%d rb=%d nl2=%zu c='%c'\n",(long)(hit-s),lb,rb,nl2,hit[nl2]?hit[nl2]:'0');
+                    if(lb&&rb){ bput(&o2,s,(size_t)(hit-s)); bput(&o2,defs[d].val,strlen(defs[d].val)); s=hit+nl2; did=1; }
                     else { bput(&o2,s,(size_t)(hit-s+nl2)); s=hit+nl2; }
                 }
             }
             free(nxt.p); nxt=o2;
         }
-        changed = !(nxt.p&&!strcmp(nxt.p,q));
-        if(!nxt.p){ free(out.p); return NULL; }
+        changed = did; /* a substitution fired this round — rescan (empty results included) */
+        if(did) ever=1;
+        if(!nxt.p){ free(out.p); return ever?strdup(""):NULL; }
         free(out.p); out=nxt; q=out.p;
+        if(!did&&out.p) break; /* no substitution in the whole round: stable */
     }
-    return out.p;
+    return out.p?out.p:strdup("");
 }
 
 static const Def *pp_find(const Def *defs, size_t nd, const char *name){
@@ -398,7 +405,9 @@ static void pp_process(const char *path, const char *src, Buf *out, Def *defs, s
         } else if(active){
             /* substitute with the live defs table (position-correct scoping:
              * `#define FDFType FDFVector3 ... #undef FDFType` instantiations) */
+            if(getenv("BINC_DUMP_PP")&&strstr(L,"CALL_SITE_DEBUGLOC")){ fprintf(stderr,"DBG sub: line='%s' ndefs=%zu\n",L,*ndefs); const Def *df=pp_find(defs,*ndefs,"CALL_SITE_DEBUGLOC"); fprintf(stderr,"DBG sub: found=%s val='%s' np=%d\n",df?"yes":"NO",df?df->val:"",df?df->nparams:-1); }
             char *sub=pp_subst_line(L,defs,*ndefs);
+            if(getenv("BINC_DUMP_PP")&&strstr(L,"CALL_SITE_DEBUGLOC")) fprintf(stderr,"DBG sub -> '%s'\n",sub?sub:"(null)");
             bput(out,sub?sub:L,strlen(sub?sub:L)); free(sub);
             bput(out,"\n",1);
         }
