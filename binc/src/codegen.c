@@ -55,14 +55,21 @@ static void tn_of(char *buf,size_t n,TypeKind k,int vecn){
 static void ptn_of(char *buf,size_t n,TypeKind k,int vecn,int matn){
     if(matn) snprintf(buf,n,"mat%d",matn); else tn_of(buf,n,k,vecn); }
 /* real struct size (tail-padded) and alignment per the AIR datalayout */
-static int struct_layout(StructDef *s, int *al){
+static const Program *g_curprog; /* set by emit_air; used by stage helpers and struct layout */
+static int struct_layout_r(const Program *prog, StructDef *s, int *al){
     int off=0,m=1;
-    for(size_t i=0;i<s->nfields;i++){ int fa=tal(s->fields[i].ty.kind,s->fields[i].ty.vecn,s->fields[i].ty.matn);
-        int fs=tsz(s->fields[i].ty.kind,s->fields[i].ty.vecn,s->fields[i].ty.matn);
+    for(size_t i=0;i<s->nfields;i++){ int fa,fs;
+        if(s->fields[i].ty.kind==T_STRUCT&&s->fields[i].ty.struct_name){
+            StructDef *sub=prog?find_struct(prog,s->fields[i].ty.struct_name):NULL;
+            if(sub){ int sa; fs=struct_layout_r(prog,sub,&sa); fa=sa; }
+            else { fa=1; fs=1; }
+        } else { fa=tal(s->fields[i].ty.kind,s->fields[i].ty.vecn,s->fields[i].ty.matn);
+            fs=tsz(s->fields[i].ty.kind,s->fields[i].ty.vecn,s->fields[i].ty.matn); }
         if(s->fields[i].ty.array_n) fs *= s->fields[i].ty.array_n*(s->fields[i].ty.array_m?s->fields[i].ty.array_m:1);
         if(fa>m)m=fa; off=(off+fa-1)&~(fa-1); off+=fs; }
     *al=m; return (off+m-1)&~(m-1);
 }
+static int struct_layout(StructDef *s, int *al){ return struct_layout_r(g_curprog,s,al); }
 
 typedef struct { char *name; char *slot; TypeKind kind; char *sname; int vecn; int matn; int is_const; int an, am; } Loc;
 typedef struct {
@@ -83,7 +90,8 @@ typedef struct {
 } CG;
 static char *newtmp(CG *c){ char *s=malloc(16); snprintf(s,16,"%%t%d",c->tmp++); return s; }
 static int newlbl(CG *c){ return c->lblc++; }
-static void emit(CG *c,const char *fmt,...){ va_list a; va_start(a,fmt); char b[1024]; vsnprintf(b,sizeof b,fmt,a); va_end(a); sb_put(c->body,b); c->blk_empty=0; }
+static void emit(CG *c,const char *fmt,...){ va_list a; va_start(a,fmt); char b[1024]; vsnprintf(b,sizeof b,fmt,a); va_end(a); sb_put(c->body,b); c->blk_empty=0;
+ }
 static void lbl(CG *c,int n){
     if(c->blk_empty) emit(c,"  br label %%bb%d\n",n); /* AIR rejects empty blocks: jump from the empty predecessor */
     char b[32]; snprintf(b,sizeof b,"bb%d:\n",n); sb_put(c->body,b); c->term=0; c->blk_empty=1; c->curbb=n;
@@ -339,6 +347,7 @@ static void fill_param_li(CG *c,int pi,LInfo *li){
     li->tk=pr->ty.kind; li->sname=pr->ty.struct_name; li->as=pr->ty.as; li->pi=pi; li->is_local=0; li->vecn=pr->ty.vecn; li->matn=pr->ty.matn; }
 
 /* promote a half-typed value to f32 (vector-aware); compute is done in f32 */
+static const char *swizzle_read(CG *c, const char *vec, const char *vty, const char *ety, const int *idxs, int nc);
 static const char *h2f(CG *c, const char *v, int vecn){
     const char *w=newtmp(c);
     if(vecn>1) emit(c,"  %s = fpext <%d x half> %s to <%d x float>\n",w,vecn,v,vecn);
@@ -401,7 +410,14 @@ static const char *vconv(CG *c, const char *v, int n, ValKind from, ValKind to){
 }
 /* prepare an rvalue (kind from, width from_vw) for storage into (tk, vecn) */
 static const char *to_storage(CG *c, const char *v, ValKind from, int from_vw, TypeKind tk, int vecn){
-    if(vecn>1){ if(from_vw&&from_vw!=vecn) die(0,"vector width mismatch");
+    if(vecn>1){ if(from_vw&&from_vw!=vecn){
+            /* HLSL implicit truncation (D3D9): a wider float value stores into
+             * a narrower slot by dropping trailing components (float4 -> float3) */
+            if(from_vw>vecn&&from==VK_F32&&from_vw<=4){ static const int t3[3]={0,1,2}, t2[2]={0,1};
+                char vty[24]; snprintf(vty,sizeof vty,"<%d x float>",from_vw);
+                v=swizzle_read(c,v,vty,"float",vecn==3?t3:t2,vecn); from_vw=vecn; }
+            else die(0,"vector width mismatch");
+        }
         ValKind want=scalar_vk(tk);
         if(!from_vw){ v=coerce(c,v,from,want); if(tk==T_HALF) v=f2h(c,v,0); return splat(c,v,scalar_ll(tk),vecn); }
         if(from!=want) v=vconv(c,v,vecn,from,want);
@@ -566,14 +582,16 @@ static const char *spread(CG *c, const char *v, int w, int n){
 /* returns the result register, or NULL if `e->name` is not a composite builtin */
 static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
     const char *nm=e->name;
-    static const char *names[]={"dot","cross","length","distance","normalize","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","fmod","radians","degrees","saturate","abs","min","max","mul","asfloat","asuint","asint"};
+    static const char *names[]={"dot","cross","length","distance","normalize","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","fmod","radians","degrees","saturate","abs","min","max","mul","inverse","asfloat","asuint","asint"};
     int hit=0; for(size_t i=0;i<sizeof names/sizeof *names;i++) if(!strcmp(names[i],nm)){ hit=1; break; }
     if(!hit) return NULL;
     if(e->nargs<1||e->nargs>3) die(0,"%s: wrong number of arguments",nm);
     ValKind ak=VK_F32,bk=VK_F32,ck=VK_F32;
-    const char *av=gen_rval(c,e->args[0],&ak); int aw=c->rvw;
+    const char *av=gen_rval(c,e->args[0],&ak); int aw=c->rvw; int rmat_a=c->rmat;
     const char *bv=NULL; int bw=0; if(e->nargs>=2){ bv=gen_rval(c,e->args[1],&bk); bw=c->rvw; }
+    int rmat_b=c->rmat;
     const char *cv=NULL; int cw=0; if(e->nargs>=3){ cv=gen_rval(c,e->args[2],&ck); cw=c->rvw; }
+    int rmat_c=c->rmat;
     int n=aw?aw:(bw?bw:cw); if(n==0) n=1;
     /* HLSL implicit vector truncation (D3D9): a wider float argument truncates
      * to the intrinsic's effective width, e.g. dot(float3, float4) — the
@@ -633,13 +651,75 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
         /* mul(a,b): vector-vector = dot; everything else reuses the binary
          * multiply (scalar, matrix*vector, vector*matrix, matrix*matrix) */
         if(e->nargs!=2) die(0,"mul expects 2 arguments");
-        int am=c->rmat, bm=c->rmat;
+        /* operand-order: each arg's matrix-ness captured when IT was generated */
+        int am = aw ? 0 : rmat_a;
+        int bm = rmat_b;
         if(aw>1&&bw>1&&!am&&!bm&&aw==bw){
             *k=VK_F32; c->rvw=0;
             return vreduce(c,vbin(c,"fmul fast",spread(c,av,aw,aw),spread(c,bv,bw,aw),aw),aw);
         }
         Expr *bin=E(E_BIN,e->line,e->col); bin->bop=B_MUL; bin->lhs=e->args[0]; bin->rhs=e->args[1];
         return gen_rval(c,bin,k);
+    }
+    if(!strcmp(nm,"inverse")){
+        /* matrix inverse via cofactor expansion: adjugate / determinant */
+        if(e->nargs!=1) die(0,"inverse expects 1 argument");
+        int mn=c->rmat; if(mn<3||mn>4) die(0,"inverse supports float3x3/float4x4");
+        const char *m=av;
+        /* all elements: e[col][row] */
+        const char *el[4][4];
+        for(int cc=0;cc<mn;cc++) for(int rr=0;rr<mn;rr++) el[cc][rr]=mat_elem(c,m,mn,cc,rr);
+        const char *cf[4][4];
+        for(int i=0;i<mn;i++) for(int j=0;j<mn;j++){
+            /* 3x3 (or 2x2) minor excluding row i, column j */
+            const char *mn3[3][3]; int ri=0;
+            for(int r=0;r<mn;r++){ if(r==i) continue; int ci=0;
+                for(int col=0;col<mn;col++){ if(col==j) continue; mn3[ri][ci]=el[col][r]; ci++; }
+                ri++; }
+            const char *d;
+            if(mn==4){
+                const char *t1=vbin(c,"fmul fast",mn3[1][1],mn3[2][2],0);
+                const char *t2=vbin(c,"fmul fast",mn3[1][2],mn3[2][1],0);
+                const char *t3=vbin(c,"fsub fast",t1,t2,0);
+                const char *t4=vbin(c,"fmul fast",mn3[0][0],t3,0);
+                const char *t5=vbin(c,"fmul fast",mn3[1][0],mn3[2][2],0);
+                const char *t6=vbin(c,"fmul fast",mn3[1][2],mn3[2][0],0);
+                const char *t7=vbin(c,"fsub fast",t5,t6,0);
+                const char *t8=vbin(c,"fmul fast",mn3[0][1],t7,0);
+                const char *t9=vbin(c,"fsub fast",t4,t8,0);
+                const char *ta=vbin(c,"fmul fast",mn3[1][0],mn3[2][1],0);
+                const char *tb=vbin(c,"fmul fast",mn3[1][1],mn3[2][0],0);
+                const char *tc=vbin(c,"fsub fast",ta,tb,0);
+                const char *td=vbin(c,"fmul fast",mn3[0][2],tc,0);
+                d=vbin(c,"fadd fast",t9,td,0);
+            } else { /* 2x2: a0*b1 - a1*b0 */
+                const char *t1=vbin(c,"fmul fast",mn3[0][0],mn3[1][1],0);
+                const char *t2=vbin(c,"fmul fast",mn3[0][1],mn3[1][0],0);
+                d=vbin(c,"fsub fast",t1,t2,0);
+            }
+            if((i+j)&1){ const char *f=newtmp(c); emit(c,"  %s = fsub fast float %s, %s\n",f,fconst(c,0.0),d); cf[i][j]=f; }
+            else cf[i][j]=d;
+        }
+        /* determinant: expansion along column 0 */
+        const char *det=NULL;
+        for(int i=0;i<mn;i++){
+            const char *p=vbin(c,"fmul fast",el[0][i],cf[i][0],0);
+            det = det ? vbin(c,"fadd fast",det,p,0) : p;
+        }
+        /* inverse[cc][rr] = cofactor[cc][rr] / det (adjugate transpose) */
+        const char *res="undef";
+        for(int cc=0;cc<mn;cc++){
+            const char *colv="undef";
+            for(int rr=0;rr<mn;rr++){
+                const char *d=vbin(c,"fdiv fast",cf[cc][rr],det,0);
+                const char *ins=newtmp(c);
+                emit(c,"  %s = insertelement <%d x float> %s, float %s, i32 %d\n",ins,mn,colv,d,rr);
+                colv=ins;
+            }
+            res=mat_setcol(c,res,mn,cc,colv);
+        }
+        *k=VK_F32; c->rvw=0; c->rmat=mn;
+        return res;
     }
     if(!strcmp(nm,"saturate")||!strcmp(nm,"abs")||!strcmp(nm,"min")||!strcmp(nm,"max")||
        !strcmp(nm,"tan")||!strcmp(nm,"asin")||!strcmp(nm,"acos")||!strcmp(nm,"atan")||!strcmp(nm,"fmod")){
@@ -1123,6 +1203,17 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         }
         if(!lm&&rm){
             int mn=rm;
+            if(e->bop==B_MUL&&lw>1&&lw<mn&&rk==VK_F32){
+                /* D3D9: mul(float3, float4x4) — implicitly extend the vector
+                 * to float4 (w=1); the result truncates back to float3 at the
+                 * store (plain-assign truncation) */
+                const char *ext=newtmp(c);
+                emit(c,"  %s = shufflevector <%d x float> %s, <%d x float> poison, <4 x i32> <i32 0, i32 1, i32 2, i32 poison>\n",ext,lw,l,lw);
+                const char *w1=fconst(c,1.0);
+                const char *ext2=newtmp(c);
+                emit(c,"  %s = insertelement <4 x float> %s, float %s, i32 3\n",ext2,ext,w1);
+                l=ext2; lw=mn;
+            }
             if(e->bop==B_MUL&&lw==mn){
                 /* row vector * matrix */
                 const char *res="undef";
@@ -2110,7 +2201,6 @@ static void fn_ptr_str(Function *fn,char *buf,size_t n){
         } else { if(emitted++)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"i32"); } }
     o+=snprintf(buf+o,n-o,")* @%s",fn->link_name?fn->link_name:fn->name);
 }
-static const Program *g_curprog; /* set by emit_air; used by stage string helpers */
 /* AIR contract of the installed toolchain; set by binc_set_air() (main.c detection) */
 char g_air_triple[64]="air64_v29-apple-macosx27.0.0";
 int g_air_sdk=27, g_air_minor=9;
@@ -2297,7 +2387,8 @@ void emit_air(FILE *out, Program *prog){
         fprintf(out,"%%struct.%s = type { ",s->tag);
         for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[64];
             char elt[32];
-            if(s->fields[j].ty.matn) mll_of(elt,sizeof elt,s->fields[j].ty.matn,s->fields[j].ty.matm);
+            if(s->fields[j].ty.kind==T_STRUCT&&s->fields[j].ty.struct_name) snprintf(elt,sizeof elt,"%%struct.%s",s->fields[j].ty.struct_name);
+            else if(s->fields[j].ty.matn) mll_of(elt,sizeof elt,s->fields[j].ty.matn,s->fields[j].ty.matm);
             else ll_of(elt,sizeof elt,s->fields[j].ty.kind,s->fields[j].ty.vecn);
             if(s->fields[j].ty.array_n){
                 if(s->fields[j].ty.array_m) snprintf(fl,sizeof fl,"[%d x [%d x %s]]",s->fields[j].ty.array_n,s->fields[j].ty.array_m,elt);
@@ -2341,7 +2432,7 @@ void emit_air(FILE *out, Program *prog){
         g_last_line=fn->line; g_last_col=0;
         char sig[2048]; size_t so=0;
         if(fn->is_kernel) so+=snprintf(sig+so,sizeof sig-so,"define void @%s(",fn->link_name?fn->link_name:fn->name);
-        else { char rl[64];
+        else { char rl[256];
             if(fn->ret.kind==T_VOID) snprintf(rl,sizeof rl,"void");
             else if(fn->ret.matn) mll_of(rl,sizeof rl,fn->ret.matn,fn->ret.matm);
             else if(fn->ret.kind==T_STRUCT){ if(fn->stage==ST_NONE) snprintf(rl,sizeof rl,"%%struct.%s",fn->ret.struct_name);
@@ -2440,9 +2531,14 @@ void emit_air(FILE *out, Program *prog){
     if(atomic_add_used[0]) fprintf(out,"declare float @air.atomic.global.add.f32(float addrspace(1)*, float, i32, i32, i32, i1) local_unnamed_addr\n");
     if(atomic_add_used[1]) fprintf(out,"declare i32 @air.atomic.global.add.i32(i32 addrspace(1)*, i32, i32, i32, i32, i1) local_unnamed_addr\n");
     /* texture intrinsics + the opaque texture/sampler types */
-    if(get_samp_used||tex_read_used[0]||tex_read_used[1]||tex_read_used[2]||tex_read_used[3]||
-       tex_write_used[0]||tex_write_used[1]||tex_write_used[2]||tex_write_used[3]||
-       tex_sample_used[0]||tex_sample_used[1]||tex_sample_used[2]||tex_sample_used[3]){
+    {
+        int any_tex_param=0;
+        for(size_t fi=0;fi<prog->nfuncs&&!any_tex_param;fi++)
+            for(size_t pi=0;pi<prog->funcs[fi].nparams;pi++)
+                if(prog->funcs[fi].params[pi].ty.kind==T_TEXTURE||prog->funcs[fi].params[pi].ty.kind==T_SAMPLER){ any_tex_param=1; break; }
+        if(get_samp_used||tex_read_used[0]||tex_read_used[1]||tex_read_used[2]||tex_read_used[3]||
+           tex_write_used[0]||tex_write_used[1]||tex_write_used[2]||tex_write_used[3]||
+           tex_sample_used[0]||tex_sample_used[1]||tex_sample_used[2]||tex_sample_used[3]||any_tex_param){
         fprintf(out,"%%struct._texture_2d_t = type opaque\n%%struct._sampler_t = type opaque\n");
         if(get_samp_used) fprintf(out,"declare %%struct._sampler_t addrspace(2)* @air.get_read_sampler() local_unnamed_addr\n");
         static const char *sufs[4]={"v4f32","v4f16","v4i32","v4u32"};
@@ -2452,6 +2548,7 @@ void emit_air(FILE *out, Program *prog){
             if(tex_write_used[i]) fprintf(out,"declare void @air.write_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture, <2 x i32>, %s, i32, i32) local_unnamed_addr\n",sufs[i],vecs[i]);
             if(tex_sample_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, i1, <2 x i32>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_sample_cube_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_cube.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
+        }
         }
     }
     /* declares for the builtins that were actually used (deduped by AIR name:

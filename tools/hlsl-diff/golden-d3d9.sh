@@ -28,8 +28,9 @@ mkdir -p "$WORK"
 if ! binc/binc -E "$PS_ENTRY" -T ps_2_0 --stage-all "$G/$SHADER" -o "$WORK/ours.metallib" 2>"$WORK/ours.log"; then
   echo "FAIL: compilation"; echo "  $(head -1 "$WORK/ours.log")"; exit 1
 fi
-# the .ll is emitted next to the output metallib (in the work dir)
-[ -f "$WORK/ours.ll" ] || { echo "FAIL: no .ll emitted"; exit 1; }
+# the .ll is emitted as <shader>.ll in the CWD; copy it for spec.py
+cp "$ROOT/$(basename "$SHADER" .fx).ll" "$WORK/ours.ll" 2>/dev/null \
+  || { echo "FAIL: no .ll emitted (compile aborted before AIR)"; exit 1; }
 
 # ---- spec: generated per-golden (CBUF offsets parsed from the .ll) ----
 python3 "$G/spec.py" "$WORK/ours.ll" "$WORK/ours.spec" || { echo "FAIL: spec generation"; exit 1; }

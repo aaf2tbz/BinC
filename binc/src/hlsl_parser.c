@@ -197,9 +197,9 @@ HLSLProg hlsl_parse(TokStream *ts){
          * `texture X <...> : register(...);` — the sampler_state block carries
          * host-side filter/wrap state; the texture registers as a module
          * global so tex2D-family calls can bind it */
-        if((kt->kind==TK_KW_SAMPLER)||(kt->kind==TK_IDENT&&(!strcmp(kt->text,"texture")||!strcmp(kt->text,"sampler2D")||!strcmp(kt->text,"samplerCUBE")||!strcmp(kt->text,"sampler3D")||!strcmp(kt->text,"sampler1D")||!strcmp(kt->text,"sampler2DShadow")||!strcmp(kt->text,"samplerCUBEShadow")))){
+        if((kt->kind==TK_KW_SAMPLER)||(kt->kind==TK_IDENT&&(!strcmp(kt->text,"texture")||!strcmp(kt->text,"textureCUBE")||!strcmp(kt->text,"sampler2D")||!strcmp(kt->text,"samplerCUBE")||!strcmp(kt->text,"sampler3D")||!strcmp(kt->text,"sampler1D")||!strcmp(kt->text,"sampler2DShadow")||!strcmp(kt->text,"samplerCUBEShadow")))){
             if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG d3d9: %s at line %d\n",kt->text,kt->line);
-            int is_samp=(kt->kind==TK_KW_SAMPLER)||strcmp(kt->text,"texture");
+            int is_samp=(kt->kind==TK_KW_SAMPLER)||(strcmp(kt->text,"texture")&&strcmp(kt->text,"textureCUBE"));
             advance(ts);
             Token *gn2=peek(ts); expect(ts,TK_IDENT,"D3D9 sampler/texture name");
             if(is_samp){
@@ -219,9 +219,10 @@ HLSLProg hlsl_parse(TokStream *ts){
                         else if(t->kind==TK_RBRACE)d--;
                         else if(t->kind==TK_SEMI&&d==0) break;
                         if(t->kind==TK_IDENT&&!strcmp(t->text,"Texture")&&(ts->i+1<ts->n)){
-                            /* sampler_state { Texture = <t0>; } — capture the bound texture */
+                            /* sampler_state { Texture = <t0>; } — capture the bound texture
+                             * (the workshop .fx files use `Texture = (Name);` too) */
                             size_t save=ts->i+2; /* skip `Texture =` */
-                            if(save<ts->n&&ts->toks[save].kind==TK_LT) save++;
+                            if(save<ts->n&&(ts->toks[save].kind==TK_LT||ts->toks[save].kind==TK_LPAREN)) save++;
                             if(save<ts->n&&ts->toks[save].kind==TK_IDENT) texname=strdup(ts->toks[save].text);
                         }
                         if(t->kind==TK_EOF) die(t->line,"unterminated sampler_state");
@@ -265,6 +266,7 @@ HLSLProg hlsl_parse(TokStream *ts){
                 skip_register_suffix(ts);
                 expect(ts,TK_SEMI,";");
                 Type tt={0}; tt.kind=T_TEXTURE; tt.tex_elt=T_FLOAT;
+                if(kt->kind==TK_IDENT&&!strcmp(kt->text,"textureCUBE")) tt.tex_cube=1;
                 HLSLGlobal tg={0}; tg.name=strdup(gn2->text); tg.ty=tt; tg.line=gn2->line;
                 hpush((void**)&hp.globals,&hp.nglobals,&gcap,&tg,sizeof tg);
             }

@@ -138,14 +138,22 @@ int main(int argc, char **argv){
         int idx=k.intValue;
         if([toks[0] isEqualToString:@"tex"]){
             int w=(int)toks[2].integerValue, h=(int)toks[3].integerValue;
-            MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:w height:h mipmapped:NO];
+            BOOL cube = toks.count>4 && [toks[4] isEqualToString:@"cube"];
+            MTLTextureDescriptor *td;
+            if(cube) td=[MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float size:w mipmapped:NO];
+            else td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:w height:h mipmapped:NO];
             td.usage=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;
             id<MTLTexture> t=[dev newTextureWithDescriptor:td];
             float *px=malloc((size_t)w*h*16);
             for(int y=0;y<h;y++) for(int x=0;x<w;x++){
                 px[(y*w+x)*4+0]=(float)(x+1); px[(y*w+x)*4+1]=(float)(y+1);
                 px[(y*w+x)*4+2]=(float)(x+y+1); px[(y*w+x)*4+3]=1.0f; }
-            [t replaceRegion:MTLRegionMake2D(0,0,(NSUInteger)w,(NSUInteger)h) mipmapLevel:0 withBytes:px bytesPerRow:(NSUInteger)w*16];
+            if(cube){
+                for(int face=0;face<6;face++)
+                    [t replaceRegion:MTLRegionMake2D(0,0,(NSUInteger)w,(NSUInteger)h) mipmapLevel:0 slice:face withBytes:px bytesPerRow:(NSUInteger)w*16 bytesPerImage:(NSUInteger)w*h*16];
+            } else {
+                [t replaceRegion:MTLRegionMake2D(0,0,(NSUInteger)w,(NSUInteger)h) mipmapLevel:0 withBytes:px bytesPerRow:(NSUInteger)w*16];
+            }
             free(px);
             texs[idx]=t;
             continue;

@@ -464,11 +464,29 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
         HLSLParam *p=&hf->params[i];
         if(p->sem&&sem_eq(p->sem,"SV_VertexID")){ p->ty.kind=T_UINT32; p->ty.vecn=0; p->ty.as=AS_THREAD; }
     }
+    /* user-defined struct params (D3D9 VSInput style) ARE the stage-in struct:
+     * unpacked directly by the codegen; set their field attrs here */
+    for(size_t i=0;i<hf->np;i++){
+        HLSLParam *p=&hf->params[i];
+        if(p->ty.kind!=T_STRUCT||p->ty.is_ptr) continue;
+        StructDef *sd=NULL;
+        for(size_t s=0;s<g_prog.nstructs;s++) if(!strcmp(g_prog.structs[s].tag,p->ty.struct_name)){ sd=&g_prog.structs[s]; break; }
+        if(sd) for(size_t f=0;f<sd->nfields;f++) sem_to_attr(sd->fields[f].sem,&sd->fields[f].attr,&sd->fields[f].attr_idx,1);
+    }
+    /* ret struct: map semantics to attrs (must run even when there are no
+     * scalar/vector attrs — an all-struct-input VS returns early below) */
+    if(fn->ret.kind==T_STRUCT){
+        for(size_t s=0;s<g_prog.nstructs;s++) if(!strcmp(g_prog.structs[s].tag,fn->ret.struct_name)){
+            StructDef *sd=&g_prog.structs[s];
+            for(size_t f=0;f<sd->nfields;f++) sem_to_attr(sd->fields[f].sem,&sd->fields[f].attr,&sd->fields[f].attr_idx,0);
+        }
+    }
     /* gather attribute params (non-pointer, non-coord scalar/vector types) */
     size_t attr_count=0;
     for(size_t i=0;i<hf->np;i++){
         HLSLParam *p=&hf->params[i];
         if(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER) continue;
+        if(p->ty.kind==T_STRUCT) continue; /* unpacked directly */
         if(p->is_uniform) continue; /* per-draw constants live in __uniforms */
         if(p->sem&&sem_eq(p->sem,"SV_VertexID")) continue;
         attr_count++;
@@ -482,6 +500,7 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
     for(size_t i=0;i<hf->np;i++){
         HLSLParam *p=&hf->params[i];
         if(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER) continue;
+        if(p->ty.kind==T_STRUCT) continue;
         if(p->is_uniform) continue;
         if(p->sem&&sem_eq(p->sem,"SV_VertexID")) continue;
         Field *f=&sd.fields[fi++];
@@ -505,7 +524,7 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
         if(is_svvid){ /* vertex_id built-in: keep as a thread-typed param */
             p->ty.kind=T_UINT32; p->ty.vecn=0; p->ty.as=AS_THREAD;
             np2[nn2++]=(Param){p->name,p->ty,UN_UNIFORM}; continue; }
-        int is_attr = !(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER);
+        int is_attr = !(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER||p->ty.kind==T_STRUCT);
         if(is_attr){ names[nn++]=p->name; continue; }
         np2[nn2++]=(Param){p->name,p->ty,UN_UNIFORM};
     }
@@ -519,13 +538,6 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
         rw_block(&fn->body,&rw);
     }
     free(names);
-    /* ret struct: map semantics to attrs */
-    if(fn->ret.kind==T_STRUCT){
-        for(size_t s=0;s<g_prog.nstructs;s++) if(!strcmp(g_prog.structs[s].tag,fn->ret.struct_name)){
-            StructDef *sd=&g_prog.structs[s];
-            for(size_t f=0;f<sd->nfields;f++) sem_to_attr(sd->fields[f].sem,&sd->fields[f].attr,&sd->fields[f].attr_idx,0);
-        }
-    }
 }
 
 /* hlsl_build: lower an HLSLProg onto the shared Program AST.
@@ -624,12 +636,12 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG unif: %s kind=%d isc=%d vecn=%d an=%d\n",gg->name,gg->ty.kind,gg->is_const,gg->ty.vecn,gg->ty.array_n);
             if(gg->is_const) continue;
             if(gg->ty.is_ptr||gg->ty.kind==T_TEXTURE||gg->ty.kind==T_SAMPLER) continue;
-            if(gg->ty.kind!=T_FLOAT&&gg->ty.kind!=T_INT32&&gg->ty.kind!=T_UINT32&&gg->ty.kind!=T_BOOL&&gg->ty.kind!=T_HALF) continue;
+            if(gg->ty.kind!=T_FLOAT&&gg->ty.kind!=T_INT32&&gg->ty.kind!=T_UINT32&&gg->ty.kind!=T_BOOL&&gg->ty.kind!=T_HALF&&gg->ty.kind!=T_STRUCT) continue;
             Type ft=gg->ty;
             /* D3D9 constant-register alignment: float2/float3 uniforms occupy a
              * full float4 register (elements of floatN arrays align to 16 bytes).
              * The consumer truncates <4 x float> back to float2/float3. */
-            if(ft.vecn==2||ft.vecn==3) ft.vecn=4;
+            if((ft.vecn==2||ft.vecn==3)&&ft.kind!=T_STRUCT) ft.vecn=4;
             uf[nuf++]=(Field){strdup(gg->name),ft,0,0,NULL};
         }
         /* `uniform` params (D3D9 per-draw constants, e.g. `uniform bool
@@ -717,7 +729,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             /* infer the stage from the return semantics: SV_Target -> fragment;
              * a struct return carrying SV_Position (or the POSITION semantic)
              * -> vertex (semantics are case-insensitive) */
-            if(hf->ret_sem&&sem_pref(hf->ret_sem,"SV_Target")) s_ps=1;
+            if(hf->ret_sem&&(sem_pref(hf->ret_sem,"SV_Target")||sem_pref(hf->ret_sem,"COLOR"))) s_ps=1;
             else if(hf->ret_sem&&(sem_pref(hf->ret_sem,"SV_Position")||sem_pref(hf->ret_sem,"POSITION"))) s_vs=1;
             else if(hf->ret.kind==T_STRUCT){
                 StructDef *sd=NULL;
