@@ -338,6 +338,21 @@ static void fill_param_li(CG *c,int pi,LInfo *li){
     Param *pr=&c->fn->params[pi];
     li->tk=pr->ty.kind; li->sname=pr->ty.struct_name; li->as=pr->ty.as; li->pi=pi; li->is_local=0; li->vecn=pr->ty.vecn; li->matn=pr->ty.matn; }
 
+/* promote a half-typed value to f32 (vector-aware); compute is done in f32 */
+static const char *h2f(CG *c, const char *v, int vecn){
+    const char *w=newtmp(c);
+    if(vecn>1) emit(c,"  %s = fpext <%d x half> %s to <%d x float>\n",w,vecn,v,vecn);
+    else emit(c,"  %s = fpext half %s to float\n",w,v);
+    return w;
+}
+/* demote an f32 value for half storage (vector-aware) */
+static const char *f2h(CG *c, const char *v, int vecn){
+    const char *w=newtmp(c);
+    if(vecn>1) emit(c,"  %s = fptrunc <%d x float> %s to <%d x half>\n",w,vecn,v,vecn);
+    else emit(c,"  %s = fptrunc float %s to half\n",w,v);
+    return w;
+}
+
 /* load an lvalue, promoting half to float; *k gets the expression-level kind, c->rvw the vector width */
 static const char *emit_load_t(CG *c, LInfo *li, const char *addr, ValKind *k){
     if(li->tk==T_STRUCT){
@@ -361,7 +376,7 @@ static const char *emit_load_t(CG *c, LInfo *li, const char *addr, ValKind *k){
     char ll[32]; ll_of(ll,sizeof ll,li->tk,li->vecn); const char *v=newtmp(c);
     emit(c,"  %s = load %s, %s %s, align %d\n",v,ll,pty,addr,type_align(li->tk,li->vecn));
     c->rvw=li->vecn>1?li->vecn:0;
-    if(li->tk==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,v); v=w; }
+    if(li->tk==T_HALF) v=h2f(c,v,li->vecn);
     *k=scalar_vk(li->tk); return v;
 }
 /* convert an rvalue for storage into type tk (half demotes via fptrunc); *exprv = pre-demotion value */
@@ -388,8 +403,9 @@ static const char *vconv(CG *c, const char *v, int n, ValKind from, ValKind to){
 static const char *to_storage(CG *c, const char *v, ValKind from, int from_vw, TypeKind tk, int vecn){
     if(vecn>1){ if(from_vw&&from_vw!=vecn) die(0,"vector width mismatch");
         ValKind want=scalar_vk(tk);
-        if(!from_vw){ v=coerce(c,v,from,want); return splat(c,v,scalar_ll(tk),vecn); }
-        if(from!=want) return vconv(c,v,vecn,from,want);
+        if(!from_vw){ v=coerce(c,v,from,want); if(tk==T_HALF) v=f2h(c,v,0); return splat(c,v,scalar_ll(tk),vecn); }
+        if(from!=want) v=vconv(c,v,vecn,from,want);
+        if(tk==T_HALF) v=f2h(c,v,vecn);
         return v; }
     if(from_vw) die(0,"cannot store a vector into a scalar");
     const char *ev; return store_val(c,v,from,tk,&ev);
@@ -399,7 +415,7 @@ static int vec_name(const char *s,TypeKind *k,int *n){
     size_t l=strlen(s); if(l<2) return 0; char w=s[l-1]; if(w<'2'||w>'4') return 0;
     char base[8]; if(l-1>=sizeof base) return 0; memcpy(base,s,l-1); base[l-1]=0;
     if(!strcmp(base,"float"))*k=T_FLOAT; else if(!strcmp(base,"int"))*k=T_INT32;
-    else if(!strcmp(base,"uint"))*k=T_UINT32; else return 0;
+    else if(!strcmp(base,"uint"))*k=T_UINT32; else if(!strcmp(base,"half"))*k=T_HALF; else return 0;
     *n=w-'0'; return 1;
 }
 /* component name -> index, or -1; multi-char swizzles return -1 here */
@@ -828,10 +844,10 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             if(!c->scalar_load[idx]){
                 if(c->fn->is_kernel){ char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn); const char *v=newtmp(c);
                     emit(c,"  %s = load %s, %s addrspace(2)* %%_%s, align %d\n",v,ll,ll,p->name,type_align(p->ty.kind,p->ty.vecn));
-                    if(p->ty.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,v); v=w; }
+                    if(p->ty.kind==T_HALF) v=h2f(c,v,p->ty.vecn);
                     c->scalar_load[idx]=(char*)v;
                 } else { char *nm=malloc(strlen(p->name)+3); snprintf(nm,strlen(p->name)+3,"%%_%s",p->name);
-                    if(p->ty.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,nm); nm=(char*)w; }
+                    if(p->ty.kind==T_HALF){ const char *w=h2f(c,nm,p->ty.vecn); nm=(char*)w; }
                     c->scalar_load[idx]=nm; } }
             return c->scalar_load[idx]; }
         die(0,"undefined name %s",e->name);
@@ -865,7 +881,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 const char *ev=newtmp(c);
                 char fl[32]; type_ll(fl,sizeof fl,fd->ty.kind,fd->ty.struct_name,fd->ty.vecn);
                 emit(c,"  %s = extractvalue %%struct.%s %s, %d\n",ev,c->rstruct,cv,fi);
-                if(fd->ty.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,ev); ev=w; }
+                if(fd->ty.kind==T_HALF) ev=h2f(c,ev,fd->ty.vecn);
                 *k=scalar_vk(fd->ty.kind); c->rvw=fd->ty.vecn>1?fd->ty.vecn:0;
                 c->rstruct = fd->ty.kind==T_STRUCT?fd->ty.struct_name:NULL;
                 return ev;
@@ -877,8 +893,13 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     int idxs[4]; int nc=swizzle_idx(e->field,idxs);
                     if(nc<0) die(0,"invalid vector component .%s",e->field);
                     for(int i=0;i<nc;i++) if(idxs[i]>=vp->ty.vecn) die(0,"invalid vector component .%s",e->field);
-                    char nm[64]; snprintf(nm,sizeof nm,"%%_%s",vp->name);
+                    char nmbuf[64]; snprintf(nmbuf,sizeof nmbuf,"%%_%s",vp->name);
+                    const char *nm=nmbuf;
                     const char *elt = vp->ty.kind==T_HALF?"float":scalar_ll(vp->ty.kind);
+                    if(vp->ty.kind==T_HALF){
+                        if(!c->scalar_load[vi]){ const char *w=h2f(c,nm,vp->ty.vecn); c->scalar_load[vi]=(char*)w; }
+                        nm=c->scalar_load[vi];
+                    }
                     char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",vp->ty.vecn,elt);
                     *k=scalar_vk(vp->ty.kind);
                     if(nc==1){ const char *r=newtmp(c); c->rvw=0;
@@ -1476,7 +1497,8 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         TypeKind cb; int cn;
         if(vec_name(e->name,&cb,&cn)){
             if(e->nargs!=1&&(int)e->nargs>cn) die(0,"%s expects 1 to %d argument(s)",e->name,cn);
-            const char *elt=scalar_ll(cb); const char *acc="undef";
+            /* expression-level vectors are f32 (half demotes only at storage) */
+            const char *elt=cb==T_HALF?"float":scalar_ll(cb); const char *acc="undef";
             if((int)e->nargs==1){
                 ValKind ak; const char *v=gen_rval(c,e->args[0],&ak);
                 if(c->rvw) die(0,"vector argument in %s constructor",e->name);
@@ -1548,7 +1570,8 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 if(pt.kind==T_TVAR) continue; /* template parameter matches anything */
                 if(pt.is_ptr){ if(!at.is_ptr||at.as!=pt.as){ bad=1; break; } continue; }
                 if(at.kind!=pt.kind){
-                    if(at.kind==T_INT32&&pt.kind==T_FLOAT&&!at.vecn&&!pt.vecn){ rk+=1; continue; } /* promotion */
+                    if(at.kind==T_INT32&&(pt.kind==T_FLOAT||pt.kind==T_HALF)&&!at.vecn&&!pt.vecn){ rk+=1; continue; } /* promotion */
+                    if(at.kind==T_FLOAT&&pt.kind==T_HALF&&!at.vecn&&!pt.vecn){ rk+=1; continue; } /* half demotion */
                     bad=1; break;
                 }
                 if(at.vecn!=pt.vecn){
@@ -1621,7 +1644,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             }
             char rll[32]; ll_of(rll,sizeof rll,f->ret.kind,f->ret.vecn);
             emit(c,"  %s = call %s @%s(%s)\n",r,rll,f->link_name?f->link_name:f->name,args);
-            if(f->ret.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,r); r=w; }
+            if(f->ret.kind==T_HALF) r=h2f(c,r,f->ret.vecn);
             *k=scalar_vk(f->ret.kind); c->rvw=f->ret.vecn>1?f->ret.vecn:0; return r;
         }
         for(size_t b=0;b<sizeof builtins/sizeof *builtins;b++){ Builtin *bi=&builtins[b];
