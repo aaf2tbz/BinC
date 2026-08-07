@@ -789,8 +789,8 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                 }
             }
         }
-        if(is_entry||(stage_all&&(s_vs||s_ps))){            if(is_entry) entry_found=1;
-            if(stage_all){ fn.stage=s_vs?ST_VERTEX:ST_FRAGMENT; }
+        if(is_entry||(stage_all&&(s_vs||s_ps||is_gs))){            if(is_entry) entry_found=1;
+            if(stage_all){ fn.stage=is_entry&&is_gs?ST_GEOMETRY:(s_vs?ST_VERTEX:s_ps?ST_FRAGMENT:is_gs?ST_GEOMETRY:ST_FRAGMENT); }
             else if(is_entry){ fn.stage=is_vs?ST_VERTEX:is_ps?ST_FRAGMENT:is_gs?ST_GEOMETRY:ST_NONE; }
             /* resources (cbuffers + typed globals) become params in register
              * order; cbuffer field references rewrite to struct-field access */

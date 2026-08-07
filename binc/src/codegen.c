@@ -2436,7 +2436,7 @@ void emit_air(FILE *out, Program *prog){
             if(fn->ret.kind==T_VOID) snprintf(rl,sizeof rl,"void");
             else if(fn->ret.matn) mll_of(rl,sizeof rl,fn->ret.matn,fn->ret.matm);
             else if(fn->ret.kind==T_STRUCT){ if(fn->stage==ST_NONE) snprintf(rl,sizeof rl,"%%struct.%s",fn->ret.struct_name);
-                else { StructDef *sd=find_struct(prog,fn->ret.struct_name); stage_lit_type(rl,sizeof rl,sd); } }
+                else { StructDef *sd=find_struct(prog,fn->ret.struct_name); if(!sd){ die(fn->line,"internal: struct return %s not found",fn->ret.struct_name); } stage_lit_type(rl,sizeof rl,sd); } }
             else ll_of(rl,sizeof rl,fn->ret.kind,fn->ret.vecn);
             so+=snprintf(sig+so,sizeof sig-so,"define %s%s @%s(",fn->stage==ST_NONE?"internal ":"",rl,fn->link_name?fn->link_name:fn->name); }
         int emitted=0;

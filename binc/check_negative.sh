@@ -4,15 +4,21 @@
 # file (one substring per line, '#' starts a comment line).
 cd "$(dirname "$0")"
 fail=0
-for f in ../tests/negative/*.binc; do
+for f in ../tests/negative/*.binc ../tests/negative/*.fx; do
     [ -e "$f" ] || continue
-    exp="${f%.binc}.expect"
+    case "$f" in
+        *.fx) exp="${f%.fx}.expect";;
+        *)    exp="${f%.binc}.expect";;
+    esac
     if [ ! -e "$exp" ]; then
         echo "FAIL: $f has no .expect file"
         fail=1
         continue
     fi
-    out=$(./binc "$f" 2>&1)
+    case "$f" in
+        *.fx) out=$(./binc -E "$(basename "$f" .fx)" -T gs_4_0 --stage-all "$f" 2>&1);;
+        *)    out=$(./binc "$f" 2>&1);;
+    esac
     rc=$?
     if [ $rc -eq 0 ]; then
         echo "FAIL: $f compiled successfully but should fail"
