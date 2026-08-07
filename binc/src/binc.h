@@ -128,7 +128,7 @@ void blk_push(Block *b, Stmt s); int is_stag(const char *s);
 void parse_struct(TokStream *ts, Program *prog); void parse_function(TokStream *ts, Program *prog);
 extern const char *g_tvar; extern Program *g_parse_prog;
 /* ---- HLSL frontend (Phases 1-7) ---- */
-typedef struct { char *name; char *sem; Type ty; int inq; int reg; } HLSLParam; /* inq: 0 plain, 1 in, 2 out, 3 inout */
+typedef struct { char *name; char *sem; Type ty; int inq; int reg; int is_uniform; } HLSLParam; /* inq: 0 plain, 1 in, 2 out, 3 inout */
 typedef struct { char *name; HLSLParam *params; size_t np; Type ret; char *ret_sem;
     Block body; int line; int numtx, numty, numtz; int has_numthreads; int is_export; } HLSLFunc;
 typedef struct { char *tag; Field *fields; size_t nfields; } HLSLStruct;

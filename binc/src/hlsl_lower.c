@@ -469,6 +469,7 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
     for(size_t i=0;i<hf->np;i++){
         HLSLParam *p=&hf->params[i];
         if(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER) continue;
+        if(p->is_uniform) continue; /* per-draw constants live in __uniforms */
         if(p->sem&&sem_eq(p->sem,"SV_VertexID")) continue;
         attr_count++;
     }
@@ -481,11 +482,12 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
     for(size_t i=0;i<hf->np;i++){
         HLSLParam *p=&hf->params[i];
         if(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER) continue;
+        if(p->is_uniform) continue;
         if(p->sem&&sem_eq(p->sem,"SV_VertexID")) continue;
         Field *f=&sd.fields[fi++];
         f->name=strdup(p->name); f->ty=p->ty;
         f->sem=p->sem?strdup(p->sem):NULL;
-        if(!p->sem){ f->attr=5; f->attr_idx=16+(int)fi; } /* semantic-less (uniform bool): keep out of the D3D9 locn table */
+        if(!p->sem){ f->attr=5; f->attr_idx=16+(int)fi; } /* semantic-less: keep out of the D3D9 locn table */
         else sem_to_attr(p->sem,&f->attr,&f->attr_idx,1);
     }
     sd.nfields=fi;
@@ -624,8 +626,26 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             if(gg->ty.is_ptr||gg->ty.kind==T_TEXTURE||gg->ty.kind==T_SAMPLER) continue;
             if(gg->ty.kind!=T_FLOAT&&gg->ty.kind!=T_INT32&&gg->ty.kind!=T_UINT32&&gg->ty.kind!=T_BOOL&&gg->ty.kind!=T_HALF) continue;
             Type ft=gg->ty;
-            if(ft.vecn==2||ft.vecn==3){ ft.array_n=ft.vecn; ft.vecn=0; }
+            /* D3D9 constant-register alignment: float2/float3 uniforms occupy a
+             * full float4 register (elements of floatN arrays align to 16 bytes).
+             * The consumer truncates <4 x float> back to float2/float3. */
+            if(ft.vecn==2||ft.vecn==3) ft.vecn=4;
             uf[nuf++]=(Field){strdup(gg->name),ft,0,0,NULL};
+        }
+        /* `uniform` params (D3D9 per-draw constants, e.g. `uniform bool
+         * bTexture`) pack into the same const struct; their references
+         * rewrite to __uniforms.<name> exactly like uniform globals. */
+        for(size_t i=0;i<hp->nfuncs;i++){
+            HLSLFunc *hf=&hp->funcs[i];
+            for(size_t p=0;p<hf->np;p++){
+                HLSLParam *hp2=&hf->params[p];
+                if(!hp2->is_uniform) continue;
+                size_t dup=0; for(size_t d=0;d<nuf;d++) if(!strcmp(uf[d].name,hp2->name)){ dup=1; break; }
+                if(dup) continue;
+                Type ft=hp2->ty;
+                if(ft.vecn==2||ft.vecn==3) ft.vecn=4;
+                uf[nuf++]=(Field){strdup(hp2->name),ft,0,0,NULL};
+            }
         }
         if(nuf){
             char tag[64]; snprintf(tag,sizeof tag,"$uniforms");
@@ -717,6 +737,19 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             for(size_t r=0;r<nres;r++){
                 fn.params=realloc(fn.params,(fn.nparams+1)*sizeof(Param));
                 fn.params[fn.nparams++]=(Param){strdup(res[r].name),res[r].ty,UN_UNIFORM};
+            }
+            /* uniform params (D3D9 per-draw constants) fold into __uniforms:
+             * drop them from the stage signature; the body references are
+             * rewritten to __uniforms.<name> by the unif_rw pass below. */
+            {
+                size_t keep=0;
+                for(size_t q=0;q<fn.nparams;q++){
+                    int unif=0;
+                    for(size_t p=0;p<hf->np;p++)
+                        if(!strcmp(hf->params[p].name,fn.params[q].name)&&hf->params[p].is_uniform){ unif=1; break; }
+                    if(!unif) fn.params[keep++]=fn.params[q];
+                }
+                fn.nparams=keep;
             }
             for(size_t ci=0;ci<hp->ncbufs;ci++){
                 HLCBuf *cb=&hp->cbufs[ci];

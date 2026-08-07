@@ -575,6 +575,15 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
     const char *bv=NULL; int bw=0; if(e->nargs>=2){ bv=gen_rval(c,e->args[1],&bk); bw=c->rvw; }
     const char *cv=NULL; int cw=0; if(e->nargs>=3){ cv=gen_rval(c,e->args[2],&ck); cw=c->rvw; }
     int n=aw?aw:(bw?bw:cw); if(n==0) n=1;
+    /* HLSL implicit vector truncation (D3D9): a wider float argument truncates
+     * to the intrinsic's effective width, e.g. dot(float3, float4) — the
+     * first argument's width wins, mirroring the E_BIN compound-assign rule. */
+    if(aw>n&&ak==VK_F32){ static const int t3[3]={0,1,2}, t2[2]={0,1}; char vty[24]; snprintf(vty,sizeof vty,"<%d x float>",aw);
+        av=swizzle_read(c,av,vty,"float",n==3?t3:t2,n); aw=n; }
+    if(bw>n&&bk==VK_F32){ static const int t3[3]={0,1,2}, t2[2]={0,1}; char vty[24]; snprintf(vty,sizeof vty,"<%d x float>",bw);
+        bv=swizzle_read(c,bv,vty,"float",n==3?t3:t2,n); bw=n; }
+    if(cw>n&&ck==VK_F32){ static const int t3[3]={0,1,2}, t2[2]={0,1}; char vty[24]; snprintf(vty,sizeof vty,"<%d x float>",cw);
+        cv=swizzle_read(c,cv,vty,"float",n==3?t3:t2,n); cw=n; }
     if((aw&&aw!=n)||(bw&&bw!=n)||(cw&&cw!=n)) die(0,"vector width mismatch in %s",nm);
     /* ---- HLSL intrinsics that also take integer operands ---- */
     if(!strcmp(nm,"abs")){
@@ -2250,12 +2259,12 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
             }
             continue;
         }
-        if(fn->stage==ST_VERTEX && p->ty.as==AS_THREAD){ meta_emit(m,"!%d = !{i32 %d, !\"air.vertex_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
-        else if(fn->stage==ST_FRAGMENT && p->ty.kind==T_FLOAT && p->ty.vecn==4){ meta_emit(m,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
-        else if(p->ty.kind==T_TEXTURE){ /* probed: air.texture with access flags */
+        if(p->ty.kind==T_TEXTURE){ /* probed: air.texture with access flags */
             meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"air.sample\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->ty.tex_cube?"texturecube<float, sample>":"texture2d<float, sample>",p->name); }
         else if(p->ty.kind==T_SAMPLER){ /* probed: air.sampler */
             meta_emit(m,"!%d = !{i32 %d, !\"air.sampler\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->name); }
+        else if(fn->stage==ST_VERTEX && p->ty.as==AS_THREAD){ meta_emit(m,"!%d = !{i32 %d, !\"air.vertex_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
+        else if(fn->stage==ST_FRAGMENT && p->ty.kind==T_FLOAT && p->ty.vecn==4 && p->ty.as==AS_THREAD){ meta_emit(m,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
         else if(p->ty.is_ptr) meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 %d, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->ty.as,elem_size(prog,&p->ty),elem_align(prog,&p->ty),tn,p->name);
         else meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,elem_size(prog,&p->ty),argi,elem_size(prog,&p->ty),elem_align(prog,&p->ty),tn,p->name);
         argi++;

@@ -514,7 +514,8 @@ HLSLProg hlsl_parse(TokStream *ts){
                 if(peek(ts)->kind==TK_KW_INOUT&&!hp.inq){ hp.inq=3; advance(ts); }
                 else if(peek(ts)->kind==TK_KW_OUT&&!hp.inq){ hp.inq=2; advance(ts); }
                 else if(peek(ts)->kind==TK_KW_IN&&!hp.inq){ hp.inq=1; advance(ts); }
-                else if(peek(ts)->kind==TK_KW_UNIFORM||peek(ts)->kind==TK_KW_CONSTANT||peek(ts)->kind==TK_KW_STATIC) advance(ts);
+                else if(peek(ts)->kind==TK_KW_UNIFORM){ hp.is_uniform=1; advance(ts); }
+                else if(peek(ts)->kind==TK_KW_CONSTANT||peek(ts)->kind==TK_KW_STATIC) advance(ts);
                 else break;
             }
             while(peek(ts)->kind==TK_KW_LINEAR||peek(ts)->kind==TK_KW_NOPERSPECTIVE||

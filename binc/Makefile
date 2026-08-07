@@ -116,6 +116,15 @@ render-diff:
 diff-nbody:
 	@bash ../tools/hlsl-diff/nbody-diff.sh 2>&1 | tail -1
 
+# Phase-7 D3D9 goldens: .fx shaders rendered against pinned, hand-verified
+# pixels (no clean differential path — fxc is Windows-only)
+GOLDEN_TESTS := basichlsl
+golden-d3d9:
+	@for g in $(GOLDEN_TESTS); do \
+		echo "== $$g"; \
+		bash ../tools/hlsl-diff/golden-d3d9.sh $$g || exit 1; \
+	done
+
 # GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
 ci: binc test-negative test-fuzz test-interp examples
 	@echo "CI OK"
@@ -123,4 +132,4 @@ ci: binc test-negative test-fuzz test-interp examples
 clean:
 	rm -f binc harness pong_host binc_runtime.o build/*.metallib build/*.h *.ll *.air
 
-.PHONY: binc harness runtime examples pong verify test-negative test-fuzz ci clean
+.PHONY: binc harness runtime examples pong verify test-negative test-fuzz ci clean golden-d3d9
