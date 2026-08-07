@@ -56,6 +56,49 @@ def struct_layout(body):
     return out, total
 
 
+FUNC = re.compile(r"!(\d+) = !\{<[^!]*@([A-Za-z0-9_]+),[ ]*![0-9]+,[ ]*!(\d+)\}")
+# ^ function metadata node: !N = !{<sig> @Name, !out, !arglist} (arglist is the
+#   last ref). The opaque signature may contain commas but no '!'.
+
+
+def air_bindings(ll, func):
+    """Return (uniforms_buf, first_tex) binding indices for `func`, parsed from
+    the AIR metadata (air.buffer/air.texture location_index of its arguments).
+
+    These shift whenever the argument layout changes (e.g. selective resource
+    forwarding drops dead texture/sampler args from a VS), so they must be
+    derived from the .ll rather than hardcoded.
+    """
+    nodes = {}
+    for line in ll.splitlines():
+        m2 = re.match(r"!(\d+) = !\{(.*)\}\s*$", line.strip())
+        if m2:
+            nodes[int(m2.group(1))] = m2.group(2)
+    fn = None
+    for nid, body in nodes.items():
+        if re.search(r"@" + re.escape(func) + r"\b", body) and body.lstrip().startswith("<"):
+            fn = nid
+            break
+    if fn is None:
+        return None, None
+    refs = re.findall(r"!(\d+)", nodes[fn])
+    if not refs:
+        return None, None
+    arglist = nodes.get(int(refs[-1]), "")
+    uidx = tidx = None
+    for aid in (int(x) for x in re.findall(r"!(\d+)", arglist)):
+        ab = nodes.get(aid, "")
+        if "air.buffer" in ab and '"__uniforms"' in ab:
+            m3 = re.search(r'"air.location_index", i32 (\d+)', ab)
+            if m3:
+                uidx = int(m3.group(1))
+        elif "air.texture" in ab and tidx is None:
+            m3 = re.search(r'"air.location_index", i32 (\d+)', ab)
+            if m3:
+                tidx = int(m3.group(1))
+    return uidx, tidx
+
+
 def main():
     llpath, specpath = sys.argv[1], sys.argv[2]
     ll = open(llpath).read()
@@ -110,6 +153,13 @@ def main():
 
     words = [struct.unpack("<I", buf[i:i + 4])[0] for i in range(0, total, 4)]
     cbuf = " ".join(str(w) for w in words)
+    # buffer/tex binding indices come from the AIR metadata (they shift when the
+    # argument layout changes); fall back to the historical layout if unparsable
+    vs_u, _ = air_bindings(ll, "RenderSceneVS")
+    ps_u, ps_t = air_bindings(ll, "RenderScenePS")
+    vs_idx = vs_u if vs_u is not None else 2
+    ps_idx = ps_u if ps_u is not None else 5
+    tex_idx = ps_t if ps_t is not None else 3
     spec = f"""vertex RenderSceneVS
 fragment RenderScenePS
 render 64 64 1
@@ -117,14 +167,14 @@ draw 3
 vtx 0 1 0 float4
 vtx 4 1 16 float3
 vtx 1 1 28 float2
-tex 3 64 64
+tex {tex_idx} 64 64
 buf 1 -0.5 -0.5 0.0 1.0 0.0 0.0 1.0 1.0 0.0 -0.0 0.5 0.0 1.0 0.0 0.0 1.0 0.0 1.0 0.5 -0.5 0.0 1.0 0.0 0.0 1.0 0.0 0.0
-buf 2 {cbuf}
-buf 5 {cbuf}
+buf {vs_idx} {cbuf}
+buf {ps_idx} {cbuf}
 dumppix 0
 """
     open(specpath, "w").write(spec)
-    print(f"spec written ({len(words)} cbuf words, {total} bytes)")
+    print(f"spec written ({len(words)} cbuf words, {total} bytes; vs cbuf={vs_idx} ps cbuf={ps_idx} tex={tex_idx})")
 
 
 if __name__ == "__main__":

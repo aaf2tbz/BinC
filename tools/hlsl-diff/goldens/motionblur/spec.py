@@ -61,6 +61,42 @@ def struct_layout(body):
     return out, total
 
 
+def air_resources(ll, func):
+    """Return (found, uniforms_buf, [(tex_loc, is_cube), ...]) for `func`,
+    parsed from the AIR metadata. Binding indices shift when the argument
+    layout changes (selective resource forwarding drops dead args), so derive,
+    don't hardcode."""
+    nodes = {}
+    for line in ll.splitlines():
+        m2 = re.match(r"!(\d+) = !\{(.*)\}\s*$", line.strip())
+        if m2:
+            nodes[int(m2.group(1))] = m2.group(2)
+    fn = None
+    for nid, body in nodes.items():
+        if re.search(r"@" + re.escape(func) + r"\b", body) and body.lstrip().startswith("<"):
+            fn = nid
+            break
+    if fn is None:
+        return False, None, []
+    refs = re.findall(r"!(\d+)", nodes[fn])
+    if not refs:
+        return True, None, []
+    arglist = nodes.get(int(refs[-1]), "")
+    uidx = None
+    texs = []
+    for aid in (int(x) for x in re.findall(r"!(\d+)", arglist)):
+        ab = nodes.get(aid, "")
+        if "air.buffer" in ab and '"__uniforms"' in ab:
+            m3 = re.search(r'"air.location_index", i32 (\d+)', ab)
+            if m3:
+                uidx = int(m3.group(1))
+        elif "air.texture" in ab:
+            m3 = re.search(r'"air.location_index", i32 (\d+)', ab)
+            if m3:
+                texs.append((int(m3.group(1)), "texturecube" in ab))
+    return True, uidx, texs
+
+
 def main():
     llpath, specpath = sys.argv[1], sys.argv[2]
     vs = sys.argv[3] if len(sys.argv) > 3 else "VS"
@@ -117,6 +153,17 @@ def main():
 
     words = [struct.unpack("<I", buf[i:i + 4])[0] for i in range(0, total, 4)]
     cbuf = " ".join(str(w) for w in words)
+    vs_found, vs_u, _ = air_resources(ll, vs)
+    ps_found, ps_u, ps_texs = air_resources(ll, ps)
+    vs_idx = vs_u if vs_u is not None else (8 if vs_found else None)
+    ps_idx = ps_u if ps_u is not None else (8 if ps_found else None)
+    texlines = "\n".join(
+        f"tex {loc} 64 64{' cube' if cube else ''}" for loc, cube in ps_texs)
+    if not texlines and not ps_found:
+        texlines = "tex 1 64 64"  # historical fallback
+    buflines = "\n".join(
+        f"buf {idx} {' '.join(str(w) for w in words)}"
+        for idx in dict.fromkeys(i for i in (vs_idx, ps_idx) if i is not None))
     # vertex: pos(4) nrm(3) uv(2) @ 0/16/28, stride 36 — flat triangle, normal +Z
     spec = f"""vertex {vs}
 fragment {ps}
@@ -125,9 +172,9 @@ draw 3
 vtx 0 1 0 float4
 vtx 4 1 16 float3
 vtx 1 1 28 float2
-tex 1 64 64
+{texlines}
 buf 1 -0.5 -0.5 0.0 1.0 0.0 0.0 1.0 1.0 0.0 -0.0 0.5 0.0 1.0 0.0 0.0 1.0 0.0 1.0 0.5 -0.5 0.0 1.0 0.0 0.0 1.0 0.0 0.0
-buf 8 {cbuf}
+{buflines}
 dumppix 0
 """
     open(specpath, "w").write(spec)
