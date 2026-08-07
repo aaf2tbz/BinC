@@ -243,6 +243,35 @@ static void rr_block(Block *b, const char *out, const char *field){
  * appended so the modified value flows out. */
 static void iw_expr(Expr *e, const char *fnname);
 static void iw_block(Block *b, const char *fnname);
+static void sr_expr(Expr *e, const char *spname, const char *sfield, const char *coord, const char *fld);
+static void sr_block(Block *b, const char *spname, const char *sfield, const char *coord, const char *fld){
+    for(size_t i=0;i<b->n;i++){
+        Stmt *st=&b->stmts[i];
+        if(st->expr) sr_expr(st->expr,spname,sfield,coord,fld);
+        if(st->init) sr_expr(st->init,spname,sfield,coord,fld);
+        if(st->cond) sr_expr(st->cond,spname,sfield,coord,fld);
+        if(st->for_incr) sr_expr(st->for_incr,spname,sfield,coord,fld);
+        if(st->for_init&&st->for_init->expr) sr_expr(st->for_init->expr,spname,sfield,coord,fld);
+        sr_block(&st->then_b,spname,sfield,coord,fld); sr_block(&st->else_b,spname,sfield,coord,fld);
+        for(size_t c=0;c<st->ncases;c++){ sr_expr(st->cases[c].val,spname,sfield,coord,fld); sr_block(&st->cases[c].body,spname,sfield,coord,fld); }
+        sr_block(&st->def_body,spname,sfield,coord,fld);
+    }
+}
+/* stage_input.<svfield> -> <coord>.<global|local|group> (SPIRV-Cross compute inputs) */
+static void sr_expr(Expr *e, const char *spname, const char *sfield, const char *coord, const char *fld){
+    if(!e) return;
+    if(e->kind==E_FIELD&&e->operand&&e->operand->kind==E_IDENT&&
+       !strcmp(e->operand->name,spname)&&!strcmp(e->field,sfield)){
+        if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG sr-repl: %s.%s -> %s.%s (line %d)\n",spname,sfield,coord,fld,e->line);
+        Expr *base=E(E_IDENT,e->line,e->col); base->name=strdup(coord);
+        Expr *n=E(E_FIELD,e->line,e->col); n->operand=base; n->field=strdup(fld);
+        *e=*n;
+        return;
+    }
+    sr_expr(e->operand,spname,sfield,coord,fld); sr_expr(e->lhs,spname,sfield,coord,fld); sr_expr(e->rhs,spname,sfield,coord,fld);
+    if(e->callee) sr_expr(e->callee,spname,sfield,coord,fld);
+    for(size_t i=0;i<e->nargs;i++) sr_expr(e->args[i],spname,sfield,coord,fld);
+}
 static void rn_expr(Expr *e){ /* HLSL barriers -> the sync builtin */
     if(!e) return;
     if(e->kind==E_CALL&&e->name&&(!strcmp(e->name,"GroupMemoryBarrierWithGroupSync")||!strcmp(e->name,"GroupMemoryBarrier")||!strcmp(e->name,"DeviceMemoryBarrier")||!strcmp(e->name,"AllMemoryBarrierWithGroupSync")))
@@ -333,6 +362,41 @@ static void cc_expr(Expr *e, char ***calls, size_t *nc){
     if(e->callee) cc_expr(e->callee,calls,nc);
     for(size_t i=0;i<e->nargs;i++) cc_expr(e->args[i],calls,nc);
 }
+static void ra_expr(Expr *e, const char *const *res, size_t nres);
+static void ra_block(Block *b, const char *const *res, size_t nres){
+    for(size_t i=0;i<b->n;i++){
+        Stmt *st=&b->stmts[i];
+        if(st->expr) ra_expr(st->expr,res,nres);
+        if(st->init) ra_expr(st->init,res,nres);
+        if(st->cond) ra_expr(st->cond,res,nres);
+        if(st->for_incr) ra_expr(st->for_incr,res,nres);
+        if(st->for_init&&st->for_init->expr) ra_expr(st->for_init->expr,res,nres);
+        ra_block(&st->then_b,res,nres); ra_block(&st->else_b,res,nres);
+        for(size_t c=0;c<st->ncases;c++){ ra_expr(st->cases[c].val,res,nres); ra_block(&st->cases[c].body,res,nres); }
+        ra_block(&st->def_body,res,nres);
+    }
+}
+/* resource-arg capture: every call to a lowered user function gets the module
+ * resources appended as arguments (the callee carries them as trailing params;
+ * the caller's own resource params satisfy the bindings by name) */
+static void ra_expr(Expr *e, const char *const *res, size_t nres){
+    if(!e) return;
+    if(e->kind==E_CALL&&e->name&&!e->callee){
+        for(size_t i=0;i<g_prog.nfuncs;i++)
+            if(!strcmp(g_prog.funcs[i].name,e->name)){
+                e->args=realloc(e->args,(e->nargs+nres)*sizeof(Expr*));
+                for(size_t r=0;r<nres;r++){
+                    Expr *a=E(E_IDENT,e->line,e->col); a->name=strdup(res[r]);
+                    e->args[e->nargs++]=a;
+                }
+                if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG ra: %s nargs=%zu nres=%zu\n",e->name,e->nargs,nres);
+                break;
+            }
+    }
+    ra_expr(e->operand,res,nres); ra_expr(e->lhs,res,nres); ra_expr(e->rhs,res,nres);
+    if(e->callee) ra_expr(e->callee,res,nres);
+    for(size_t i=0;i<e->nargs;i++) ra_expr(e->args[i],res,nres);
+}
 static void iw_stmt(Stmt *st, const char *fnname){
     switch(st->kind){
     case S_EXPR: iw_expr(st->expr,fnname); break;
@@ -387,6 +451,7 @@ static void prog_add_struct(StructDef sd){
  * coord3D param and rewrite body references to .global / .local */
 static void lower_compute(Function *fn, HLSLFunc *hf){
     const char *names[8]; size_t nn=0;
+    const char *sdrops[8]; size_t nsd=0; /* struct params folded into the coord (dropped, NOT rw-rewritten) */
     const char *coord_name=NULL; int coord_kind __attribute__((unused)) =0; /* 1=global, 2=local */
     for(size_t i=0;i<hf->np;i++){
         HLSLParam *p=&hf->params[i];
@@ -395,6 +460,30 @@ static void lower_compute(Function *fn, HLSLFunc *hf){
         else if(sem_eq(p->sem,"SV_GroupThreadID")){ names[nn++]=p->name; if(!coord_name){coord_name=p->name;coord_kind=2;} }
         else if(sem_eq(p->sem,"SV_GroupID")){ names[nn++]=p->name; if(!coord_name){coord_name=p->name;coord_kind=3;} }
         else if(sem_eq(p->sem,"SV_GroupIndex")){ names[nn++]=p->name; if(!coord_name){coord_name=p->name;coord_kind=4;} }
+    }
+    /* SPIRV-Cross pattern: main(SPIRV_Cross_Input stage_input) — a struct param
+     * whose fields carry the thread-id semantics. Rewrite stage_input.<svfield>
+     * to the coord reference and fold the param into the coord machinery. */
+    for(size_t i=0;i<hf->np;i++){
+        HLSLParam *p=&hf->params[i];
+        if(p->ty.kind!=T_STRUCT||p->ty.is_ptr) continue;
+        StructDef *sd=NULL;
+        for(size_t si=0;si<g_prog.nstructs;si++) if(!strcmp(g_prog.structs[si].tag,p->ty.struct_name)){ sd=&g_prog.structs[si]; break; }
+        if(!sd) continue;
+        for(size_t fi=0;fi<sd->nfields;fi++){
+            Field *fd=&sd->fields[fi];
+            if(!fd->sem) continue;
+            const char *fld=NULL;
+            if(sem_eq(fd->sem,"SV_DispatchThreadID")) fld="global";
+            else if(sem_eq(fd->sem,"SV_GroupThreadID")) fld="local";
+            else if(sem_eq(fd->sem,"SV_GroupID")) fld="group";
+            if(!fld) continue;
+            if(!coord_name){ coord_name=p->name; coord_kind=1; }
+            if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG sr: %s.%s -> %s.%s\n",p->name,fd->name,coord_name,fld);
+            sr_block(&fn->body,p->name,fd->name,coord_name,fld);
+            if(nsd<8) sdrops[nsd++]=p->name; /* dropped from the signature (replaced by the coord) */
+            break; /* one SV field per input struct (SPIRV-Cross stage inputs) */
+        }
     }
     if(!coord_name) return; /* no thread ids: plain kernel */
     /* derived thread ids, each semantic its own rewrite in terms of the one
@@ -428,6 +517,7 @@ static void lower_compute(Function *fn, HLSLFunc *hf){
     for(size_t i=0;i<fn->nparams;i++){
         int is_sv=0;
         for(size_t k=0;k<nn;k++) if(!strcmp(fn->params[i].name,names[k])){ is_sv=1; break; }
+        for(size_t k=0;k<nsd;k++) if(!strcmp(fn->params[i].name,sdrops[k])){ is_sv=1; break; }
         if(is_sv) continue;
         np2[nn2++]=fn->params[i];
     }
@@ -636,16 +726,20 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
     int is_vs = strncmp(profile,"vs",2)==0;
     int is_ps = strncmp(profile,"ps",2)==0;
     int is_gs = strncmp(profile,"gs",2)==0;
-    /* module constants: static const globals -> ConstDef */
+    /* module constants: static const globals -> ConstDef; mutable static
+     * scalars (SPIRV-Cross `static uint3 gl_GlobalInvocationID;` pattern)
+     * become mutable module globals (mut=1) */
     for(size_t i=0;i<hp->nglobals;i++){
         HLSLGlobal *gg=&hp->globals[i];
-        if(gg->is_const&&gg->has_init&&!gg->is_groupshared){
-            ConstDef cd={0};
-            cd.name=strdup(gg->name); cd.ty=gg->ty; cd.line=gg->line;
-            cd.is_int=gg->is_int; cd.ival=gg->ival; cd.fval=gg->fval;
-            g_prog.consts=realloc(g_prog.consts,(g_prog.nconsts+1)*sizeof(ConstDef));
-            g_prog.consts[g_prog.nconsts++]=cd;
-        }
+        if(gg->is_groupshared) continue;
+        if(gg->ty.is_ptr||gg->ty.kind==T_TEXTURE||gg->ty.kind==T_SAMPLER) continue; /* resources */
+        if(!gg->is_const&&!gg->has_init&&!gg->is_static) continue; /* D3D9 uniforms fold into __uniforms */
+        ConstDef cd={0};
+        cd.name=strdup(gg->name); cd.ty=gg->ty; cd.line=gg->line;
+        cd.is_int=gg->is_int; cd.ival=gg->ival; cd.fval=gg->fval;
+        cd.mut = !gg->is_const; /* mutable: written by functions */
+        g_prog.consts=realloc(g_prog.consts,(g_prog.nconsts+1)*sizeof(ConstDef));
+        g_prog.consts[g_prog.nconsts++]=cd;
     }
     /* structs */
     for(size_t i=0;i<hp->nstructs;i++){
@@ -678,7 +772,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                 emit+=4;
             }
             Type ft=sf->ty;
-            if(ft.vecn==2||ft.vecn==3){ ft.array_n=ft.vecn; ft.vecn=0; } /* packed vector */
+            if(!ft.array_n&&!ft.array_m&&(ft.vecn==2||ft.vecn==3)){ ft.array_n=ft.vecn; ft.vecn=0; } /* packed vector (not an array field — arrays keep their element vector type) */
             f[nf++]=(Field){strdup(sf->name),ft,0,0,sf->sem?strdup(sf->sem):NULL};
             emit+=sz; d3d=(size_t)d3d_off+sz;
         }
@@ -719,7 +813,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         for(size_t i=0;i<hp->nglobals;i++){
             HLSLGlobal *gg=&hp->globals[i];
             if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG unif: %s kind=%d isc=%d vecn=%d an=%d\n",gg->name,gg->ty.kind,gg->is_const,gg->ty.vecn,gg->ty.array_n);
-            if(gg->is_const||gg->is_groupshared) continue; /* groupshared stays threadgroup memory */
+            if(gg->is_const||gg->is_groupshared||gg->is_static) continue; /* const/groupshared/static stay out of __uniforms */
             if(gg->ty.is_ptr||gg->ty.kind==T_TEXTURE||gg->ty.kind==T_SAMPLER) continue;
             if(gg->ty.kind!=T_FLOAT&&gg->ty.kind!=T_INT32&&gg->ty.kind!=T_UINT32&&gg->ty.kind!=T_BOOL&&gg->ty.kind!=T_HALF&&gg->ty.kind!=T_STRUCT) continue;
             Type ft=gg->ty;
@@ -871,34 +965,35 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         if(is_entry||(stage_all&&(s_vs||s_ps||is_gs))){            if(is_entry) entry_found=1;
             if(stage_all){ fn.stage=is_entry&&is_gs?ST_GEOMETRY:(s_vs?ST_VERTEX:s_ps?ST_FRAGMENT:is_gs?ST_GEOMETRY:ST_FRAGMENT); }
             else if(is_entry){ fn.stage=is_vs?ST_VERTEX:is_ps?ST_FRAGMENT:is_gs?ST_GEOMETRY:ST_NONE; }
-            /* resources (cbuffers + typed globals) become params in register
-             * order; cbuffer field references rewrite to struct-field access */
-            for(size_t r=0;r<nres;r++){
-                fn.params=realloc(fn.params,(fn.nparams+1)*sizeof(Param));
-                fn.params[fn.nparams++]=(Param){strdup(res[r].name),res[r].ty,UN_UNIFORM};
+        }
+        /* resources + rewrites for EVERY reachable function: helpers reference
+         * module globals and cbuffer fields directly (D3D12 sample pattern —
+         * `g_SortBuffer.Load()` inside LoadKeyIndexPair, `Constants.x`, ...) */
+        for(size_t r=0;r<nres;r++){
+            fn.params=realloc(fn.params,(fn.nparams+1)*sizeof(Param));
+            fn.params[fn.nparams++]=(Param){strdup(res[r].name),res[r].ty,UN_UNIFORM};
+        }
+        {
+            size_t keep=0;
+            for(size_t q=0;q<fn.nparams;q++){
+                int unif=0;
+                for(size_t p=0;p<hf->np;p++)
+                    if(!strcmp(hf->params[p].name,fn.params[q].name)&&hf->params[p].is_uniform){ unif=1; break; }
+                if(!unif) fn.params[keep++]=fn.params[q];
             }
-            /* uniform params (D3D9 per-draw constants) fold into __uniforms:
-             * drop them from the stage signature; the body references are
-             * rewritten to __uniforms.<name> by the unif_rw pass below. */
-            {
-                size_t keep=0;
-                for(size_t q=0;q<fn.nparams;q++){
-                    int unif=0;
-                    for(size_t p=0;p<hf->np;p++)
-                        if(!strcmp(hf->params[p].name,fn.params[q].name)&&hf->params[p].is_uniform){ unif=1; break; }
-                    if(!unif) fn.params[keep++]=fn.params[q];
-                }
-                fn.nparams=keep;
+            fn.nparams=keep;
+        }
+        for(size_t ci=0;ci<hp->ncbufs;ci++){
+            HLCBuf *cb=&hp->cbufs[ci];
+            for(size_t fi=0;fi<cb->nfields;fi++){
+                const char *fname=cb->fields[fi].name;
+                Rewrite rw={&fname,1,fname,cb->name,NULL};
+                rw_block(&fn.body,&rw);
             }
-            for(size_t ci=0;ci<hp->ncbufs;ci++){
-                HLCBuf *cb=&hp->cbufs[ci];
-                for(size_t fi=0;fi<cb->nfields;fi++){
-                    const char *fname=cb->fields[fi].name;
-                    Rewrite rw={&fname,1,fname,cb->name,NULL};
-                    rw_block(&fn.body,&rw);
-                }
-            }
-            for(size_t ui=0;ui<nu;ui++) rw_block(&fn.body,&unif_rw[ui]);
+        }
+        for(size_t ui=0;ui<nu;ui++) rw_block(&fn.body,&unif_rw[ui]);
+        tex2d_block(&fn.body,hp); /* D3D9 tex2D family -> the method form */
+        if(is_entry||(stage_all&&(s_vs||s_ps||is_gs))){
             if(fn.stage==ST_VERTEX) lower_vertex(&fn,hf);
             else if(fn.stage==ST_FRAGMENT) lower_fragment(&fn,hf);
             else if(fn.stage==ST_GEOMETRY){
@@ -907,8 +1002,6 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                  * path exists via metal_mesh). Parse/classification land here. */
                 die(hf->line,"geometry shader lowering (Metal mesh) not yet wired — GS parses, stage classified");
             }
-            /* D3D9 tex2D family: rewrite into the texture-method form */
-            tex2d_block(&fn.body,hp);
             if(is_entry&&!is_vs&&!is_ps&&!is_gs&&!stage_all){
                 fn.is_kernel=1;
                 if(fn.ret.kind!=T_VOID) die(hf->line,"compute entry must return void");
@@ -920,6 +1013,14 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
     }
     if(!entry_found&&!stage_all) die(0,"entry point '%s' not found in the shader",entry);
     free(reach);
+    /* capture module resources at every user-function call site (helper bodies
+     * reference globals directly; the call must forward them) */
+    {
+        const char **rn=calloc(nres?nres:1,sizeof(char*));
+        for(size_t r=0;r<nres;r++) rn[r]=res[r].name;
+        for(size_t i=0;i<g_prog.nfuncs;i++) ra_block(&g_prog.funcs[i].body,rn,nres);
+        free(rn);
+    }
     /* rewrite every inout-helper call site across all functions */
     for(size_t h=0;h<niw;h++) for(size_t i=0;i<g_prog.nfuncs;i++) iw_block(&g_prog.funcs[i].body,iw_helpers[h]);
     /* overloaded names get mangled link names (name$N); `name` stays the

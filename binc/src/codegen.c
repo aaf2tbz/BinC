@@ -204,6 +204,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
             out->vecn=c->locs[idx].vecn; out->matn=c->locs[idx].matn; }
         else if(r==R_CONST){ out->kind=c->prog->consts[idx].ty.kind; }
         else if(r==R_PTR||r==R_SCALAR){ Type t=c->fn->params[idx].ty; t.tvar=NULL; *out=t; }
+        else if(r==R_COORD||r==R_EXTENT){ Type t=c->fn->params[idx].ty; t.tvar=NULL; *out=t; }
         else { out->kind=T_INT32; }
         break; }
     case E_CAST: { Type t=e->cty; t.tvar=NULL; *out=t; break; }
@@ -213,6 +214,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
                 StructDef *sd=&c->prog->structs[i];
                 for(size_t j=0;j<sd->nfields;j++) if(!strcmp(sd->fields[j].name,e->field)){ Type t=sd->fields[j].ty; t.tvar=NULL; *out=t; return; }
                 break; } }
+        else if(base.kind==T_COORD||base.kind==T_GRID_EXTENT){ out->kind=T_UINT32; out->vecn=0; } /* tid.x -> uint */
         else { *out=base; if(strlen(e->field)==1) out->vecn=0; } /* vector swizzle */
         break; }
     case E_CALL:{ for(size_t i=0;i<c->prog->nfuncs;i++)
@@ -229,7 +231,13 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
     case E_ASSIGN: expr_type_of(c,e->rhs,out); break;
     case E_TERNARY: expr_type_of(c,e->rhs,out); break;
     case E_INCDEC: case E_NEG: case E_NOT: case E_COMPL: expr_type_of(c,e->operand,out); break;
-    case E_BIN: expr_type_of(c,e->lhs,out); break;
+    case E_BIN:{ Type a,b; expr_type_of(c,e->lhs,&a); expr_type_of(c,e->rhs,&b);
+        if(a.kind==T_FLOAT||b.kind==T_FLOAT) out->kind=T_FLOAT;
+        else if(a.kind==T_HALF||b.kind==T_HALF) out->kind=T_HALF;
+        else if(a.kind==T_UINT32||b.kind==T_UINT32) out->kind=T_UINT32;
+        else if(a.kind==T_COORD||b.kind==T_COORD) out->kind=T_UINT32;
+        else out->kind=T_INT32;
+        out->vecn = a.vecn> b.vecn ? a.vecn : b.vecn; break; }
     case E_CMP: case E_LOG: out->kind=T_BOOL; break;
     default: out->kind=T_INT32; break;
     }
@@ -639,7 +647,7 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
         /* bit reinterpret: bitcast f32<->i32, scalar or vector */
         if(e->nargs!=1) die(0,"%s expects 1 argument",nm);
         int want_f=!strcmp(nm,"asfloat");
-        const char *src=ak==VK_I32?"i32":"float";
+        const char *src=(ak==VK_I32||ak==VK_U32)?"i32":"float";
         const char *dst=want_f?"float":"i32";
         char sty[48], dty[48];
         if(n>1){ snprintf(sty,sizeof sty,"<%d x %s>",n,src); snprintf(dty,sizeof dty,"<%d x %s>",n,dst); }
@@ -924,12 +932,13 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             snprintf(nm,strlen(e->name)+3,"%%_%s",e->name); return nm; }
         if(r==R_CONST){ ConstDef *cd=&c->prog->consts[idx];
             *k = cd->ty.kind==T_BOOL?VK_I1:(cd->ty.kind==T_FLOAT||cd->ty.kind==T_HALF)?VK_F32:(cd->ty.kind==T_UINT32?VK_U32:VK_I32);
-            c->rvw=0;
+            c->rvw=cd->ty.vecn>1?cd->ty.vecn:0;
+            c->rstruct=cd->ty.kind==T_STRUCT?cd->ty.struct_name:NULL;
             char ll[64];
             if(cd->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",cd->ty.struct_name);
-            else ll_of(ll,sizeof ll,cd->ty.kind,0);
+            else ll_of(ll,sizeof ll,cd->ty.kind,cd->mut?cd->ty.vecn:0);
             const char *v=newtmp(c);
-            emit(c,"  %s = load %s, %s addrspace(2)* @_binc_const_%s, align %d\n",v,ll,ll,cd->name,type_align(cd->ty.kind,0));
+            emit(c,"  %s = load %s, %s addrspace(%d)* @_binc_%s_%s, align %d\n",v,ll,ll,cd->mut?1:2,cd->mut?"mut":"const",cd->name,type_align(cd->ty.kind,0));
             if(cd->ty.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,v); v=w; }
             return v; }
         if(r==R_SCALAR){ Param *p=&c->fn->params[idx]; *k=scalar_vk(p->ty.kind); c->rvw=p->ty.vecn>1?p->ty.vecn:0;
@@ -949,8 +958,10 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
          * coordinate itself is the global position; local/group values are appended as
          * hidden built-in arguments when referenced. */
         if(e->kind==E_FIELD){
+            if(getenv("BINC_DEBUG_D3D9")){ int dvi; RKind dvr=e->operand->kind==E_IDENT?resolve(c,e->operand->name,&dvi):R_NONE; const char *iname=e->operand->kind==E_FIELD?(e->operand->operand&&e->operand->operand->kind==E_IDENT?e->operand->operand->name:"(nested)"):""; fprintf(stderr,"DBG fld: opk=%d fld=%s vr=%d inner=%s iname=%s\n",e->operand->kind,e->field,dvr,e->operand->kind==E_FIELD?(e->operand->field?e->operand->field:"?"):"",iname); }
             /* field access on a VALUE (computed vector/struct result): vector
              * swizzle for vector results, extractvalue for struct results */
+            if(getenv("BINC_DEBUG_IW")&&e->operand->kind==E_IDENT){ int dvi; RKind dvr=resolve(c,e->operand->name,&dvi); fprintf(stderr,"DBG fldsel: %s.%s vr=%d vi=%d\n",e->operand->name,e->field,dvr,dvi); }
             if(e->operand->kind!=E_IDENT&&e->operand->kind!=E_DEREF&&e->operand->kind!=E_FIELD&&e->operand->kind!=E_INDEX){
                 ValKind ck; const char *cv=gen_rval(c,e->operand,&ck);
                 if(c->rvw>1){
@@ -1052,6 +1063,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             }
         }
         LInfo li; char *addr=gen_lval(c,e,&li,0);
+        if(getenv("BINC_DEBUG_IW")&&e->operand->kind==E_IDENT) fprintf(stderr,"DBG fld: %s.%s li(vecn=%d,tk=%d,as=%d)\n",e->operand->name,e->field,li.vecn,li.tk,li.as);
         if(li.pi>=0) c->read[li.pi]=1;
         if(li.as==AS_CONSTANT&&li.matn>0){ /* D3D cbuffer matrices are row-major */
             ValKind lk; const char *v=emit_load_t(c,&li,addr,&lk);
@@ -1518,6 +1530,67 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         *k=VK_F32; c->rvw=4; return v;
                     }
                     die(0,"unknown texture method .%s (use read, write, sample)",e->name);
+                } else if(tr==R_PTR&&e->name&&(!strncmp(e->name,"Load",4)||!strncmp(e->name,"Store",5))){
+                    /* ByteAddressBuffer.Load(byteOff) / Load2..4 / Store(v, off)
+                     * — the buffer is an i32 device pointer; view it as i8*,
+                     * GEP by the byte offset, reload as i32 (or a vector) */
+                    Param *bp=&c->fn->params[ti];
+                    int is_store = !strncmp(e->name,"Store",5);
+                    int nw = !strncmp(e->name,"Load",4) ? (strlen(e->name)>4?(int)(e->name[4]-'0'):1) : 0;
+                    if(!is_store&&(nw<1||nw>4)) die(0,"unsupported buffer method .%s",e->name);
+                    if(e->nargs!=(is_store?2:1)) die(0,"buffer %s expects (%s)",e->name,is_store?"address, value":"byteOffset");
+                    /* HLSL: Load(byteOffset) / Store(address, value) — the
+                     * address is ALWAYS args[0]; the value is args[1] */
+                    ValKind ok; const char *ov=gen_rval(c,e->args[0],&ok);
+                    if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG buf: %s off rvw=%d kind=%d\n",e->name,c->rvw,ok);
+                    if(c->rvw) die(0,"buffer %s offset must be a scalar",e->name);
+                    if(ok!=VK_I32&&ok!=VK_U32) die(0,"buffer %s offset must be an integer",e->name);
+                    if(ok==VK_I32){ const char *o64=newtmp(c); emit(c,"  %s = sext i32 %s to i64\n",o64,ov); ov=o64; }
+                    else if(ok==VK_U32){ const char *o64=newtmp(c); emit(c,"  %s = zext i32 %s to i64\n",o64,ov); ov=o64; }
+                    c->read[ti]=1;
+                    char *base=newtmp(c);
+                    emit(c,"  %s = bitcast %s addrspace(%d)* %%_%s to i8 addrspace(%d)*\n",base,
+                         scalar_ll(bp->ty.kind),bp->ty.as,bp->name,bp->ty.as);
+                    char *gp=newtmp(c);
+                    emit(c,"  %s = getelementptr inbounds i8, i8 addrspace(%d)* %s, i64 %s\n",gp,bp->ty.as,base,ov);
+                    if(nw>1){
+                        /* multi-word load: read nw consecutive i32s */
+                        char *v32=newtmp(c);
+                        emit(c,"  %s = bitcast i8 addrspace(%d)* %s to <4 x i32> addrspace(%d)*\n",v32,bp->ty.as,gp,bp->ty.as);
+                        char *w=newtmp(c);
+                        emit(c,"  %s = load <4 x i32>, <4 x i32> addrspace(%d)* %s, align 4\n",w,bp->ty.as,v32);
+                        char *sw=newtmp(c);
+                        emit(c,"  %s = shufflevector <4 x i32> %s, <4 x i32> undef, <4 x i32> <i32 0, i32 1, i32 2, i32 3>\n",sw,w);
+                        const char *r=newtmp(c);
+                        if(nw==2) emit(c,"  %s = shufflevector <4 x i32> %s, <4 x i32> undef, <2 x i32> <i32 0, i32 1>\n",r,sw);
+                        else if(nw==3) emit(c,"  %s = shufflevector <4 x i32> %s, <4 x i32> undef, <3 x i32> <i32 0, i32 1, i32 2>\n",r,sw);
+                        else emit(c,"  %s = shufflevector <4 x i32> %s, <4 x i32> undef, <4 x i32> <i32 0, i32 1, i32 2, i32 3>\n",r,sw);
+                        *k=VK_U32; c->rvw=nw; return r;
+                    }
+                    /* single-word Load / Store */
+                    if(!strncmp(e->name,"Store",5)){
+                        if(e->nargs!=2) die(0,"buffer Store expects (value, byteOffset)");
+                        ValKind vk; const char *vv=gen_rval(c,e->args[1],&vk);
+                        int vw=c->rvw;
+                        if(vw){
+                            if(vw<1||vw>4) die(0,"buffer Store vector width %d unsupported",vw);
+                            char *v32=newtmp(c);
+                            emit(c,"  %s = bitcast i8 addrspace(%d)* %s to <4 x i32> addrspace(%d)*\n",v32,bp->ty.as,gp,bp->ty.as);
+                            char *w=newtmp(c);
+                            emit(c,"  %s = shufflevector <%d x i32> %s, <%d x i32> undef, <4 x i32> <i32 0, i32 1, i32 2, i32 3>\n",w,vw,vv,vw);
+                            emit(c,"  store <4 x i32> %s, <4 x i32> addrspace(%d)* %s, align 4\n",w,bp->ty.as,v32);
+                            c->written[ti]=1; *k=VK_U32; c->rvw=0; return vv;
+                        }
+                        char *v32=newtmp(c);
+                        emit(c,"  %s = bitcast i8 addrspace(%d)* %s to i32 addrspace(%d)*\n",v32,bp->ty.as,gp,bp->ty.as);
+                        emit(c,"  store i32 %s, i32 addrspace(%d)* %s, align 4\n",vv,bp->ty.as,v32);
+                        c->written[ti]=1; *k=VK_U32; c->rvw=0; return vv;
+                    }
+                    char *v32=newtmp(c);
+                    emit(c,"  %s = bitcast i8 addrspace(%d)* %s to i32 addrspace(%d)*\n",v32,bp->ty.as,gp,bp->ty.as);
+                    const char *r=newtmp(c);
+                    emit(c,"  %s = load i32, i32 addrspace(%d)* %s, align 4\n",r,bp->ty.as,v32);
+                    *k=VK_U32; c->rvw=0; return r;
                 }
             }
             if(strcmp(e->name,"add")) die(0,"unsupported atomic method %s",e->name);
@@ -1684,17 +1757,20 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         Function *f=NULL; int best=1<<30;
         for(size_t i=0;i<c->prog->nfuncs;i++){
             Function *cf=&c->prog->funcs[i];
+            if(getenv("BINC_DEBUG_IW")&&!strcmp(cf->name,e->name)) fprintf(stderr,"DBG srch: %s nargs=%zu nparams=%zu\n",e->name,e->nargs,cf->nparams);
             if(strcmp(cf->name,e->name)) continue;
             if(e->nargs!=cf->nparams) continue;
             int rk=0, bad=0;
             for(size_t ai=0;ai<e->nargs;ai++){
                 Type at={0}; expr_type_of(c,e->args[ai],&at);
                 Type pt=cf->params[ai].ty;
+                if(getenv("BINC_DEBUG_IW")&&!strcmp(cf->name,e->name)) fprintf(stderr,"DBG arg %zu: at(k=%d,ptr=%d,as=%d) pt(k=%d,ptr=%d,as=%d)\n",ai,at.kind,at.is_ptr,at.as,pt.kind,pt.is_ptr,pt.as);
                 if(pt.kind==T_TVAR) continue; /* template parameter matches anything */
                 if(pt.is_ptr){ if(!at.is_ptr||at.as!=pt.as){ bad=1; break; } continue; }
                 if(at.kind!=pt.kind){
                     if(at.kind==T_INT32&&(pt.kind==T_FLOAT||pt.kind==T_HALF)&&!at.vecn&&!pt.vecn){ rk+=1; continue; } /* promotion */
                     if(at.kind==T_FLOAT&&pt.kind==T_HALF&&!at.vecn&&!pt.vecn){ rk+=1; continue; } /* half demotion */
+                    if((at.kind==T_UINT32&&pt.kind==T_INT32)||(at.kind==T_INT32&&pt.kind==T_UINT32)){ rk+=1; continue; } /* int/uint */
                     bad=1; break;
                 }
                 if(at.vecn!=pt.vecn){
@@ -1744,8 +1820,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         die(0,"%s: pointer argument %d type/address-space mismatch",e->name,(int)i+1);
                     if(p->ty.kind==T_STRUCT && strcmp(cp->ty.struct_name,p->ty.struct_name))
                         die(0,"%s: pointer argument %d struct type mismatch",e->name,(int)i+1);
-                    char elt[64]; if(p->ty.kind==T_STRUCT)snprintf(elt,sizeof elt,"%%struct.%s",p->ty.struct_name);
-                        else ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn);
+                    char elt[64];
+                    if(p->ty.kind==T_STRUCT||p->ty.kind==T_ATOMIC) type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
+                    else ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn);
                     o+=snprintf(args+o,sizeof args-o,"%s addrspace(%d)* %%_%s",elt,p->ty.as,cp->name);
                 } else { ValKind ak; const char *v=gen_rval(c,e->args[i],&ak);
                     warn_implicit(c,e->args[i],ak,p->ty.kind,p->ty.vecn);
@@ -1828,7 +1905,16 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             li->an=c->locs[idx].an; li->am=c->locs[idx].am;
             if(mark && c->locs[idx].is_const) die(0,"cannot write to const local %s",e->name);
             return c->locs[idx].slot; }
-        die(0,"%s is not a mutable local",e->name);
+        if(r==R_CONST){ /* mutable static global (SPIRV-Cross pattern): a store
+            to @_binc_mut_<name>; a write to a true const stays an error */
+            ConstDef *cd=&c->prog->consts[idx];
+            if(!cd->mut) die(0,"cannot write to const %s",e->name);
+            li->tk=cd->ty.kind; li->sname=cd->ty.struct_name; li->as=1; li->pi=-1;
+            li->is_local=0; li->vecn=cd->ty.vecn; li->matn=cd->ty.matn;
+            li->an=cd->ty.array_n; li->am=cd->ty.array_m;
+            char gn[160]; snprintf(gn,sizeof gn,"@_binc_mut_%s",cd->name);
+            return strdup(gn); }
+        die(0, mark ? "%s is not a mutable local" : "undefined name %s", e->name);
     }
     if(e->kind==E_DEREF){ const char *ix; int pi=eval_ptr(c,e->operand,&ix);
         if(mark)c->written[pi]=1; fill_param_li(c,pi,li); return element_ptr_idx(c,pi,ix); }
@@ -2390,7 +2476,8 @@ void emit_air(FILE *out, Program *prog){
     fprintf(out,"; generated by binc — works as C, acts as Metal\n");
     fprintf(out,"target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32\"\n");
     fprintf(out,"target triple = \"%s\"\n\n",g_air_triple);
-    /* module-level constant globals: scalar numeric values in address space 2 */
+    /* module-level constant globals: scalar numeric values in address space 2;
+     * mutable static globals (SPIRV-Cross pattern) in address space 1 */
     for(size_t i=0;i<prog->nconsts;i++){ ConstDef *cd=&prog->consts[i];
         if(cd->ty.kind==T_STRUCT){ /* struct type from a missing generated include: skip */
             int known=0;
@@ -2399,9 +2486,10 @@ void emit_air(FILE *out, Program *prog){
         }
         char ll[64];
         if(cd->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",cd->ty.struct_name);
-        else ll_of(ll,sizeof ll,cd->ty.kind,0);
+        else ll_of(ll,sizeof ll,cd->ty.kind,cd->mut?cd->ty.vecn:0);
         char val[64];
-        if(cd->ty.kind==T_STRUCT) snprintf(val,sizeof val,"zeroinitializer");
+        if(cd->mut) snprintf(val,sizeof val,"zeroinitializer");
+        else if(cd->ty.kind==T_STRUCT) snprintf(val,sizeof val,"zeroinitializer");
         else if(cd->ty.kind==T_BOOL) snprintf(val,sizeof val,"%s",cd->ival?"true":"false");
         else if(cd->ty.kind==T_FLOAT||cd->ty.kind==T_HALF){
             float fv=(float)(cd->is_int?(double)cd->ival:cd->fval); unsigned bits; memcpy(&bits,&fv,4);
@@ -2409,8 +2497,8 @@ void emit_air(FILE *out, Program *prog){
             else snprintf(val,sizeof val,"bitcast (i32 %u to float)",bits);
         }
         else snprintf(val,sizeof val,"%ld",cd->ival);
-        fprintf(out,"@_binc_const_%s = internal unnamed_addr addrspace(2) global %s %s, align %d\n",
-                cd->name,ll,val,type_align(cd->ty.kind,0));
+        fprintf(out,"@_binc_%s_%s = internal unnamed_addr addrspace(%d) global %s %s, align %d\n",
+                cd->mut?"mut":"const",cd->name,cd->mut?1:2,ll,val,type_align(cd->ty.kind,0));
     }
     if(prog->nconsts) fprintf(out,"\n");
     /* struct usage: emit only structs reachable from the emitted functions +

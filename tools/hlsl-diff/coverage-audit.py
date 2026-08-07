@@ -135,10 +135,20 @@ def main():
         f = s["file"]
         if f.startswith("DirectXShaderCompiler/"):
             continue
+        if f.startswith("UnrealEngine/"):
+            continue  # UE corpus is the ue-audit.py phase-2 scope
         if f.startswith("DirectX-Graphics-Samples"):
             fam = "d3d12"
         elif f.startswith("DirectX-SDK-Samples"):
-            fam = "d3d10/11"
+            fl = f.lower()
+            if "direct3d11" in fl or "d3d11" in fl:
+                fam = "d3d11"
+            elif "direct3d10" in fl or "d3d10" in fl:
+                fam = "d3d10"
+            elif "dxgi" in fl:
+                fam = "dxgi"
+            else:
+                fam = "d3d10/11"
         else:
             fam = "other"
         # stage/profile/entry detection: prefer the scanner's profiles, else
@@ -149,12 +159,22 @@ def main():
             except OSError:
                 continue
             stage = detect_stage(src)
-            prof = {"vs": "vs_5_0", "ps": "ps_5_0", "cs": "cs_5_0",
-                    "gs": "gs_5_0", "hs/ds": "hs_5_0", "as/ms": "as_5_0",
-                    "rt": "lib_6_3"}.get(stage)
+            entry = guess_entry(src) or "main"
+            # entry-name profile hints beat the file-level stage guess for
+            # multi-stage files (VSMain must compile as vs_*, not ps_*)
+            en = entry.lower()
+            if en.startswith("vs") or en.startswith("vertex"):
+                prof = "vs_5_0"
+            elif en.startswith("ps") or en.startswith("frag") or en.startswith("pixel"):
+                prof = "ps_5_0"
+            elif en.startswith("cs") or en.startswith("compute"):
+                prof = "cs_5_0"
+            else:
+                prof = {"vs": "vs_5_0", "ps": "ps_5_0", "cs": "cs_5_0",
+                        "gs": "gs_5_0", "hs/ds": "hs_5_0", "as/ms": "as_5_0",
+                        "rt": "lib_6_3"}.get(stage)
             if not prof:
                 continue
-            entry = guess_entry(src) or "main"
             key = (f, prof, entry)
             if key not in seen:
                 seen.add(key)
@@ -180,38 +200,50 @@ def main():
     fam_gap = collections.Counter()
     n_crash = 0
     rows = []
-    for rel, prof, entry, fam in jobs:
+    no_dxc = os.environ.get("BINC_AUDIT_NO_DXC") == "1"
+    import concurrent.futures as cf
+
+    def one_job(args):
+        rel, prof, entry, fam = args
         path = rel if os.path.exists(rel) else os.path.join(ROOT, "third_party", rel)
         if not os.path.exists(path):
-            continue
+            return None
         try:
             src = open(path, "rb").read().decode("utf-8", "replace")
         except OSError:
-            continue
+            return None
         stage = detect_stage(src)
-        # dxc (reference path exists?)
-        rc, _, _ = run([DXC, "-E", entry, "-T", prof, path, "-Fo", "/tmp/audit.dxil"], 30)
-        dxc_ok = rc == 0
-        # ours
+        dxc_ok = False
+        if not no_dxc:
+            rc, _, _ = run([DXC, "-E", entry, "-T", prof, path, "-Fo", "/tmp/audit.dxil"], 30)
+            dxc_ok = rc == 0
         rc, _, err = run([BINC, "-E", entry, "-T", prof, path, "-o", "/tmp/audit.metallib"], 40)
         if rc in (134, 139):
             result = "CRASH"
-            n_crash += 1
         elif rc == 124:
             result = "HANG"
-            n_crash += 1
         elif rc == 0:
             result = "COMPILES"
         else:
-            gap = bucket_error(err)
-            result = "GAP:" + gap
-            gap_count[gap] += 1
-            if len(gap_files[gap]) < 3:
-                gap_files[gap].append(rel)
-            fam_gap[(fam, gap)] += 1
-        fam_count[fam] += 1
-        stage_count[stage] += 1
-        rows.append((rel, prof, entry, fam, stage, dxc_ok, result))
+            result = "GAP:" + bucket_error(err)
+        return (rel, prof, entry, fam, stage, dxc_ok, result)
+
+    with cf.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as ex:
+        for r in ex.map(one_job, jobs):
+            if r is None:
+                continue
+            rel, prof, entry, fam, stage, dxc_ok, result = r
+            if result == "CRASH" or result == "HANG":
+                n_crash += 1
+            elif result != "COMPILES":
+                gap = result[4:]
+                gap_count[gap] += 1
+                if len(gap_files[gap]) < 3:
+                    gap_files[gap].append(rel)
+                fam_gap[(fam, gap)] += 1
+            fam_count[fam] += 1
+            stage_count[stage] += 1
+            rows.append(r)
 
     with open(outmd, "w") as f:
         f.write("# HLSL sm4+ coverage audit — D3D12 / D3D11 / D3D10 (+DXGI)\n\n")
@@ -221,7 +253,7 @@ def main():
         f.write("frontend error. **Any CRASH/HANG fails the audit.**\n\n")
         f.write("## Family × stage\n\n")
         f.write("| family | vs | ps | cs | gs | hs/ds | as/ms | rt | ? |\n|---|---|---|---|---|---|---|---|---|\n")
-        fams = ["curated", "d3d12", "d3d10/11", "other"]
+        fams = ["curated", "d3d12", "d3d11", "d3d10", "dxgi", "d3d10/11", "other"]
         for fam in fams:
             sub = [r for r in rows if r[3] == fam]
             if not sub:
@@ -240,6 +272,18 @@ def main():
         f.write("| gap | count | sample files |\n|---|---|---|\n")
         for gap, n in gap_count.most_common():
             f.write(f"| {gap} | {n} | {', '.join(gap_files[gap])} |\n")
+        f.write("\n## Feature-gap buckets by family\n\n")
+        fams2 = [fam for fam in ("curated", "d3d12", "d3d11", "d3d10", "dxgi", "d3d10/11", "other")
+                 if any(f2 == fam for f2, _ in fam_gap)]
+        for fam in fams2:
+            sub = [(g, n) for (f2, g), n in fam_gap.items() if f2 == fam]
+            if not sub:
+                continue
+            f.write(f"### {fam}\n\n")
+            f.write("| gap | count |\n|---|---|\n")
+            for g, n in sorted(sub, key=lambda kv: -kv[1]):
+                f.write(f"| {g} | {n} |\n")
+            f.write("\n")
         f.write("\n## Per-file rows\n\n")
         f.write("| file | profile | entry | family | stage | dxc | result |\n|---|---|---|---|---|---|---|\n")
         for rel, prof, entry, fam, stage, dxc_ok, result in rows:

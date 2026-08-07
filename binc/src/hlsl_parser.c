@@ -58,8 +58,10 @@ static Type hlsl_type(TokStream *ts){
         return et;
     }
     if(k==TK_KW_BYTEADDR||k==TK_KW_RWBYTEADDR){
-        /* ByteAddressBuffer -> raw uint device buffer */
-        advance(ts); Type t={0}; t.kind=T_UINT32; t.is_ptr=1; t.as=AS_DEVICE; return t;
+        /* ByteAddressBuffer -> raw uint device buffer; the struct_name marker
+         * distinguishes it from StructuredBuffer<uint> (atomic-capable) */
+        advance(ts); Type t={0}; t.kind=T_UINT32; t.is_ptr=1; t.as=AS_DEVICE;
+        t.struct_name=strdup("$byteaddr"); return t;
     }
     return parse_type(ts);
 }
@@ -71,10 +73,17 @@ static void parse_attributes(TokStream *ts, HLSLFunc *f){
         Token *a=peek(ts);
         if(a->kind==TK_IDENT&&!strcmp(a->text,"numthreads")){
             advance(ts); expect(ts,TK_LPAREN,"(");
-            Token *tx=peek(ts); expect(ts,TK_ICONST,"numthreads x"); f->numtx=(int)tx->ival; expect(ts,TK_COMMA,",");
-            Token *ty=peek(ts); expect(ts,TK_ICONST,"numthreads y"); f->numty=(int)ty->ival; expect(ts,TK_COMMA,",");
-            Token *tz=peek(ts); expect(ts,TK_ICONST,"numthreads z"); f->numtz=(int)tz->ival;
-            expect(ts,TK_RPAREN,")"); f->has_numthreads=1;
+            int vals[3]={1,1,1};
+            for(int v=0;v<3;v++){
+                if(peek(ts)->kind==TK_ICONST){ vals[v]=(int)peek(ts)->ival; advance(ts); }
+                else if(peek(ts)->kind==TK_FCONST){ vals[v]=(int)peek(ts)->fval; advance(ts); }
+                else { /* non-literal (macro from a stripped include): warn + skip */
+                    fprintf(stderr,"binc: warning: numthreads arg %d is not a literal — assuming 1\n",v+1);
+                    while(peek(ts)->kind!=TK_COMMA&&peek(ts)->kind!=TK_RPAREN&&peek(ts)->kind!=TK_EOF) advance(ts);
+                }
+                if(v<2){ if(peek(ts)->kind==TK_COMMA) advance(ts); }
+            }
+            expect(ts,TK_RPAREN,")"); f->numtx=vals[0]; f->numty=vals[1]; f->numtz=vals[2]; f->has_numthreads=1;
         } else {
             int depth=1;
             while(depth>0){
@@ -110,8 +119,20 @@ static int skip_register_suffix(TokStream *ts){
         if(accept(ts,TK_KW_PACKOFFSET)){ expect(ts,TK_LPAREN,"(");
             while(peek(ts)->kind!=TK_RPAREN&&peek(ts)->kind!=TK_EOF) advance(ts);
             expect(ts,TK_RPAREN,")"); continue; }
-        /* bare semantic-ish ident: consume it; loop for `: SEMANTIC : register(c0)` */
-        if(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_EOF) advance(ts);
+        /* bare semantic-ish ident: consume it (and a macro-form `IDENT(...)`
+         * like UAV_REGISTER(x) when the include that defined it is missing);
+         * loop for `: SEMANTIC : register(c0)` */
+        if(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_EOF){
+            advance(ts);
+            if(peek(ts)->kind==TK_LPAREN){
+                int d=0;
+                do{ Token *t=peek(ts);
+                    if(t->kind==TK_LPAREN)d++;
+                    else if(t->kind==TK_RPAREN)d--;
+                    if(t->kind==TK_EOF) break;
+                    advance(ts); } while(d>0);
+            }
+        }
         continue;
     }
 }
@@ -356,12 +377,17 @@ HLSLProg hlsl_parse(TokStream *ts){
                 do{
                     Token *fn=peek(ts); expect(ts,TK_IDENT,"cbuffer field name");
                     char *sem=NULL;
-                    if(accept(ts,TK_COLON)){ Token *st=peek(ts); expect(ts,TK_IDENT,"semantic"); sem=strdup(st->text); }
+                    if(peek(ts)->kind==TK_COLON&&(ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_IDENT){
+                        advance(ts); /* ':' — semantic only; register/packoffset
+                                      * are left for skip_register_suffix below */
+                        Token *st=peek(ts); advance(ts); sem=strdup(st->text);
+                    }
                     skip_register_suffix(ts); /* : register(c0) / : packoffset(c0.x) */
                     if(accept(ts,TK_LBRACK)){ /* array member [N] or [N][M] */
                         ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
                         if(accept(ts,TK_LBRACK)){ ty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); }
                     }
+                    skip_register_suffix(ts); /* suffix may follow the array: name[4] : packoffset(c2) */
                     if(accept(ts,TK_EQ)){ /* cbuffer field default value: parse + discard
                         (the host provides the real data; the default is a hint) */
                         if(peek(ts)->kind==TK_LBRACE){ int d=0;
@@ -384,14 +410,16 @@ HLSLProg hlsl_parse(TokStream *ts){
             hpush((void**)&hp.cbufs,&hp.ncbufs,&ccap,&cb,sizeof cb);
             continue;
         }
-        if(kt->kind==TK_KW_GROUPSHARED||kt->kind==TK_KW_STATIC||kt->kind==TK_KW_CONSTANT){
-            int gs=0, st=0, cn=0;
+        if(kt->kind==TK_KW_GROUPSHARED||kt->kind==TK_KW_STATIC||kt->kind==TK_KW_CONSTANT||kt->kind==TK_KW_UNIFORM){
+            int gs=0, st=0, cn=0, un=0;
             for(;;){
                 if(accept(ts,TK_KW_GROUPSHARED)) gs=1;
                 else if(accept(ts,TK_KW_STATIC)) st=1;
                 else if(accept(ts,TK_KW_CONSTANT)) cn=1;
+                else if(accept(ts,TK_KW_UNIFORM)){ un=1; } /* SPIRV-Cross `uniform float4 x;` globals */
                 else break;
             }
+            (void)un; /* uniform globals fold into __uniforms (non-const scalars) */
             /* const/precise-qualified FUNCTION (`precise float F(...)`) falls
              * through to the function path — probe type+name+'(' */
             {
@@ -432,7 +460,7 @@ HLSLProg hlsl_parse(TokStream *ts){
             Type ty=hlsl_type(ts);
             HLSLGlobal gg={0};
             Token *gn=peek(ts); expect(ts,TK_IDENT,"global name");
-            gg.name=strdup(gn->text); gg.ty=ty; gg.is_groupshared=gs; gg.is_const=cn||st; gg.line=gn->line;
+            gg.name=strdup(gn->text); gg.ty=ty; gg.is_groupshared=gs; gg.is_const=cn; gg.is_static=st; gg.line=gn->line;
             skip_register_suffix(ts); /* semantic/register may precede the annotation+init */
             if(peek(ts)->kind==TK_LT){ /* D3D9 effect annotation before the initializer: < ... > */
                 int d=0;
