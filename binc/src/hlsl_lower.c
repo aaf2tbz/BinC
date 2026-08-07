@@ -401,6 +401,53 @@ static void lower_compute(Function *fn, HLSLFunc *hf){
 
 /* fragment: map stage-in struct fields, synthesize the stage-out struct */
 static void lower_fragment(Function *fn, HLSLFunc *hf){
+    /* D3D9 direct semantic params (float4 Diffuse : COLOR0, float2 Tex : TEXCOORD0):
+     * pack into a synthetic stage-in struct exactly like the vertex path */
+    {
+        size_t attr_count=0;
+        for(size_t i=0;i<hf->np;i++){
+            HLSLParam *p=&hf->params[i];
+            if(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER||p->ty.kind==T_STRUCT) continue;
+            if(p->is_uniform) continue;
+            attr_count++;
+        }
+        if(attr_count){
+            char tag[64]; snprintf(tag,sizeof tag,"%s$in",fn->name);
+            StructDef sd={0}; sd.tag=strdup(tag);
+            sd.fields=calloc(attr_count,sizeof(Field));
+            size_t fi=0;
+            for(size_t i=0;i<hf->np;i++){
+                HLSLParam *p=&hf->params[i];
+                if(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER||p->ty.kind==T_STRUCT) continue;
+                if(p->is_uniform) continue;
+                Field *f=&sd.fields[fi++];
+                f->name=strdup(p->name); f->ty=p->ty;
+                f->sem=p->sem?strdup(p->sem):NULL;
+                if(!p->sem){ f->attr=5; f->attr_idx=16+(int)fi; }
+                else sem_to_attr(p->sem,&f->attr,&f->attr_idx,0);
+            }
+            sd.nfields=fi;
+            prog_add_struct(sd);
+            const char **names=malloc(attr_count*sizeof(char*));
+            size_t nn=0;
+            Param *np2=calloc(fn->nparams+1,sizeof(Param)); size_t nn2=0;
+            for(size_t i=0;i<fn->nparams;i++){
+                Param *p=&fn->params[i];
+                int is_attr = !(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER||p->ty.kind==T_STRUCT);
+                if(is_attr){ names[nn++]=p->name; continue; }
+                np2[nn2++]=(Param){p->name,p->ty,UN_UNIFORM};
+            }
+            Param in={0}; in.name=strdup("__in"); in.ty.kind=T_STRUCT; in.ty.struct_name=strdup(tag);
+            np2[nn2++]=in;
+            free(fn->params); fn->params=np2; fn->nparams=nn2;
+            for(size_t i=0;i<nn;i++){
+                const char *nm=names[i];
+                Rewrite rw={&nm,1,nm,"__in",NULL};
+                rw_block(&fn->body,&rw);
+            }
+            free(names);
+        }
+    }
     for(size_t i=0;i<fn->nparams;i++){
         Param *p=&fn->params[i];
         if(p->ty.kind!=T_STRUCT||p->ty.is_ptr) continue;
@@ -738,6 +785,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                 if(sd) for(size_t fi=0;fi<sd->nfields;fi++){
                     Field *fd=&sd->fields[fi];
                     if(fd->sem&&(sem_pref(fd->sem,"SV_Position")||sem_pref(fd->sem,"POSITION"))) s_vs=1;
+                    if(fd->sem&&(sem_pref(fd->sem,"SV_Target")||sem_pref(fd->sem,"COLOR"))) s_ps=1;
                 }
             }
         }

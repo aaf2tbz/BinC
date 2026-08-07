@@ -1359,7 +1359,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 int base_vecn = root_vecn>1 ? root_vecn : lb.vecn;
                 if(base_vecn>1){ for(int i=0;i<nc;i++) if(idxs[i]>=base_vecn) die(0,"invalid vector component .%s",e->operand->field); }
                 ValKind rk; const char *rv=gen_rval(c,e->rhs,&rk); int rw=c->rvw;
-                if(rw!=nc) die(0,"swizzle assignment width mismatch");
+                if(rw<nc) die(0,"swizzle assignment width mismatch");
                 char pty[96]; pty_str(pty,sizeof pty,lb.tk,NULL,lb.as,lb.is_local,base_vecn,0);
                 char *bit=newtmp(c);
                 emit(c,"  %s = bitcast %s %s to %s*\n",bit,pty,base,lb.tk==T_HALF?"half":"float");
@@ -1367,7 +1367,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     const char *p=newtmp(c);
                     emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 %d\n",p,lb.tk==T_HALF?"half":"float",lb.tk==T_HALF?"half":"float",bit,idxs[i]);
                     const char *ev=newtmp(c);
-                    emit(c,"  %s = extractelement <%d x float> %s, i32 %d\n",ev,nc,rv,i);
+                    emit(c,"  %s = extractelement <%d x float> %s, i32 %d\n",ev,rw,rv,i);
                     const char *sv=ev;
                     if(lb.tk==T_HALF){ const char *h=newtmp(c); emit(c,"  %s = fptrunc float %s to half\n",h,ev); sv=h; }
                     emit(c,"  store %s %s, %s* %s, align %d\n",lb.tk==T_HALF?"half":"float",sv,lb.tk==T_HALF?"half":"float",p,lb.tk==T_HALF?2:4);

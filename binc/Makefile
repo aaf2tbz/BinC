@@ -118,7 +118,7 @@ diff-nbody:
 
 # Phase-7 D3D9 goldens: .fx shaders rendered against pinned, hand-verified
 # pixels (no clean differential path — fxc is Windows-only)
-GOLDEN_TESTS := basichlsl normalmap
+GOLDEN_TESTS := basichlsl normalmap motionblur
 golden-d3d9:
 	@for g in $(GOLDEN_TESTS); do \
 		echo "== $$g"; \
