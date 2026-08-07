@@ -4,10 +4,11 @@
 # file (one substring per line, '#' starts a comment line).
 cd "$(dirname "$0")"
 fail=0
-for f in ../tests/negative/*.binc ../tests/negative/*.fx; do
+for f in ../tests/negative/*.binc ../tests/negative/*.fx ../tests/hlsl/negative/*.hlsl; do
     [ -e "$f" ] || continue
     case "$f" in
         *.fx) exp="${f%.fx}.expect";;
+        *.hlsl) exp="${f%.hlsl}.expect";;
         *)    exp="${f%.binc}.expect";;
     esac
     if [ ! -e "$exp" ]; then
@@ -16,8 +17,9 @@ for f in ../tests/negative/*.binc ../tests/negative/*.fx; do
         continue
     fi
     case "$f" in
-        *.fx) out=$(./binc -E "$(basename "$f" .fx)" -T gs_4_0 --stage-all "$f" 2>&1);;
-        *)    out=$(./binc "$f" 2>&1);;
+        *.fx)   out=$(./binc -E "$(basename "$f" .fx)" -T gs_4_0 --stage-all "$f" 2>&1);;
+        *.hlsl) out=$(./binc -E main -T cs_5_0 "$f" 2>&1);;
+        *)      out=$(./binc "$f" 2>&1);;
     esac
     rc=$?
     if [ $rc -eq 0 ]; then
