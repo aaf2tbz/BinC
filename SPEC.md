@@ -1,6 +1,6 @@
 # BinC Language Specification
 
-Version: 0.1 · Status: living document — every rule below is enforced by the reference
+Version: 0.2 · Status: living document — every rule below is enforced by the reference
 implementation (`binc/`). Grammar rules are named after the parser functions that
 implement them (`parse_*` in `src/parser.c`).
 

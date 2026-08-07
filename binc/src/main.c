@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#define BINC_VERSION "0.1.0"
+#define BINC_VERSION "0.2.0"
 
 static const char *usage_text =
     "usage: binc <file.binc> [options]\n"

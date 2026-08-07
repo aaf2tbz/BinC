@@ -21,7 +21,7 @@ jobs:
           ./binc -i ../tests/interp/math.binc
         working-directory: binc
 
-      - name: Package (binary + prelude + license)
+      - name: Package (binary + prelude + license + corpus manifest + docs)
         run: |
           mkdir -p dist
           cp binc/binc dist/
@@ -29,6 +29,11 @@ jobs:
           cp VERSION dist/
           cp LICENSE dist/ 2>/dev/null || true
           cp README.md dist/ 2>/dev/null || true
+          cp SPEC.md dist/ 2>/dev/null || true
+          cp docs/hlsl-to-metal.md dist/ 2>/dev/null || true
+          cp docs/hlsl-semantics.md dist/ 2>/dev/null || true
+          cp tools/vendor/corpus.json dist/corpus.json 2>/dev/null || true
+          cp tools/vendor/sample_profiles.json dist/sample_profiles.json 2>/dev/null || true
           cd dist && zip -r "../binc-${GITHUB_REF_NAME}.zip" .
 
       - name: Publish release
