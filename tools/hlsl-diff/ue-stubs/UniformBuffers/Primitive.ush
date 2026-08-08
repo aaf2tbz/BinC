@@ -1,0 +1,66 @@
+// Stub for the SCW-generated Engine/Generated/UniformBuffers/Primitive.ush.
+// Carries the FPrimitiveSceneData cbuffer fields the vendored corpus actually
+// references (audited from BasePassPixelShader.usf reachable code). Field
+// types follow the UE FPrimitiveSceneData / Primitive uniform-buffer
+// declarations.
+#pragma once
+cbuffer Primitive
+{
+    uint Flags;
+    uint VisibilityFlags;
+    uint InstanceSceneDataOffset;
+    int NumInstanceSceneDataEntries;
+    int PersistentPrimitiveIndex;
+    uint LightmapUVIndex;
+    uint LightmapDataIndex;
+    uint CustomStencilValueAndMask;
+    uint InstancePayloadDataOffset;
+    uint InstancePayloadDataStride;
+    uint InstancePayloadExtensionSize;
+    uint SingleCaptureIndex;
+    uint PrimitiveComponentId;
+    uint NaniteResourceID;
+    uint NaniteHierarchyOffset;
+    uint NaniteAssemblyTransformOffset;
+    uint NaniteAssemblyTransformCount;
+    uint PackedNaniteFlags;
+    uint NaniteRayTracingDataOffset;
+    float4 PositionHigh;
+    float4 PositionLow;
+    float3 ActorWorldPositionHigh;
+    float3 ActorWorldPositionLow;
+    float3 ObjectWorldPositionLow;
+    float3 LocalObjectBoundsMin;
+    float3 LocalObjectBoundsMax;
+    float3 PreSkinnedLocalBoundsMin;
+    float3 PreSkinnedLocalBoundsMax;
+    float3 InvNonUniformScale;
+    float3 InstanceLocalBoundsCenter;
+    float3 InstanceLocalBoundsExtent;
+    float3 ObjectOrientation;
+    float AnimationMinScreenSize;
+    float InstanceWPODisableDistanceSquared;
+    float PixelProgrammableDistanceSquared;
+    float MaxWPOExtent;
+    float MinMaterialDisplacement;
+    float MaxMaterialDisplacement;
+    float MaterialDisplacementFadeOutSize;
+    uint MeshPaintTextureDescriptor;
+    uint MaterialCacheDescriptor;
+    float ObjectBoundsX;
+    float ObjectBoundsY;
+    float ObjectBoundsZ;
+    float2 InstanceDrawDistanceMinMaxSquared;
+    float4 InstancingFadeOutParams;
+    float4 WireframeAndPrimitiveColor;
+    float4 ObjectWorldPositionHighAndRadius;
+    float4 NonUniformScale;
+    float4x4 LocalToRelativeWorld;
+    float4x4 RelativeWorldToLocal;
+    float4x4 PreviousLocalToRelativeWorld;
+    float4x4 PreviousRelativeWorldToLocal;
+    float4x4 WorldToPreviousWorld;
+    float4x4 WorldToLocal;
+    float4x4 PreviousLocalToWorld;
+    float4 CustomPrimitiveData[4];
+};

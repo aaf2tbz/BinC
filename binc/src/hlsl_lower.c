@@ -241,8 +241,8 @@ static void rr_block(Block *b, const char *out, const char *field){
  * The call sites `f(a, b, ...)` become `a = f(b, ...)` (the inout arg is the
  * receiver, removed from the call). The function body gets `return a;`
  * appended so the modified value flows out. */
-static void iw_expr(Expr *e, const char *fnname);
-static void iw_block(Block *b, const char *fnname);
+static void iw_expr(Expr *e, const char *fnname, int io);
+static void iw_block(Block *b, const char *fnname, int io);
 static void sr_expr(Expr *e, const char *spname, const char *sfield, const char *coord, const char *fld);
 static void sr_block(Block *b, const char *spname, const char *sfield, const char *coord, const char *fld){
     for(size_t i=0;i<b->n;i++){
@@ -376,6 +376,42 @@ static void ra_block(Block *b, const char *const *res, size_t nres){
         ra_block(&st->def_body,res,nres);
     }
 }
+/* does an HLSL body/expr tree reference the name? (selective resource capture:
+ * a helper gets a forwarded resource param only if its body uses it) */
+static int refs_expr(Expr *e, const char *name){
+    if(!e) return 0;
+    if(e->kind==E_IDENT&&e->name&&!strcmp(e->name,name)) return 1;
+    if(e->kind==E_CALL&&e->name&&!e->callee){
+        /* a call forwards the callee's resource params, so the caller must
+         * carry them too (transitive resource requirement) */
+        int callee_u=0;
+        for(size_t i=0;i<g_prog.nfuncs;i++) if(!strcmp(g_prog.funcs[i].name,e->name)){
+            for(size_t q=0;q<g_prog.funcs[i].nparams;q++){
+                if(!strcmp(g_prog.funcs[i].params[q].name,name)) return 1;
+                if(!strcmp(g_prog.funcs[i].params[q].name,"__uniforms")) callee_u=1;
+            }
+        }
+        if(callee_u&&!strcmp(name,"__uniforms")) return 1; /* any callee carrying __uniforms forces the caller to carry it (transitive) */
+    }
+    if(refs_expr(e->operand,name)||refs_expr(e->lhs,name)||refs_expr(e->rhs,name)) return 1;
+    if(e->callee&&refs_expr(e->callee,name)) return 1;
+    for(size_t i=0;i<e->nargs;i++) if(refs_expr(e->args[i],name)) return 1;
+    return 0;
+}
+static int refs_block(Block *b, const char *name){
+    for(size_t i=0;i<b->n;i++){
+        Stmt *st=&b->stmts[i];
+        if(st->expr&&refs_expr(st->expr,name)) return 1;
+        if(st->init&&refs_expr(st->init,name)) return 1;
+        if(st->cond&&refs_expr(st->cond,name)) return 1;
+        if(st->for_incr&&refs_expr(st->for_incr,name)) return 1;
+        if(st->for_init&&st->for_init->expr&&refs_expr(st->for_init->expr,name)) return 1;
+        if(refs_block(&st->then_b,name)||refs_block(&st->else_b,name)) return 1;
+        for(size_t c=0;c<st->ncases;c++){ if(refs_expr(st->cases[c].val,name)) return 1; if(refs_block(&st->cases[c].body,name)) return 1; }
+        if(refs_block(&st->def_body,name)) return 1;
+    }
+    return 0;
+}
 /* resource-arg capture: every call to a lowered user function gets the module
  * resources appended as arguments (the callee carries them as trailing params;
  * the caller's own resource params satisfy the bindings by name) */
@@ -384,12 +420,19 @@ static void ra_expr(Expr *e, const char *const *res, size_t nres){
     if(e->kind==E_CALL&&e->name&&!e->callee){
         for(size_t i=0;i<g_prog.nfuncs;i++)
             if(!strcmp(g_prog.funcs[i].name,e->name)){
-                e->args=realloc(e->args,(e->nargs+nres)*sizeof(Expr*));
-                for(size_t r=0;r<nres;r++){
-                    Expr *a=E(E_IDENT,e->line,e->col); a->name=strdup(res[r]);
+                if(getenv("BINC_DEBUG_IW")){ fprintf(stderr,"DBG ra: %s callee_nparams=%zu nres=%zu params=[",e->name,g_prog.funcs[i].nparams,nres);
+                    for(size_t q2=0;q2<g_prog.funcs[i].nparams;q2++) fprintf(stderr,"%s%s",q2?",":"",g_prog.funcs[i].params[q2].name); fprintf(stderr,"]\n"); }
+                /* forward only the resources the callee actually carries
+                 * (the callee appends only the ones its body references) */
+                for(size_t q=0;q<g_prog.funcs[i].nparams;q++){
+                    int isres=0;
+                    for(size_t r=0;r<nres;r++) if(!strcmp(g_prog.funcs[i].params[q].name,res[r])){ isres=1; break; }
+                    if(!isres) continue;
+                    e->args=realloc(e->args,(e->nargs+1)*sizeof(Expr*));
+                    Expr *a=E(E_IDENT,e->line,e->col); a->name=strdup(g_prog.funcs[i].params[q].name);
                     e->args[e->nargs++]=a;
                 }
-                if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG ra: %s nargs=%zu nres=%zu\n",e->name,e->nargs,nres);
+                if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG ra: %s nargs=%zu\n",e->name,e->nargs);
                 break;
             }
     }
@@ -397,41 +440,42 @@ static void ra_expr(Expr *e, const char *const *res, size_t nres){
     if(e->callee) ra_expr(e->callee,res,nres);
     for(size_t i=0;i<e->nargs;i++) ra_expr(e->args[i],res,nres);
 }
-static void iw_stmt(Stmt *st, const char *fnname){
+static void iw_stmt(Stmt *st, const char *fnname, int io){
     switch(st->kind){
-    case S_EXPR: iw_expr(st->expr,fnname); break;
-    case S_DECL: iw_expr(st->init,fnname); break;
-    case S_RETURN: iw_expr(st->expr,fnname); break;
-    case S_IF: iw_expr(st->cond,fnname); iw_block(&st->then_b,fnname); iw_block(&st->else_b,fnname); break;
-    case S_WHILE: case S_DOWHILE: iw_expr(st->cond,fnname); iw_block(&st->then_b,fnname); break;
+    case S_EXPR: iw_expr(st->expr,fnname,io); break;
+    case S_DECL: iw_expr(st->init,fnname,io); break;
+    case S_RETURN: iw_expr(st->expr,fnname,io); break;
+    case S_IF: iw_expr(st->cond,fnname,io); iw_block(&st->then_b,fnname,io); iw_block(&st->else_b,fnname,io); break;
+    case S_WHILE: case S_DOWHILE: iw_expr(st->cond,fnname,io); iw_block(&st->then_b,fnname,io); break;
     case S_FOR:
-        if(st->for_init) iw_stmt(st->for_init,fnname);
-        iw_expr(st->for_cond,fnname); iw_expr(st->for_incr,fnname); iw_block(&st->then_b,fnname); break;
+        if(st->for_init) iw_stmt(st->for_init,fnname,io);
+        iw_expr(st->for_cond,fnname,io); iw_expr(st->for_incr,fnname,io); iw_block(&st->then_b,fnname,io); break;
     case S_SWITCH:
-        iw_expr(st->sw_cond,fnname);
-        for(size_t i=0;i<st->ncases;i++){ iw_expr(st->cases[i].val,fnname); iw_block(&st->cases[i].body,fnname); }
-        iw_block(&st->def_body,fnname); break;
-    case S_BLOCK: iw_block(&st->then_b,fnname); break;
+        iw_expr(st->sw_cond,fnname,io);
+        for(size_t i=0;i<st->ncases;i++){ iw_expr(st->cases[i].val,fnname,io); iw_block(&st->cases[i].body,fnname,io); }
+        iw_block(&st->def_body,fnname,io); break;
+    case S_BLOCK: iw_block(&st->then_b,fnname,io); break;
     default: break;
     }
 }
-static void iw_block(Block *b, const char *fnname){
-    for(size_t i=0;i<b->n;i++) iw_stmt(&b->stmts[i],fnname);
+static void iw_block(Block *b, const char *fnname, int io){
+    for(size_t i=0;i<b->n;i++) iw_stmt(&b->stmts[i],fnname,io);
 }
-static void iw_expr(Expr *e, const char *fnname){
+static void iw_expr(Expr *e, const char *fnname, int io){
     if(!e) return;
     if(e->kind==E_CALL&&e->name&&!strcmp(e->name,fnname)){
-        if(e->nargs<1) die(0,"inout call needs at least one argument");
-        /* a = f(a, b, ...) — the receiver is arg0, the call keeps every arg */
-        Expr *receiver=rw_copy(e->args[0]);
+        if((size_t)io>=e->nargs) die(0,"inout call has no argument %d",io);
+        /* a = f(..., a, ...) — the receiver is the inout arg (index io), the
+         * call keeps every arg */
+        Expr *receiver=rw_copy(e->args[io]);
         Expr *as=E(E_ASSIGN,e->line,e->col); as->aop=A_ASSIGN; as->operand=receiver; as->rhs=rw_copy(e);
-        if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG iw: call->assign operand=%s kind=%d\n",receiver->name,receiver->kind);
+        if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG iw: call->assign operand=%s kind=%d io=%d\n",receiver->name,receiver->kind,io);
         *e=*as;
         return;
     }
-    iw_expr(e->operand,fnname); iw_expr(e->lhs,fnname); iw_expr(e->rhs,fnname);
-    if(e->callee) iw_expr(e->callee,fnname);
-    for(size_t i=0;i<e->nargs;i++) iw_expr(e->args[i],fnname);
+    iw_expr(e->operand,fnname,io); iw_expr(e->lhs,fnname,io); iw_expr(e->rhs,fnname,io);
+    if(e->callee) iw_expr(e->callee,fnname,io);
+    for(size_t i=0;i<e->nargs;i++) iw_expr(e->args[i],fnname,io);
 }
 static void prog_add_struct(StructDef sd){
     for(size_t i=0;i<g_prog.nstructs;i++)
@@ -719,7 +763,7 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
  * entry/profile select the compute/vertex/fragment entry; with stage_all,
  * every function whose return semantics imply a stage gets lowered (render
  * files with multiple stage functions, e.g. shaders.hlsl VS+PS pairs). */
-static char **iw_helpers=NULL; static size_t niw=0;
+static char **iw_helpers=NULL; static size_t niw=0; static int *iw_io=NULL;
 Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int stage_all){
     memset(&g_prog,0,sizeof g_prog);
     fprintf(stderr,"DBG build: entry=%s nglobals=%zu\n",entry,hp->nglobals);
@@ -856,6 +900,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
     /* insertion sort by register slot */
     for(size_t i=1;i<nres;i++){ HRes t=res[i]; size_t j=i;
         while(j>0&&res[j-1].reg>t.reg){ res[j]=res[j-1]; j--; } res[j]=t; }
+    if(getenv("BINC_DEBUG_IW")){ fprintf(stderr,"DBG res: nres=%zu [",nres); for(size_t i=0;i<nres;i++) fprintf(stderr,"%s%s",i?",":"",res[i].name); fprintf(stderr,"]\n"); }
     /* functions: all of them, plain; the entry gets its stage */
     int entry_found=0;
     /* reachability (single-entry mode): only functions reachable from the
@@ -893,7 +938,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         fn.nparams=0;
         for(size_t p=0;p<hf->np;p++){
             HLSLParam *hp2=&hf->params[p];
-            fn.params[fn.nparams++]=(Param){strdup(hp2->name),hp2->ty,UN_UNIFORM};
+            fn.params[fn.nparams++]=(Param){strdup(hp2->name),hp2->ty,UN_UNIFORM,hp2->def};
         }
         /* inout/out helpers (Phase 5): single inout on a void function becomes a
          * value return; the call sites are rewritten to `a = f(b, ...)` */
@@ -939,7 +984,10 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                 fn.body.stmts[fn.body.n++]=ret;
                 /* remember the helper so every function's call sites get rewritten */
                 iw_helpers=realloc(iw_helpers,(niw+1)*sizeof(char*));
-                iw_helpers[niw++]=strdup(hf->name);
+                iw_helpers[niw]=strdup(hf->name);
+                iw_io=realloc(iw_io,(niw+1)*sizeof(int));
+                iw_io[niw]=(int)io; /* the inout param index (not always arg0) */
+                niw++;
             }
         }
         int is_entry = !strcmp(hf->name,entry);
@@ -966,12 +1014,37 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             if(stage_all){ fn.stage=is_entry&&is_gs?ST_GEOMETRY:(s_vs?ST_VERTEX:s_ps?ST_FRAGMENT:is_gs?ST_GEOMETRY:ST_FRAGMENT); }
             else if(is_entry){ fn.stage=is_vs?ST_VERTEX:is_ps?ST_FRAGMENT:is_gs?ST_GEOMETRY:ST_NONE; }
         }
+        /* D3D9 tex2D family -> the method form BEFORE the resource scan, so a
+         * texture only referenced through tex2D(s, uv) is still forwarded */
+        tex2d_block(&fn.body,hp);
         /* resources + rewrites for EVERY reachable function: helpers reference
          * module globals and cbuffer fields directly (D3D12 sample pattern —
-         * `g_SortBuffer.Load()` inside LoadKeyIndexPair, `Constants.x`, ...) */
+         * `g_SortBuffer.Load()` inside LoadKeyIndexPair, `Constants.x`, ...).
+         * Only the resources the body actually references become trailing
+         * params — otherwise every helper would carry the whole module. */
         for(size_t r=0;r<nres;r++){
+            /* __uniforms is rewritten into the body by field name, so the
+             * literal never appears — forward it only when the body actually
+             * references a uniform global/param (pure helpers stay clean) */
+            if(!strcmp(res[r].name,"__uniforms")){
+                int unif_ref=0;
+                for(size_t ui2=0;ui2<nu;ui2++) if(refs_block(&hf->body,unif_rw[ui2].names[0])){ unif_ref=1; break; }
+                if(!unif_ref&&refs_block(&hf->body,"__uniforms")) unif_ref=1; /* transitive: callee carries it */
+                if(!unif_ref) continue;
+            } else if(!refs_block(&hf->body,res[r].name)){
+                if(getenv("BINC_DEBUG_IW")&&!strcmp(res[r].name,"Primitive")) fprintf(stderr,"DBG noref: %s nstmts=%zu\n",hf->name,hf->body.n);
+                continue;
+            }
+            if(getenv("BINC_DEBUG_IW")&&!strcmp(res[r].name,"Primitive")) fprintf(stderr,"DBG ref: %s nstmts=%zu\n",hf->name,hf->body.n);
+            /* insert the resource param BEFORE any trailing defaulted params:
+             * HLSL defaults are trailing, and the RA-appended resource args
+             * fill the non-defaulted tail — resources must precede defaults */
+            size_t ip=fn.nparams;
+            while(ip>0&&fn.params[ip-1].def) ip--;
             fn.params=realloc(fn.params,(fn.nparams+1)*sizeof(Param));
-            fn.params[fn.nparams++]=(Param){strdup(res[r].name),res[r].ty,UN_UNIFORM};
+            memmove(&fn.params[ip+1],&fn.params[ip],(fn.nparams-ip)*sizeof(Param));
+            fn.params[ip]=(Param){strdup(res[r].name),res[r].ty,UN_UNIFORM};
+            fn.nparams++;
         }
         {
             size_t keep=0;
@@ -987,12 +1060,19 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             HLCBuf *cb=&hp->cbufs[ci];
             for(size_t fi=0;fi<cb->nfields;fi++){
                 const char *fname=cb->fields[fi].name;
+                /* a function parameter shadows a same-named cbuffer field
+                 * (UE: GetPrimitive_PerObjectGBufferData_FromFlags(uint Flags)
+                 * vs cbuffer Primitive{ uint Flags; ... }) — rewriting the
+                 * param reference into Primitive.Flags breaks resolution */
+                int shadowed=0;
+                for(size_t pi=0;pi<hf->np;pi++)
+                    if(!strcmp(hf->params[pi].name,fname)){ shadowed=1; break; }
+                if(shadowed) continue;
                 Rewrite rw={&fname,1,fname,cb->name,NULL};
                 rw_block(&fn.body,&rw);
             }
         }
-        for(size_t ui=0;ui<nu;ui++) rw_block(&fn.body,&unif_rw[ui]);
-        tex2d_block(&fn.body,hp); /* D3D9 tex2D family -> the method form */
+        for(size_t ui=0;ui<nu;ui++){ if(getenv("BINC_DEBUG_IW")&&!strcmp(hf->name,"GetPrimitive_PerObjectGBufferData_FromFlags")) fprintf(stderr,"DBG rw: %s -> %s.%s\n",unif_rw[ui].names[0],unif_rw[ui].base?unif_rw[ui].base:"?",unif_rw[ui].field); rw_block(&fn.body,&unif_rw[ui]); }
         if(is_entry||(stage_all&&(s_vs||s_ps||is_gs))){
             if(fn.stage==ST_VERTEX) lower_vertex(&fn,hf);
             else if(fn.stage==ST_FRAGMENT) lower_fragment(&fn,hf);
@@ -1009,6 +1089,8 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
             }
         }
         g_prog.funcs=realloc(g_prog.funcs,(g_prog.nfuncs+1)*sizeof(Function));
+        if(getenv("BINC_DEBUG_IW")&&(!strcmp(hf->name,"GetPrimitive_PerObjectGBufferData_FromFlags")||!strcmp(hf->name,"RenderScenePS"))){ fprintf(stderr,"DBG fnlow: %s nparams=%zu nstmts=%zu",hf->name,fn.nparams,fn.body.n);
+            for(size_t qi=0;qi<fn.nparams;qi++) fprintf(stderr," [%s]",fn.params[qi].name); fprintf(stderr,"\n"); }
         g_prog.funcs[g_prog.nfuncs++]=fn;
     }
     if(!entry_found&&!stage_all) die(0,"entry point '%s' not found in the shader",entry);
@@ -1022,7 +1104,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         free(rn);
     }
     /* rewrite every inout-helper call site across all functions */
-    for(size_t h=0;h<niw;h++) for(size_t i=0;i<g_prog.nfuncs;i++) iw_block(&g_prog.funcs[i].body,iw_helpers[h]);
+    for(size_t h=0;h<niw;h++) for(size_t i=0;i<g_prog.nfuncs;i++) iw_block(&g_prog.funcs[i].body,iw_helpers[h],iw_io[h]);
     /* overloaded names get mangled link names (name$N); `name` stays the
      * resolution key. The emission sites use link_name. */
     for(size_t i=0;i<g_prog.nfuncs;i++){

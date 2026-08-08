@@ -1,0 +1,19 @@
+// Stub for the SCW-generated Engine/Generated/Material.ush.
+#pragma once
+
+// The real file is generated per-material by the ShaderCompilerWorker; it
+// includes the material template and defines the material-parameter globals.
+// The includes below restore the standard material infrastructure so shaders
+// referencing the material pipeline resolve their macros and types.
+#include "/Engine/Private/MaterialTemplate.ush"
+
+// SCW-generated material plumbing (per-material in the real build): initializes
+// the pixel-parameter subset the base pass expects before CalcMaterialParametersEx
+// fills the rest. The base-pass reachable call passes (Interpolants, SvPosition).
+FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolantsVSToPS Interpolants, float4 SvPosition)
+{
+    FMaterialPixelParameters Result = (FMaterialPixelParameters)0;
+    Result.SvPosition = SvPosition;
+    return Result;
+}
+

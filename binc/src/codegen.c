@@ -18,7 +18,7 @@ static StructDef *find_struct(const Program *p, const char *t){
     for(size_t i=0;i<p->nstructs;i++) if(!strcmp(p->structs[i].tag,t)) return &p->structs[i]; return NULL; }
 static const char *scalar_ll(TypeKind k){
     switch(k){ case T_FLOAT: return "float"; case T_HALF: return "half"; case T_BOOL: return "i1";
-        case T_INT32: case T_UINT32: return "i32"; default: return "float"; } }
+        case T_INT32: case T_UINT32: return "i32"; case T_VOID: return "void"; default: return "float"; } }
 static ValKind scalar_vk(TypeKind k){
     switch(k){ case T_FLOAT: case T_HALF: return VK_F32; case T_BOOL: return VK_I1;
         case T_INT32: return VK_I32; case T_UINT32: return VK_U32; default: return VK_F32; } }
@@ -116,15 +116,18 @@ static const char *coerce(CG *c, const char *v, ValKind from, ValKind to){
     if(from==VK_F32 && to==VK_U32){ const char *r=newtmp(c); emit(c,"  %s = fptoui float %s to i32\n",r,v); return r; }
     if(from==VK_I1 && to==VK_F32){ const char *z=newtmp(c); emit(c,"  %s = zext i1 %s to i32\n",z,v); const char *r=newtmp(c); emit(c,"  %s = sitofp i32 %s to float\n",r,z); return r; }
     if(from==VK_I1 && (to==VK_I32||to==VK_U32)){ const char *r=newtmp(c); emit(c,"  %s = zext i1 %s to i32\n",r,v); return r; }
+    if(from==VK_I32&&to==VK_I1){ const char *r=newtmp(c); emit(c,"  %s = icmp ne i32 %s, 0\n",r,v); return r; } /* int -> bool (CondMask(Flags & 0x100, ...)) */
+    if(from==VK_U32&&to==VK_I1){ const char *r=newtmp(c); emit(c,"  %s = icmp ne i32 %s, 0\n",r,v); return r; }
     return v;
 }
 
 /* resolve a name to: local | pointer param idx | scalar param idx | module constant | texture/sampler */
 typedef enum { R_NONE,R_LOCAL,R_PTR,R_SCALAR,R_COORD,R_EXTENT,R_CONST,R_TEXTURE,R_SAMPLER } RKind;
 static RKind resolve(CG *c, const char *name, int *out){
-    for(size_t i=0;i<c->nlocs;i++) if(!strcmp(c->locs[i].name,name)){ *out=(int)i; return R_LOCAL; }
+    for(size_t i=0;i<c->nlocs;i++) if(!strcmp(c->locs[i].name,name)){ *out=(int)i; if(getenv("BINC_DEBUG_IW")&&!strcmp(name,"Primitive")) fprintf(stderr,"DBG resv: Primitive -> R_LOCAL %d nlocs=%zu\n",(int)i,c->nlocs); return R_LOCAL; }
     for(size_t i=0;i<c->fn->nparams;i++) if(!strcmp(c->fn->params[i].name,name)){
         *out=(int)i;
+        if(getenv("BINC_DEBUG_IW")&&!strcmp(name,"Primitive")) fprintf(stderr,"DBG resp: %s -> param %zu fn=%s np=%zu\n",name,i,c->fn->name,c->fn->nparams);
         if(c->fn->params[i].ty.kind==T_COORD) return R_COORD;
         if(c->fn->params[i].ty.kind==T_GRID_EXTENT) return R_EXTENT;
         if(c->fn->params[i].ty.kind==T_TEXTURE) return R_TEXTURE;
@@ -168,6 +171,12 @@ static char *element_ptr_idx(CG *c,int pi,const char *ix){
 static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark);
 static const char *gen_cond(CG *c, Expr *e);
 static const char *gen_rval(CG *c, Expr *e, ValKind *k);
+static Expr *rw_copy(Expr *e){ if(!e) return NULL; Expr *n=calloc(1,sizeof(Expr)); *n=*e;
+    n->name=e->name?strdup(e->name):NULL; n->field=e->field?strdup(e->field):NULL;
+    n->operand=rw_copy(e->operand); n->lhs=rw_copy(e->lhs); n->rhs=rw_copy(e->rhs);
+    n->callee=rw_copy(e->callee);
+    if(e->args&&e->nargs){ n->args=calloc(e->nargs,sizeof(Expr*)); for(size_t i=0;i<e->nargs;i++) n->args[i]=rw_copy(e->args[i]); }
+    return n; }
 
 /* ---- template (monomorphized) functions ----
  * A template<T> function is skipped at emission; each call site with a concrete
@@ -193,6 +202,44 @@ static size_t inst_lookup(const char *key){ for(size_t i=0;i<ninsts;i++) if(!str
 
 /* static type of an expression, for template argument inference */
 static int vec_name(const char *s, TypeKind *k, int *n); /* forward (defined below) */
+typedef struct { const char *name,*ll; int nargs; TypeKind ret, a0, a1; int vec_ok; } Builtin;
+/* builtins: AIR spellings probed from the metal frontend (metal -emit-llvm -S on MSL using
+ * metal::sqrt etc.; the module sets air.compile.fast_math_enable, hence the fast_ variants).
+ * sync() is the threadgroup barrier: air.wg.barrier(i32 2, i32 5, i32 1). */
+static Builtin builtins[]={
+    {"sqrt","air.fast_sqrt.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"fabs","air.fast_fabs.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"floor","air.fast_floor.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"ceil","air.fast_ceil.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"round","air.fast_round.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"mad","air.fma.f32",3,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"sin","air.fast_sin.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"cos","air.fast_cos.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"exp","air.fast_exp.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"log","air.fast_log.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"exp2","air.fast_exp2.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"log2","air.fast_log2.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"fmin","air.fast_fmin.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"fmax","air.fast_fmax.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"pow","air.fast_pow.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"atan2","air.fast_atan2.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"rsqrt","air.fast_rsqrt.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"sign","air.sign.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"imin","air.min.s.i32",2,T_INT32,T_INT32,T_INT32,1},
+    {"imax","air.max.s.i32",2,T_INT32,T_INT32,T_INT32,1},
+    /* HLSL aliases: min/max are type-generic in HLSL; the float forms are
+     * exact for the differential range (int operands convert to float) */
+    {"min","air.fast_fmin.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"max","air.fast_fmax.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"abs","air.fast_fabs.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"saturate","air.fast_saturate.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"tan","air.fast_tan.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"asin","air.fast_asin.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"acos","air.fast_acos.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"atan","air.fast_atan.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"fmod","air.fast_fmod.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
+    {"sync","air.wg.barrier",0,T_VOID,T_VOID,T_VOID,0},
+};
 static void expr_type_of(CG *c, Expr *e, Type *out){
     memset(out,0,sizeof *out);
     switch(e->kind){
@@ -200,6 +247,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
     case E_FCONST: out->kind=T_FLOAT; break;
     case E_BOOL: out->kind=T_BOOL; break;
     case E_IDENT:{ int idx; RKind r=resolve(c,e->name,&idx);
+        if(getenv("BINC_DEBUG_IW")&&!strcmp(e->name,"__uniforms")) fprintf(stderr,"DBG etypu: r=%d idx=%d fn=%s nparams=%zu\n",r,idx,c->fn->name,c->fn->nparams);
         if(r==R_LOCAL){ out->kind=c->locs[idx].kind; out->struct_name=c->locs[idx].sname;
             out->vecn=c->locs[idx].vecn; out->matn=c->locs[idx].matn; }
         else if(r==R_CONST){ out->kind=c->prog->consts[idx].ty.kind; }
@@ -215,10 +263,64 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
                 for(size_t j=0;j<sd->nfields;j++) if(!strcmp(sd->fields[j].name,e->field)){ Type t=sd->fields[j].ty; t.tvar=NULL; *out=t; return; }
                 break; } }
         else if(base.kind==T_COORD||base.kind==T_GRID_EXTENT){ out->kind=T_UINT32; out->vecn=0; } /* tid.x -> uint */
-        else { *out=base; if(strlen(e->field)==1) out->vecn=0; } /* vector swizzle */
+        else { *out=base; size_t fl=strlen(e->field); if(fl==1) out->vecn=0; else if(fl<=4) out->vecn=(int)fl; } /* vector swizzle: the swizzle width (v.xy -> 2) */
         break; }
-    case E_CALL:{ for(size_t i=0;i<c->prog->nfuncs;i++)
-            if(!strcmp(c->prog->funcs[i].name,e->name)){ Type t=c->prog->funcs[i].ret; t.tvar=NULL; *out=t; return; }
+    case E_CALL:{
+        /* user function: best-overload by arg compatibility (mirrors the codegen
+         * ranker) — a plain first-name match is wrong for overloaded helpers
+         * like MakePrecise(float / float2 / float3 / float4) */
+        { Type best={0}; int found=0, bestrk=1<<30;
+        for(size_t i=0;i<c->prog->nfuncs;i++){
+            Function *cf=&c->prog->funcs[i];
+            if(strcmp(cf->name,e->name)) continue;
+            if(e->nargs>cf->nparams) continue;
+            if(e->nargs<cf->nparams){ int nd=0;
+                for(size_t q=e->nargs;q<cf->nparams;q++) if(!cf->params[q].def){ nd=1; break; }
+                if(nd) continue; }
+            int rk=0, ok=1;
+            for(size_t ai=0;ai<e->nargs;ai++){
+                Type at={0}; expr_type_of(c,e->args[ai],&at);
+                Type pt=cf->params[ai].ty;
+                if(pt.tvar){ ok=0; break; }
+                if(at.kind!=pt.kind){
+                    if(at.kind==T_INT32&&(pt.kind==T_FLOAT||pt.kind==T_HALF)&&!at.vecn&&!pt.vecn){ rk+=1; continue; }
+                    if(at.kind==T_INT32&&pt.kind==T_FLOAT&&!at.vecn&&pt.vecn>0){ rk+=3; continue; } /* int scalar splat */
+                    ok=0; break; }
+                if(at.vecn!=pt.vecn){
+                    if(at.vecn==0&&pt.vecn>0){ rk+=2; continue; }
+                    if(at.vecn>pt.vecn&&pt.vecn>0){ rk+=2; continue; }
+                    ok=0; break; }
+            }
+            if(!ok) continue;
+            if(rk<bestrk){ bestrk=rk; best=cf->ret; found=1; }
+        }
+        if(found){ best.tvar=NULL; *out=best; break; } }
+        /* builtin calls (mad, sqrt, ...): ret kind + arg-derived width so the
+         * overload ranker sees float3 mad() results, not T_INT32 */
+        for(size_t bi2=0;bi2<sizeof builtins/sizeof *builtins;bi2++)
+            if(!strcmp(builtins[bi2].name,e->name)){
+                out->kind=builtins[bi2].ret;
+                if(builtins[bi2].vec_ok&&e->nargs){
+                    for(size_t ai2=0;ai2<e->nargs;ai2++){
+                        Type at2={0}; expr_type_of(c,e->args[ai2],&at2);
+                        if(at2.vecn>out->vecn) out->vecn=at2.vecn;
+                    }
+                }
+                break;
+            }
+        if(out->kind) break; /* matched a builtin */
+        /* math spell functions (dot/cross/length/normalize/...) — codegen has
+         * a dedicated spell table; type them so overload rankers see the
+         * right width instead of T_INT32 */
+        { static const char *scalars[]={"dot","length","distance",NULL};
+          static const char *width_of_arg[]={"normalize","reflect","clamp","lerp","mix","step","smoothstep","fract","frac","mod","radians","degrees","sign","cross",NULL};
+          int matched=0;
+          for(int si=0;scalars[si]&&!matched;si++) if(!strcmp(scalars[si],e->name)){ out->kind=T_FLOAT; out->vecn=0; matched=1; }
+          for(int si=0;width_of_arg[si]&&!matched;si++) if(!strcmp(width_of_arg[si],e->name)){
+              if(e->nargs>=1){ expr_type_of(c,e->args[0],out); }
+              else { out->kind=T_FLOAT; }
+              matched=1; }
+          if(matched) break; }
         /* vector/scalar constructors: float2..uint4, float/int/uint/bool */
         { TypeKind ck; int cn; if(vec_name(e->name,&ck,&cn)){ out->kind=ck; out->vecn=cn; break; } }
         if(!strcmp(e->name,"float")||!strcmp(e->name,"half")){ out->kind=T_FLOAT; break; }
@@ -238,7 +340,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
         else if(a.kind==T_COORD||b.kind==T_COORD) out->kind=T_UINT32;
         else out->kind=T_INT32;
         out->vecn = a.vecn> b.vecn ? a.vecn : b.vecn; break; }
-    case E_CMP: case E_LOG: out->kind=T_BOOL; break;
+    case E_CMP: case E_LOG: out->kind=T_BOOL; { Type ot={0}; expr_type_of(c,e->lhs,&ot); out->vecn=ot.vecn; } break; /* vector compare keeps the width (N.xy >= 0 -> bool2) */
     default: out->kind=T_INT32; break;
     }
 }
@@ -277,6 +379,7 @@ static int matrix_n(CG *c, Expr *e){
         int i; RKind r=resolve(c,e->name,&i);
         if(r==R_LOCAL) return c->locs[i].matn;
         if(r==R_PTR) return c->fn->params[i].ty.matn;
+        if(r==R_SCALAR) return c->fn->params[i].ty.matn; /* matrix parameter (float4x4 M) */
         return 0;
     }
     if(e->kind==E_FIELD && e->operand->kind==E_IDENT){
@@ -376,8 +479,10 @@ static const char *emit_load_t(CG *c, LInfo *li, const char *addr, ValKind *k){
         StructDef *sd=find_struct(c->prog,li->sname);
         if(!sd) die(0,"unknown struct %s",li->sname);
         int sal; struct_layout(sd,&sal);
-        char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",li->sname);
-        char sp[64]; snprintf(sp,sizeof sp,"%%struct.%s*",li->sname);
+        char sn[96]; snprintf(sn,sizeof sn,"%%struct.%s",li->sname);
+        char sp[96];
+        if(li->as) snprintf(sp,sizeof sp,"%%struct.%s addrspace(%d)*",li->sname,li->as);
+        else snprintf(sp,sizeof sp,"%%struct.%s*",li->sname);
         const char *v=newtmp(c);
         emit(c,"  %s = load %s, %s %s, align %d\n",v,sn,sp,addr,sal);
         *k=VK_I32; c->rvw=0; c->rstruct=li->sname; return v;
@@ -388,6 +493,29 @@ static const char *emit_load_t(CG *c, LInfo *li, const char *addr, ValKind *k){
         const char *v=newtmp(c);
         emit(c,"  %s = load %s, %s %s, align %d\n",v,mty,pty,addr,mat_align(li->matn));
         *k=VK_F32; c->rvw=0; c->rmat=li->matn; return v;
+    }
+    if(li->an>0){ /* packed vector / array field: [N x T] or [N x [M x T]] */
+        char lty[64], pty[96];
+        if(li->am>0) snprintf(lty,sizeof lty,"[%d x [%d x %s]]",li->an,li->am,scalar_ll(li->tk));
+        else snprintf(lty,sizeof lty,"[%d x %s]",li->an,scalar_ll(li->tk));
+        if(li->as) snprintf(pty,sizeof pty,"%s addrspace(%d)*",lty,li->as);
+        else snprintf(pty,sizeof pty,"%s*",lty);
+        const char *v=newtmp(c);
+        emit(c,"  %s = load %s, %s %s, align 4\n",v,lty,pty,addr);
+        *k=scalar_vk(li->tk);
+        if(!li->am&&li->an<=4){ /* packed vector: [3 x float] -> <3 x float> */
+            char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",li->an,scalar_ll(li->tk));
+            const char *acc="undef";
+            for(int i=0;i<li->an;i++){
+                const char *el=newtmp(c);
+                emit(c,"  %s = extractvalue %s %s, %d\n",el,lty,v,i);
+                const char *ins=newtmp(c);
+                emit(c,"  %s = insertelement %s %s, %s %s, i32 %d\n",ins,vty,acc,scalar_ll(li->tk),el,i);
+                acc=ins;
+            }
+            c->rvw=li->an; return acc;
+        }
+        c->rvw=0; return v;
     }
     char pty[96]; pty_str(pty,sizeof pty,li->tk,li->sname,li->as,li->is_local,li->vecn,li->matn);
     char ll[32]; ll_of(ll,sizeof ll,li->tk,li->vecn); const char *v=newtmp(c);
@@ -431,7 +559,7 @@ static const char *to_storage(CG *c, const char *v, ValKind from, int from_vw, T
         if(from!=want) v=vconv(c,v,vecn,from,want);
         if(tk==T_HALF) v=f2h(c,v,vecn);
         return v; }
-    if(from_vw) die(0,"cannot store a vector into a scalar");
+    if(from_vw){ if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG tost: tk=%d vecn=%d from_vw=%d line=%d\n",tk,vecn,from_vw,g_last_line); die(0,"cannot store a vector into a scalar (tk=%d vecn=%d from_vw=%d line=%d)",tk,vecn,from_vw,g_last_line); }
     const char *ev; return store_val(c,v,from,tk,&ev);
 }
 /* is `name` a vector type constructor (float2..uint4)? */
@@ -476,42 +604,7 @@ static const char *swizzle_read(CG *c, const char *vec, const char *vty, const c
     return acc;
 }
 
-/* builtins: AIR spellings probed from the metal frontend (metal -emit-llvm -S on MSL using
- * metal::sqrt etc.; the module sets air.compile.fast_math_enable, hence the fast_ variants).
- * sync() is the threadgroup barrier: air.wg.barrier(i32 2, i32 5, i32 1). */
-typedef struct { const char *name,*ll; int nargs; TypeKind ret, a0, a1; int vec_ok; } Builtin;
-static Builtin builtins[]={
-    {"sqrt","air.fast_sqrt.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"fabs","air.fast_fabs.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"floor","air.fast_floor.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"ceil","air.fast_ceil.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"sin","air.fast_sin.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"cos","air.fast_cos.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"exp","air.fast_exp.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"log","air.fast_log.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"exp2","air.fast_exp2.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"log2","air.fast_log2.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"fmin","air.fast_fmin.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"fmax","air.fast_fmax.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"pow","air.fast_pow.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"atan2","air.fast_atan2.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"rsqrt","air.fast_rsqrt.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"sign","air.sign.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"imin","air.min.s.i32",2,T_INT32,T_INT32,T_INT32,1},
-    {"imax","air.max.s.i32",2,T_INT32,T_INT32,T_INT32,1},
-    /* HLSL aliases: min/max are type-generic in HLSL; the float forms are
-     * exact for the differential range (int operands convert to float) */
-    {"min","air.fast_fmin.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"max","air.fast_fmax.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"abs","air.fast_fabs.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"saturate","air.fast_saturate.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"tan","air.fast_tan.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"asin","air.fast_asin.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"acos","air.fast_acos.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"atan","air.fast_atan.f32",1,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"fmod","air.fast_fmod.f32",2,T_FLOAT,T_FLOAT,T_FLOAT,1},
-    {"sync","air.wg.barrier",0,T_VOID,T_VOID,T_VOID,0},
-};
+/* builtins table defined above expr_type_of (shared with the type checker) */
 static int builtin_used[sizeof builtins/sizeof *builtins];
 static void mark_builtin(const char *name){ for(size_t i=0;i<sizeof builtins/sizeof *builtins;i++) if(!strcmp(builtins[i].name,name)){ builtin_used[i]=1; return; } }
 static int atomic_add_used[3];
@@ -735,7 +828,11 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
         /* table-dispatched (handles scalars + per-element vectors + coercion) */
         return NULL;
     }
-    if(ak!=VK_F32||bk!=VK_F32||ck!=VK_F32) die(0,"%s requires float arguments",nm);
+    /* HLSL implicitly converts int literals/args to float in math builtins
+     * (dot(1, abs(N)) etc.) — coerce instead of dying */
+    if(ak!=VK_F32) av=coerce(c,av,ak,VK_F32);
+    if(bk!=VK_F32) bv=coerce(c,bv,bk,VK_F32);
+    if(ck!=VK_F32) cv=coerce(c,cv,ck,VK_F32);
     if(!strcmp(nm,"dot")){
         if(e->nargs!=2) die(0,"dot expects 2 arguments");
         *k=VK_F32; c->rvw=0;
@@ -942,6 +1039,17 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             if(cd->ty.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,v); v=w; }
             return v; }
         if(r==R_SCALAR){ Param *p=&c->fn->params[idx]; *k=scalar_vk(p->ty.kind); c->rvw=p->ty.vecn>1?p->ty.vecn:0;
+            if(p->ty.matn){ /* matrix by-value param: the AIR value is the aggregate */
+                char nm[64]; snprintf(nm,sizeof nm,"%%_%s",p->name);
+                c->rmat=p->ty.matn; return strdup(nm);
+            }
+            if(p->ty.kind==T_STRUCT&&!p->ty.is_ptr&&!p->ty.matn){
+                /* struct by-value param: the AIR value IS the aggregate
+                 * (GetPrimitiveData(FMaterialVertexParameters Parameters)) */
+                c->rstruct=p->ty.struct_name;
+                char *nm=malloc(strlen(p->name)+3); snprintf(nm,strlen(p->name)+3,"%%_%s",p->name);
+                return nm;
+            }
             if(!c->scalar_load[idx]){
                 if(c->fn->is_kernel){ char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn); const char *v=newtmp(c);
                     emit(c,"  %s = load %s, %s addrspace(2)* %%_%s, align %d\n",v,ll,ll,p->name,type_align(p->ty.kind,p->ty.vecn));
@@ -962,8 +1070,38 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             /* field access on a VALUE (computed vector/struct result): vector
              * swizzle for vector results, extractvalue for struct results */
             if(getenv("BINC_DEBUG_IW")&&e->operand->kind==E_IDENT){ int dvi; RKind dvr=resolve(c,e->operand->name,&dvi); fprintf(stderr,"DBG fldsel: %s.%s vr=%d vi=%d\n",e->operand->name,e->field,dvr,dvi); }
+            if(e->operand->kind==E_ICONST||e->operand->kind==E_FCONST||e->operand->kind==E_BOOL){
+                /* scalar-constant swizzle: `1u.xxx` — splat the constant to the
+                 * swizzle width (a scalar broadcasts identically to every slot) */
+                int idxs[4]; int nc=swizzle_idx(e->field,idxs);
+                if(nc<0) die(0,"invalid vector component .%s",e->field);
+                ValKind ck; const char *cv=gen_rval(c,e->operand,&ck);
+                const char *elt=ck==VK_F32?"float":"i32";
+                const char *sp=splat(c,cv,elt,nc);
+                char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",nc,elt);
+                *k=ck; c->rvw=nc;
+                return swizzle_read(c,sp,vty,elt,idxs,nc);
+            }
             if(e->operand->kind!=E_IDENT&&e->operand->kind!=E_DEREF&&e->operand->kind!=E_FIELD&&e->operand->kind!=E_INDEX){
                 ValKind ck; const char *cv=gen_rval(c,e->operand,&ck);
+                if(c->rmat>0&&e->field[0]=='_'&&e->field[1]=='m'){
+                    /* matrix element swizzle: M._m10_m11_m12 (row N, col M) */
+                    int n=0, ir[4], ic[4];
+                    const char *p=e->field+1;
+                    while(*p){
+                        if(*p=='_') p++;
+                        if(p[0]=='m'&&p[1]>='0'&&p[1]<='4'&&p[2]>='0'&&p[2]<='4'){ ir[n]=p[1]-'0'; ic[n]=p[2]-'0'; n++; p+=3; }
+                        else break;
+                    }
+                    if(n>0){
+                        if(n==1){ *k=VK_F32; c->rvw=0; return mat_elem(c,cv,c->rmat,ic[0],ir[0]); }
+                        const char *acc="undef";
+                        for(int i=0;i<n;i++){ const char *e2=mat_elem(c,cv,c->rmat,ic[i],ir[i]);
+                            const char *ins=newtmp(c);
+                            emit(c,"  %s = insertelement <%d x float> %s, float %s, i32 %d\n",ins,n,acc,e2,i); acc=ins; }
+                        *k=VK_F32; c->rvw=n; return acc;
+                    }
+                }
                 if(c->rvw>1){
                     /* vector call result: asfloat(...).x — swizzle */
                     int idxs[4]; int nc=swizzle_idx(e->field,idxs);
@@ -976,7 +1114,18 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     c->rvw=nc;
                     return swizzle_read(c,cv,vty,elt,idxs,nc);
                 }
-                if(!c->rstruct) die(0,"field access on a non-struct value");
+                if(!c->rstruct){
+                    /* scalar call-result swizzle: f().xxx — splat to the swizzle width */
+                    int idxs[4]; int nc=swizzle_idx(e->field,idxs);
+                    if(nc>0){
+                        const char *elt=ck==VK_I32?"i32":"float";
+                        if(nc==1){ *k=ck; c->rvw=0; return cv; }
+                        const char *sp=splat(c,cv,elt,nc);
+                        *k=ck; c->rvw=nc;
+                        return sp;
+                    }
+                    die(0,"field access on a non-struct value");
+                }
                 StructDef *sd=find_struct(c->prog,c->rstruct);
                 int fi=-1; for(size_t i=0;i<sd->nfields;i++) if(!strcmp(sd->fields[i].name,e->field)){ fi=(int)i; break; }
                 if(fi<0) die(0,"no field .%s on %s",e->field,c->rstruct);
@@ -991,6 +1140,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             }
             if(e->operand->kind==E_IDENT){
                 int vi; RKind vr=resolve(c,e->operand->name,&vi);
+                if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG fldrv: %s.%s vr=%d vi=%d lv=%d fn=%s np=%zu\n",e->operand->name,e->field,vr,vi,vr==R_LOCAL?c->locs[vi].vecn:(vr==R_SCALAR?c->fn->params[vi].ty.vecn:0),c->fn->name,c->fn->nparams);
                 if(vr==R_SCALAR && c->fn->params[vi].ty.vecn>1){
                     Param *vp=&c->fn->params[vi];
                     int idxs[4]; int nc=swizzle_idx(e->field,idxs);
@@ -1012,6 +1162,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 }
                 if(vr==R_LOCAL && c->locs[vi].vecn>1){
                     int idxs[4]; int nc=swizzle_idx(e->field,idxs);
+                    if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG fldloc: %s.%s nc=%d lv=%d\n",e->operand->name,e->field,nc,c->locs[vi].vecn);
                     if(nc<0) die(0,"invalid vector component .%s",e->field);
                     for(int i=0;i<nc;i++) if(idxs[i]>=c->locs[vi].vecn) die(0,"invalid vector component .%s",e->field);
                     if(nc>1){
@@ -1027,13 +1178,25 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             /* general multi-component swizzle on any vector lvalue (e.g. verts[vid].xy) */
             {
                 int idxs[4]; int nc=swizzle_idx(e->field,idxs);
+                if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG gensw: field=%s nc=%d opk=%d\n",e->field,nc,e->operand->kind);
                 if(nc>1){
                     LInfo li; char *addr=gen_lval(c,e->operand,&li,0);
-                    if(li.vecn<=1) die(0,"swizzle on a non-vector value");
-                    for(int i=0;i<nc;i++) if(idxs[i]>=li.vecn) die(0,"invalid vector component .%s",e->field);
+                    int fv=li.vecn>1?li.vecn:(li.an>0&&li.an<=4?li.an:0); /* packed cbuffer vectors: [3 x float] field swizzles */
+                    if(fv<=1){
+                        /* scalar base swizzle: float f; f.xxx — splat the scalar */
+                        if(li.vecn==0&&li.matn==0&&!li.an){
+                            ValKind lk; const char *lv=emit_load_t(c,&li,addr,&lk);
+                            const char *elt=li.tk==T_HALF?"float":scalar_ll(li.tk);
+                            const char *sp=splat(c,lv,elt,nc);
+                            *k=scalar_vk(li.tk); c->rvw=nc;
+                            return sp;
+                        }
+                        die(0,"swizzle on a non-vector value");
+                    }
+                    for(int i=0;i<nc;i++) if(idxs[i]>=fv) die(0,"invalid vector component .%s",e->field);
                     ValKind lk; const char *lv=emit_load_t(c,&li,addr,&lk);
                     const char *elt = li.tk==T_HALF?"float":scalar_ll(li.tk);
-                    char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",li.vecn,elt);
+                    char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",fv,elt);
                     *k=scalar_vk(li.tk); c->rvw=nc;
                     return swizzle_read(c,lv,vty,elt,idxs,nc);
                 }
@@ -1063,6 +1226,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             }
         }
         LInfo li; char *addr=gen_lval(c,e,&li,0);
+        if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG fldfin: %s vecn=%d line=%d\n",e->field,li.vecn,e->line);
         if(getenv("BINC_DEBUG_IW")&&e->operand->kind==E_IDENT) fprintf(stderr,"DBG fld: %s.%s li(vecn=%d,tk=%d,as=%d)\n",e->operand->name,e->field,li.vecn,li.tk,li.as);
         if(li.pi>=0) c->read[li.pi]=1;
         if(li.as==AS_CONSTANT&&li.matn>0){ /* D3D cbuffer matrices are row-major */
@@ -1111,6 +1275,11 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             return r;
         }
         ValKind want=scalar_vk(tk);
+        if(tk==T_STRUCT){ /* (Struct)0 — zero-initialized literal struct */
+            if(lk!=VK_I32||vw) die(0,"struct cast requires a scalar integer (0)");
+            *k=VK_I32; c->rvw=0; c->rstruct=t->struct_name;
+            return "zeroinitializer";
+        }
         if(tv){ /* to vector: same-width conversion, or scalar splat */
             if(vw&&vw!=tv) die(0,"vector width mismatch in cast");
             if(!vw){ const char *s=coerce(c,v,lk,want); *k=want; c->rvw=tv; return splat(c,s,scalar_ll(tk),tv); }
@@ -1122,6 +1291,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
     case E_NOT:{ ValKind lk; const char *v=gen_rval(c,e->operand,&lk); if(lk!=VK_I1) die(0,"! on non-bool");
         const char *r=newtmp(c); *k=VK_I1; emit(c,"  %s = xor i1 %s, true\n",r,v); return r; }
     case E_BIN:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw; int lm=c->rmat;
+        if(getenv("BINC_DEBUG_IW")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")) fprintf(stderr,"DBG bin: bop=%d lk=%d lw=%d lh=%d\n",e->bop,lk,lw,e->lhs->kind);
         const char *r=gen_rval(c,e->rhs,&rk); int rw=c->rvw; int rm=c->rmat;
         /* shift counts mask to 5 bits (C/CPU semantics; LLVM shifts by >=width are poison) */
         if((e->bop==B_SHL||e->bop==B_SHR)&&!lm&&!rm&&lk!=VK_F32&&rk!=VK_F32&&!lw&&!rw){
@@ -1313,7 +1483,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         emit(c,"  %s = %s %s %s %s, %s\n",v,isf?"fcmp":"icmp",cmp_name(e->cmp,isf,uns),isf?"float":"i32",l,r); return v; }
     case E_LOG:{ ValKind lk; const char *l=gen_rval(c,e->lhs,&lk);
         if(c->rvw) die(0,"vector operand in logical operator");
-        if(lk!=VK_I1) die(0,"logical operands must be bool");
+        if(lk!=VK_I1){ if(lk==VK_I32||lk==VK_U32){ const char *n=newtmp(c); emit(c,"  %s = icmp ne i32 %s, 0\n",n,l); l=n; } else die(0,"logical operands must be bool"); }
         /* short-circuit && / || via control flow (C semantics) */
         int p0=c->curbb, eval=newlbl(c), done=newlbl(c);
         if(e->log==L_AND) emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",l,eval,done);
@@ -1321,7 +1491,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         lbl(c,eval);
         ValKind rk; const char *r=gen_rval(c,e->rhs,&rk);
         if(c->rvw) die(0,"vector operand in logical operator");
-        if(rk!=VK_I1) die(0,"logical operands must be bool");
+        if(rk!=VK_I1){ if(rk==VK_I32||rk==VK_U32){ const char *n=newtmp(c); emit(c,"  %s = icmp ne i32 %s, 0\n",n,r); r=n; } else die(0,"logical operands must be bool"); }
         emit(c,"  br label %%bb%d\n",done);
         lbl(c,done);
         const char *v=newtmp(c); *k=VK_I1;
@@ -1342,20 +1512,16 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         emit(c,"  store %s %s, %s %s, align %d\n",ll,sv,pty,addr,type_align(li.tk,li.vecn));
         *k=ck; c->rvw=0; return cur; }
     case E_ASSIGN:{
-        /* v.xy += rhs -> v.xy = v.xy + rhs (compound swizzle desugar) */
-        if(e->aop!=A_ASSIGN && e->operand->kind==E_FIELD && e->operand->operand->kind==E_IDENT){
-            int wi; RKind wr=resolve(c,e->operand->operand->name,&wi);
-            if(wr==R_LOCAL && c->locs[wi].vecn>1){
-                int idxs[4]; int nc=swizzle_idx(e->operand->field,idxs);
-                if(nc>1){
-                    BinOp bop = e->aop==A_ADDEQ?B_ADD:e->aop==A_SUBEQ?B_SUB:e->aop==A_MULEQ?B_MUL:e->aop==A_DIVEQ?B_DIV:B_ADD;
-                    Expr *id=E(E_IDENT,e->operand->operand->line,e->operand->operand->col);
-                    id->name=strdup(e->operand->operand->name);
-                    Expr *fd=E(E_FIELD,e->operand->line,e->operand->col);
-                    fd->operand=id; fd->field=strdup(e->operand->field);
-                    Expr *sum=E(E_BIN,e->line,e->col); sum->bop=bop; sum->lhs=fd; sum->rhs=e->rhs;
-                    e->aop=A_ASSIGN; e->rhs=sum;
-                }
+        /* v.xy += rhs -> v.xy = v.xy + rhs (compound swizzle desugar; the base
+         * may itself be a lowered field like `__in.v`, so copy the operand tree) */
+        if(e->aop!=A_ASSIGN && e->operand->kind==E_FIELD){
+            int idxs[4]; int nc=swizzle_idx(e->operand->field,idxs);
+            if(nc>1){
+                BinOp bop = e->aop==A_ADDEQ?B_ADD:e->aop==A_SUBEQ?B_SUB:e->aop==A_MULEQ?B_MUL:e->aop==A_DIVEQ?B_DIV:B_ADD;
+                Expr *fd=E(E_FIELD,e->operand->line,e->operand->col);
+                fd->operand=rw_copy(e->operand->operand); fd->field=strdup(e->operand->field);
+                Expr *sum=E(E_BIN,e->line,e->col); sum->bop=bop; sum->lhs=fd; sum->rhs=e->rhs;
+                e->aop=A_ASSIGN; e->rhs=sum;
             }
         }
         /* swizzle assignment: v.xy = rhs — write each named component */
@@ -1394,16 +1560,20 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         LInfo li; char *addr=gen_lval(c,e->operand,&li,1);
         if(rm){
             if(e->aop!=A_ASSIGN) die(0,"compound assignment on a matrix");
+            if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG matassign: lhs=%s li.matn=%d rm=%d rstruct=%s\n",e->operand->kind==E_FIELD?e->operand->field:"?",li.matn,rm,c->rstruct?c->rstruct:"(null)");
             if(li.matn!=rm) die(0,"matrix width mismatch in assignment");
             char mty[32]; mll_of(mty,sizeof mty,rm,0);
-            emit(c,"  store %s %s, %s %s, align %d\n",mty,rhs,mty,addr,mat_align(rm));
+            emit(c,"  store %s %s, %s* %s, align %d\n",mty,rhs,mty,addr,mat_align(rm));
             *k=VK_F32; c->rvw=0; c->rmat=rm; return rhs;
         }
         if(li.tk==T_STRUCT){
             if(e->aop!=A_ASSIGN) die(0,"compound assignment on a struct");
+            if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG structassign: lhs=%s rstruct=%s want=%s\n",e->operand->kind==E_FIELD?e->operand->field:"?",c->rstruct?c->rstruct:"(null)",li.sname?li.sname:"(null)");
             if(!c->rstruct||strcmp(c->rstruct,li.sname)) die(0,"struct type mismatch in assignment");
-            char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",li.sname);
-            char sp[64]; snprintf(sp,sizeof sp,"%%struct.%s*",li.sname);
+            char sn[96]; snprintf(sn,sizeof sn,"%%struct.%s",li.sname);
+            char sp[96];
+            if(li.as) snprintf(sp,sizeof sp,"%%struct.%s addrspace(%d)*",li.sname,li.as);
+            else snprintf(sp,sizeof sp,"%%struct.%s*",li.sname);
             int sal; StructDef *sd=find_struct(c->prog,li.sname);
             if(!sd) die(0,"unknown struct %s",li.sname);
             struct_layout(sd,&sal);
@@ -1440,7 +1610,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         }
         const char *sv, *ev;
         warn_implicit(c,e->rhs,rk,li.tk,vw);
-        if(vw){ sv=to_storage(c,rhs,rk,rw,li.tk,vw); ev=sv; }
+        if(vw){ if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG stor-A: vw=%d rw=%d tk=%d line=%d\n",vw,rw,li.tk,e->line); sv=to_storage(c,rhs,rk,rw,li.tk,vw); ev=sv; }
         else { if(rw) die(0,"cannot store a vector into a scalar"); sv=store_val(c,rhs,rk,li.tk,&ev); }
         char pty[96]; pty_str(pty,sizeof pty,li.tk,li.sname,li.as,li.is_local,vw,li.matn);
         char ll[32]; ll_of(ll,sizeof ll,li.tk,vw);
@@ -1455,9 +1625,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         int vw=aw?aw:bw;
         if(aw&&bw&&aw!=bw) die(0,"vector width mismatch in ternary");
         int isf=(ak==VK_F32||bk==VK_F32);
-        ValKind ok=isf?VK_F32:((ak==VK_U32||bk==VK_U32)?VK_U32:VK_I32);
+        ValKind ok=isf?VK_F32:((ak==VK_I1&&bk==VK_I1)?VK_I1:((ak==VK_U32||bk==VK_U32)?VK_U32:VK_I32));
         av=coerce(c,av,ak,ok); bv=coerce(c,bv,bk,ok);
-        const char *elt=ok==VK_F32?"float":"i32";
+        const char *elt=ok==VK_F32?"float":(ok==VK_I1?"i1":"i32");
         const char *r=newtmp(c); *k=ok; c->rvw=vw;
         if(vw){ if(!aw) av=splat(c,av,elt,vw); if(!bw) bv=splat(c,bv,elt,vw);
             const char *mask=splat(c,cv,"i1",vw);
@@ -1467,10 +1637,12 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         else emit(c,"  %s = select i1 %s, %s %s, %s %s\n",r,cv,elt,av,elt,bv);
         return r; }
     case E_CALL:{
+        if(getenv("BINC_DEBUG_IW")&&!strcmp(e->name,"CondMask")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")) fprintf(stderr,"DBG cm-call: nargs=%zu line=%d\n",e->nargs,e->line);
         if(e->callee && e->callee->kind==E_FIELD){
             /* texture methods: tex.read(c), tex.write(v, c), tex.sample(smp, uv) */
             if(e->callee->operand->kind==E_IDENT){
                 int ti; RKind tr=resolve(c,e->callee->operand->name,&ti);
+                if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG meth: %s.%s tr=%d fn=%s\n",e->callee->operand->name,e->name,tr,c->fn->name);
                 if(tr==R_TEXTURE){
                     Param *tp=&c->fn->params[ti];
                     const char *elt,*vec,*suf,*an; tex_kinds(tp->ty.tex_elt,&elt,&vec,&suf,&an);
@@ -1697,7 +1869,13 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             const char *elt=cb==T_HALF?"float":scalar_ll(cb); const char *acc="undef";
             if((int)e->nargs==1){
                 ValKind ak; const char *v=gen_rval(c,e->args[0],&ak);
-                if(c->rvw) die(0,"vector argument in %s constructor",e->name);
+                if(c->rvw){
+                    if(c->rvw!=cn) die(0,"vector width mismatch in %s constructor",e->name);
+                    /* same-width vector constructor: element conversion (float3(i32v)) */
+                    if(ak!=scalar_vk(cb)) v=vconv(c,v,cn,ak,scalar_vk(cb));
+                    *k=scalar_vk(cb); c->rvw=cn;
+                    return v;
+                }
                 v=coerce(c,v,ak,scalar_vk(cb));
                 for(int i=0;i<cn;i++){ const char *r=newtmp(c);
                     emit(c,"  %s = insertelement <%d x %s> %s, %s %s, i32 %d\n",r,cn,elt,acc,elt,v,i); acc=r; }
@@ -1757,30 +1935,40 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         Function *f=NULL; int best=1<<30;
         for(size_t i=0;i<c->prog->nfuncs;i++){
             Function *cf=&c->prog->funcs[i];
-            if(getenv("BINC_DEBUG_IW")&&!strcmp(cf->name,e->name)) fprintf(stderr,"DBG srch: %s nargs=%zu nparams=%zu\n",e->name,e->nargs,cf->nparams);
+            if(getenv("BINC_DEBUG_IW")&&!strcmp(cf->name,e->name)){ fprintf(stderr,"DBG srch: %s line=%d nargs=%zu nparams=%zu kind=%d\n",e->name,e->line,e->nargs,cf->nparams,e->kind); if(e->nargs<=16){ for(size_t ai=0;ai<e->nargs;ai++) fprintf(stderr,"DBG   arg%zu: kind=%d%s%s\n",ai,e->args[ai]?e->args[ai]->kind:-1,e->args[ai]&&e->args[ai]->name?" name=":"",e->args[ai]&&e->args[ai]->name?e->args[ai]->name:""); } }
             if(strcmp(cf->name,e->name)) continue;
-            if(e->nargs!=cf->nparams) continue;
+            if(e->nargs>cf->nparams) continue;
             int rk=0, bad=0;
+            if(e->nargs<cf->nparams){ int no_def=0;
+                for(size_t q=e->nargs;q<cf->nparams;q++) if(!cf->params[q].def){ no_def=1; break; }
+                if(no_def) continue;
+                rk+=3; /* uses defaulted args */ }
             for(size_t ai=0;ai<e->nargs;ai++){
                 Type at={0}; expr_type_of(c,e->args[ai],&at);
                 Type pt=cf->params[ai].ty;
-                if(getenv("BINC_DEBUG_IW")&&!strcmp(cf->name,e->name)) fprintf(stderr,"DBG arg %zu: at(k=%d,ptr=%d,as=%d) pt(k=%d,ptr=%d,as=%d)\n",ai,at.kind,at.is_ptr,at.as,pt.kind,pt.is_ptr,pt.as);
+                if(getenv("BINC_DEBUG_IW")&&!strcmp(cf->name,e->name)) fprintf(stderr,"DBG arg %zu: at(k=%d,ptr=%d,as=%d,v=%d) pt(k=%d,ptr=%d,as=%d,v=%d)\n",ai,at.kind,at.is_ptr,at.as,at.vecn,pt.kind,pt.is_ptr,pt.as,pt.vecn);
                 if(pt.kind==T_TVAR) continue; /* template parameter matches anything */
+                if(!strcmp(cf->params[ai].name,"__uniforms")) continue; /* __uniforms plumbing arg matches anything */
                 if(pt.is_ptr){ if(!at.is_ptr||at.as!=pt.as){ bad=1; break; } continue; }
                 if(at.kind!=pt.kind){
                     if(at.kind==T_INT32&&(pt.kind==T_FLOAT||pt.kind==T_HALF)&&!at.vecn&&!pt.vecn){ rk+=1; continue; } /* promotion */
+                    if(at.kind==T_INT32&&pt.kind==T_FLOAT&&!at.vecn&&pt.vecn>0){ rk+=3; continue; } /* int scalar splat */
                     if(at.kind==T_FLOAT&&pt.kind==T_HALF&&!at.vecn&&!pt.vecn){ rk+=1; continue; } /* half demotion */
                     if((at.kind==T_UINT32&&pt.kind==T_INT32)||(at.kind==T_INT32&&pt.kind==T_UINT32)){ rk+=1; continue; } /* int/uint */
+                    if((at.kind==T_UINT32||at.kind==T_INT32)&&pt.kind==T_BOOL&&!at.vecn&&!pt.vecn){ rk+=1; continue; } /* int/uint -> bool (CondMask(Flags & 0x100, ...)) */
                     bad=1; break;
                 }
+                if(at.kind==T_STRUCT&&at.struct_name&&pt.struct_name&&strcmp(at.struct_name,pt.struct_name)){ bad=1; break; } /* overloads on the struct tag (GetPrimitiveData(FMaterialVertexParameters) vs (FMaterialPixelParameters)) */
                 if(at.vecn!=pt.vecn){
                     if(at.vecn==0&&pt.vecn>0){ rk+=2; continue; } /* scalar splat */
+                    if(at.vecn>pt.vecn&&pt.vecn>0){ rk+=2; continue; } /* implicit vector truncation (float4 arg -> float3 param, legal HLSL; to_storage truncates at the call site) */
                     bad=1; break;
                 }
             }
             if(!bad&&rk<best){ best=rk; f=cf; }
         }
         if(f){
+            if(getenv("BINC_DEBUG_IW")&&!strcmp(e->name,"CondMask")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")) fprintf(stderr,"DBG cm-found: f=%s np=%zu\n",f->name,f->nparams);
             if(f->is_template){
                 /* instantiate for the concrete type of the first T-typed argument */
                 size_t bp=(size_t)-1;
@@ -1801,18 +1989,23 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             }
             if(f->is_kernel) die(0,"cannot call kernel function %s",e->name);
             if(f==c->fn) die(0,"recursion is not supported on the GPU (%s calls itself)",e->name);
-            if(e->nargs!=f->nparams) die(0,"%s expects %d argument(s), got %d",e->name,(int)f->nparams,(int)e->nargs);
-            char args[2048]; size_t o=0;
+            if(e->nargs>f->nparams) die(0,"%s expects at most %d argument(s), got %d",e->name,(int)f->nparams,(int)e->nargs);
+            char args[2048]={0}; size_t o=0;
+            if(getenv("BINC_DEBUG_IW")&&!strcmp(e->name,"CondMask")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")){ fprintf(stderr,"DBG cm-loop: nparams=%zu",f->nparams); for(size_t qi=0;qi<f->nparams;qi++) fprintf(stderr," [%s k%d v%d p%d]",f->params[qi].name,f->params[qi].ty.kind,f->params[qi].ty.vecn,f->params[qi].ty.is_ptr); fprintf(stderr,"\n"); }
             for(size_t i=0;i<f->nparams;i++){ Param *p=&f->params[i];
+                Expr *arge = (i<e->nargs)?e->args[i]:p->def; /* defaulted arg */
+                if(!arge) die(0,"%s: missing argument %d (no default)",e->name,(int)i+1);
                 if(i)o+=snprintf(args+o,sizeof args-o,", ");
                 if(p->ty.kind==T_STRUCT && !p->ty.is_ptr){
                     /* struct by-value argument */
-                    ValKind ak; const char *v=gen_rval(c,e->args[i],&ak);
+                    ValKind ak; const char *v=gen_rval(c,arge,&ak);
+                    if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG structarg: %s arg%zu rstruct=%s want=%s rk=%d\n",e->name,i,c->rstruct?c->rstruct:"(null)",p->ty.struct_name?p->ty.struct_name:"(null)",arge->kind);
                     if(!c->rstruct||strcmp(c->rstruct,p->ty.struct_name))
                         die(0,"%s: struct type mismatch on argument %d",e->name,(int)i+1);
                     char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",p->ty.struct_name);
                     o+=snprintf(args+o,sizeof args-o,"%s %s",sn,v);
-                } else if(p->ty.is_ptr){ Expr *a=e->args[i]; int pi;
+                } else if(p->ty.is_ptr){ Expr *a=arge; int pi;
+                    if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG ptrarg: %s arg%zu name=%s fn=%s rk=%d\n",e->name,i,a->name?a->name:"(null)",c->fn->name,a->kind==E_IDENT?resolve(c,a->name,&pi):-99);
                     if(a->kind!=E_IDENT||resolve(c,a->name,&pi)!=R_PTR)
                         die(0,"%s: pointer argument %d must be one of the caller's buffer parameters",e->name,(int)i+1);
                     Param *cp=&c->fn->params[pi];
@@ -1824,15 +2017,24 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     if(p->ty.kind==T_STRUCT||p->ty.kind==T_ATOMIC) type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
                     else ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn);
                     o+=snprintf(args+o,sizeof args-o,"%s addrspace(%d)* %%_%s",elt,p->ty.as,cp->name);
-                } else { ValKind ak; const char *v=gen_rval(c,e->args[i],&ak);
-                    warn_implicit(c,e->args[i],ak,p->ty.kind,p->ty.vecn);
+                } else if(p->ty.matn){ /* matrix by-value argument */
+                    ValKind ak; const char *v=gen_rval(c,arge,&ak);
+                    if(!c->rmat) die(0,"%s: matrix argument %d is not a matrix",e->name,(int)i+1);
+                    char mll[32]; mll_of(mll,sizeof mll,p->ty.matn,p->ty.matm);
+                    o+=snprintf(args+o,sizeof args-o,"%s %s",mll,v);
+                } else { ValKind ak; const char *v=gen_rval(c,arge,&ak);
+                    if(getenv("BINC_DEBUG_IW")&&!strcmp(e->name,"CondMask")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")){ fprintf(stderr,"DBG cm-arg%zu: kind=%d name=%s opk=%d\n",i,arge->kind,arge->name?arge->name:"",arge->operand?arge->operand->kind:-1);
+                        if(arge->kind==E_FIELD&&arge->operand&&arge->operand->kind==E_IDENT) fprintf(stderr,"DBG cm-arg%zu-fld: base=%s field=%s\n",i,arge->operand->name,arge->field); }
+                    warn_implicit(c,arge,ak,p->ty.kind,p->ty.vecn);
+                    if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG callarg: %s arg%zu rvw=%d pt(k=%d,v=%d) line=%d\n",e->name,i,c->rvw,p->ty.kind,p->ty.vecn,e->line);
                     const char *sv=to_storage(c,v,ak,c->rvw,p->ty.kind,p->ty.vecn);
                     char ll[32]; ll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn);
                     o+=snprintf(args+o,sizeof args-o,"%s %s",ll,sv); }
             }
-            if(f->ret.kind==T_VOID){ emit(c,"  call void @%s(%s)\n",f->link_name?f->link_name:f->name,args); *k=VK_I32; c->rvw=0; return "0"; }
+            if(f->ret.kind==T_VOID){ emit(c,"  call void @%s(%s)\n",f->link_name?f->link_name:f->name,args); *k=VK_I32; c->rvw=0; c->rmat=0; return "0"; }
             const char *r=newtmp(c);
             if(f->ret.matn){ /* matrix by-value return */
+                if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG callret: %s matn=%d kind=%d sname=%s\n",e->name,f->ret.matn,f->ret.kind,f->ret.struct_name?f->ret.struct_name:"(null)");
                 char mll[32]; mll_of(mll,sizeof mll,f->ret.matn,f->ret.matm);
                 emit(c,"  %s = call %s @%s(%s)\n",r,mll,f->link_name?f->link_name:f->name,args);
                 *k=VK_F32; c->rvw=0; c->rmat=f->ret.matn; return r;
@@ -1840,12 +2042,47 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             if(f->ret.kind==T_STRUCT){
                 char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",f->ret.struct_name);
                 emit(c,"  %s = call %s @%s(%s)\n",r,sn,f->link_name?f->link_name:f->name,args);
-                *k=VK_I32; c->rvw=0; c->rstruct=f->ret.struct_name; return r;
+                *k=VK_I32; c->rvw=0; c->rstruct=f->ret.struct_name; c->rmat=0; return r;
             }
             char rll[32]; ll_of(rll,sizeof rll,f->ret.kind,f->ret.vecn);
             emit(c,"  %s = call %s @%s(%s)\n",r,rll,f->link_name?f->link_name:f->name,args);
             if(f->ret.kind==T_HALF) r=h2f(c,r,f->ret.vecn);
-            *k=scalar_vk(f->ret.kind); c->rvw=f->ret.vecn>1?f->ret.vecn:0; return r;
+            *k=scalar_vk(f->ret.kind); c->rvw=f->ret.vecn>1?f->ret.vecn:0; c->rmat=0; return r;
+        }
+        /* clip(x): discard the fragment if any component < 0 (HLSL clip
+         * semantics) — lowers to air.discard_fragment behind a branch */
+        if(!strcmp(e->name,"clip")){
+            if(e->nargs!=1) die(0,"clip expects 1 argument");
+            ValKind ak; const char *av=gen_rval(c,e->args[0],&ak); int aw=c->rvw;
+            if(ak!=VK_F32) die(0,"clip argument must be a float");
+            const char *cond;
+            if(aw>1){
+                char ty[32]; ll_of(ty,sizeof ty,T_FLOAT,aw);
+                const char *cmp=newtmp(c);
+                emit(c,"  %s = fcmp olt %s %s, zeroinitializer\n",cmp,ty,av);
+                cond=newtmp(c);
+                emit(c,"  %s = extractelement <%d x i1> %s, i32 0\n",cond,aw,cmp);
+                for(int i=1;i<aw;i++){
+                    const char *el=newtmp(c);
+                    emit(c,"  %s = extractelement <%d x i1> %s, i32 %d\n",el,aw,cmp,i);
+                    const char *o=newtmp(c);
+                    emit(c,"  %s = or i1 %s, %s\n",o,cond,el);
+                    cond=o;
+                }
+            } else {
+                const char *z=fconst(c,0.0);
+                cond=newtmp(c);
+                emit(c,"  %s = fcmp olt float %s, %s\n",cond,av,z);
+            }
+            int disc=newlbl(c), cont=newlbl(c);
+            emit(c,"  br i1 %s, label %%bb%d, label %%bb%d\n",cond,disc,cont);
+            lbl(c,disc);
+            emit(c,"  call void @air.discard_fragment()\n");
+            g_uses_discard=1;
+            emit(c,"  br label %%bb%d\n",cont);
+            lbl(c,cont);
+            *k=VK_I32; c->rvw=0; c->rmat=0; c->rstruct=NULL;
+            return "0";
         }
         for(size_t b=0;b<sizeof builtins/sizeof *builtins;b++){ Builtin *bi=&builtins[b];
             if(strcmp(bi->name,e->name)) continue;
@@ -1863,6 +2100,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 /* per-element application of the scalar intrinsic */
                 const char *ret_elt=scalar_ll(bi->ret);
                 char rty[32]; snprintf(rty,sizeof rty,"<%d x %s>",vw,ret_elt);
+                for(int i=0;i<bi->nargs;i++) if(!wids[i]){ /* scalar arg splats to the vector width (mad(float3, float, float3)) */
+                    const char *ael=aks[i]==VK_F32?"float":"i32";
+                    vls[i]=splat(c,vls[i],ael,vw); }
                 const char *acc="undef";
                 for(int kk=0;kk<vw;kk++){
                     char da[128]; size_t o2=0;
@@ -1883,7 +2123,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 }
                 *k=scalar_vk(bi->ret); c->rvw=vw; return acc;
             }
-            char args[256]; size_t o=0;
+            char args[256]={0}; size_t o=0;
             for(int i=0;i<bi->nargs;i++){
                 TypeKind at=i==0?bi->a0:bi->a1; const char *ev; const char *sv=store_val(c,vls[i],aks[i],at,&ev);
                 o+=snprintf(args+o,sizeof args-o,"%s%s %s",i?", ":"",scalar_ll(at),sv); }
@@ -1914,6 +2154,19 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             li->an=cd->ty.array_n; li->am=cd->ty.array_m;
             char gn[160]; snprintf(gn,sizeof gn,"@_binc_mut_%s",cd->name);
             return strdup(gn); }
+        if(r==R_SCALAR){ /* plain scalar/vector parameter as an lvalue (e.g. the
+            base of a scalar swizzle like `bool a` with a.x, or a by-value
+            param being written like `uv += ...`): the by-value param needs an
+            alloca to take its address; writes mutate the local copy */
+            Param *pr=&c->fn->params[idx];
+            fill_param_li(c,idx,li); li->an=pr->ty.array_n; li->am=pr->ty.array_m;
+            char pty[96];
+            if(li->matn) mll_of(pty,sizeof pty,li->matn,0);
+            else type_ll(pty,sizeof pty,li->tk,li->sname,li->vecn);
+            char *as=newtmp(c);
+            emit(c,"  %s = alloca %s\n",as,pty);
+            emit(c,"  store %s %%_%s, %s* %s\n",pty,e->name,pty,as);
+            return as; }
         die(0, mark ? "%s is not a mutable local" : "undefined name %s", e->name);
     }
     if(e->kind==E_DEREF){ const char *ix; int pi=eval_ptr(c,e->operand,&ix);
@@ -2043,6 +2296,22 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             li->an=0;
             return cp;
         }
+        if(li->matn>0&&e->field[0]=='_'&&(e->field[1]=='m'||(e->field[1]>='1'&&e->field[1]<='4'))){
+            /* matrix element lvalue: M._m10 (0-based) or M._44 (1-based shorthand) */
+            int r=-1, cc=-1;
+            if(e->field[1]=='m'&&e->field[2]>='0'&&e->field[2]<='4'&&e->field[3]>='0'&&e->field[3]<='4'){ r=e->field[2]-'0'; cc=e->field[3]-'0'; }
+            else if(e->field[1]>='1'&&e->field[1]<='4'&&e->field[2]>='1'&&e->field[2]<='4'){ r=e->field[1]-'1'; cc=e->field[2]-'1'; }
+            if(r<0||r>=li->matn||cc<0||cc>=li->matn) die(0,"no element .%s on mat%d",e->field,li->matn);
+            char mty[32]; mll_of(mty,sizeof mty,li->matn,0);
+            char mpty[64]; if(li->as) snprintf(mpty,sizeof mpty,"%s addrspace(%d)*",mty,li->as); else snprintf(mpty,sizeof mpty,"%s*",mty);
+            char *cp=newtmp(c);
+            emit(c,"  %s = getelementptr inbounds %s, %s %s, i64 0, i64 %d\n",cp,mty,mpty,addr,cc);
+            char *ep=newtmp(c);
+            if(li->as) emit(c,"  %s = getelementptr inbounds <%d x float>, <%d x float> addrspace(%d)* %s, i64 0, i64 %d\n",ep,li->matn,li->matn,li->as,cp,r);
+            else emit(c,"  %s = getelementptr inbounds <%d x float>, <%d x float>* %s, i64 0, i64 %d\n",ep,li->matn,li->matn,cp,r);
+            li->tk=T_FLOAT; li->sname=NULL; li->vecn=0; li->matn=0;
+            return ep;
+        }
         if(li->tk==T_STRUCT){
             StructDef *s=find_struct(c->prog,li->sname); if(!s) die(0,"unknown struct %s",li->sname);
             int fi=-1; for(size_t i=0;i<s->nfields;i++) if(!strcmp(s->fields[i].name,e->field)) fi=(int)i;
@@ -2053,16 +2322,20 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             li->tk=s->fields[fi].ty.kind; li->sname=s->fields[fi].ty.struct_name; li->vecn=s->fields[fi].ty.vecn; li->matn=s->fields[fi].ty.matn;
             li->an=s->fields[fi].ty.array_n; li->am=s->fields[fi].ty.array_m;
             return fp; }
-        if(li->vecn>1){ /* vector component: bitcast the vector address to element pointer + gep */
+        if(li->vecn>1||(li->an>0&&li->an<=4&&!li->am)){ /* vector component (incl. packed [3 x float] fields): bitcast the vector address to element pointer + gep */
+            int fv=li->vecn>1?li->vecn:li->an;
             int ci=comp_idx(e->field);
-            if(ci<0||ci>=li->vecn) die(0,"no component .%s on <%d x %s>",e->field,li->vecn,scalar_ll(li->tk));
+            if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG gllval: field=%s ci=%d vecn=%d line=%d\n",e->field,ci,fv,e->line);
+            if(ci<0||ci>=fv) die(0,"no component .%s on <%d x %s>",e->field,fv,scalar_ll(li->tk));
             char vpty[96],epty[96];
-            pty_str(vpty,sizeof vpty,li->tk,NULL,li->as,li->is_local,li->vecn,li->matn);
+            pty_str(vpty,sizeof vpty,li->tk,NULL,li->as,li->is_local,fv,li->matn);
             pty_str(epty,sizeof epty,li->tk,NULL,li->as,li->is_local,0,0);
             char *bc=newtmp(c); emit(c,"  %s = bitcast %s %s to %s\n",bc,vpty,addr,epty);
             char *cp=newtmp(c);
             emit(c,"  %s = getelementptr inbounds %s, %s %s, i64 %d\n",cp,scalar_ll(li->tk),epty,bc,ci);
             li->vecn=0; return cp; }
+        if(li->vecn==0&&li->matn==0&&comp_idx(e->field)==0){ /* scalar swizzle: `a.x` on a scalar is a no-op */
+            return addr; }
         die(0,"field access on non-struct");
     }
     die(0,"not an lvalue");
@@ -2102,6 +2375,8 @@ static void gen_stmt(CG *c, Stmt *s){
     switch(s->kind){
     case S_EXPR:{ ValKind k; if(s->expr) gen_rval(c,s->expr,&k); break; }
     case S_DECL:{ Type bty=bind_ty(c->fn,s->ty); TypeKind kk=bty.kind;
+        if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG decl: fn=%s name=%s kind=%d initk=%d\n",c->fn->name,s->name,kk,s->init?s->init->kind:-1);
+        if(getenv("BINC_DEBUG_IW")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")) fprintf(stderr,"DBG decl: %s kind=%d initk=%d\n",s->name,kk,s->init?s->init->kind:-1);
         if(kk==T_STRUCT){ StructDef *sd=find_struct(c->prog,bty.struct_name);
             if(!sd) die(0,"unknown struct %s",bty.struct_name);
             if(bty.array_n) die(0,"arrays of structs are not supported as locals");
@@ -2139,6 +2414,7 @@ static void gen_stmt(CG *c, Stmt *s){
         c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
         c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,bty.vecn,0,s->is_const,0,0};
         if(s->init){ ValKind k; const char *v=gen_rval(c,s->init,&k);
+            if(getenv("BINC_DEBUG_IW")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")) fprintf(stderr,"DBG decl-init: kind=%d name=%s nargs=%zu rvw=%d rstruct=%s\n",s->init->kind,s->init->name?s->init->name:"",s->init->nargs,c->rvw,c->rstruct?c->rstruct:"(null)");
             warn_implicit(c,s->init,k,kk,bty.vecn);
             const char *sv=to_storage(c,v,k,c->rvw,kk,bty.vecn);
             emit(c,"  store %s %s, %s* %s, align %d\n",ll,sv,ll,slot,type_align(kk,bty.vecn)); }
@@ -2180,6 +2456,7 @@ static void gen_stmt(CG *c, Stmt *s){
                 emit(c,"  ret %s %s\n",mll,v);
             } else {
                 ValKind k; const char *v=gen_rval(c,s->expr,&k);
+                if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG stor-R: rk=%d rvw=%d retvecn=%d line=%d\n",k,c->rvw,c->fn->ret.vecn,s->expr->line);
                 const char *sv=to_storage(c,v,k,c->rvw,rk,c->fn->ret.vecn);
                 char ll[32]; ll_of(ll,sizeof ll,rk,c->fn->ret.vecn);
                 emit(c,"  ret %s %s\n",ll,sv);
@@ -2313,8 +2590,17 @@ static void fn_ptr_str(Function *fn,char *buf,size_t n){
 /* AIR contract of the installed toolchain; set by binc_set_air() (main.c detection) */
 char g_air_triple[64]="air64_v29-apple-macosx27.0.0";
 int g_air_sdk=27, g_air_minor=9;
+int g_uses_discard=0;
 void binc_set_air(const char *triple, int sdk, int minor){
     snprintf(g_air_triple,sizeof g_air_triple,"%s",triple); g_air_sdk=sdk; g_air_minor=minor; }
+/* a struct type with no fields (UE stubs like FStereoVSToPS): contributes no
+ * stage-in args / metadata nodes / copies */
+static int struct_empty(const Program *prog, const char *tag){
+    if(!tag) return 0;
+    for(size_t i=0;i<prog->nstructs;i++)
+        if(!strcmp(prog->structs[i].tag,tag)) return prog->structs[i].nfields==0;
+    return 0;
+}
 static void stage_lit_type(char *buf, size_t n, StructDef *sd);
 static void stage_ptr_str(Function *fn,char *buf,size_t n){
     size_t o=0;
@@ -2326,7 +2612,8 @@ static void stage_ptr_str(Function *fn,char *buf,size_t n){
         if(p->ty.kind==T_STRUCT && !p->ty.is_ptr && fn->stage!=ST_NONE){
             /* stage-in struct (vertex or fragment): unpacked as separate args */
             StructDef *sd=find_struct(g_curprog,p->ty.struct_name);
-            for(size_t f=0;f<sd->nfields;f++){ char fl[64]; type_ll(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.struct_name,sd->fields[f].ty.vecn);
+            for(size_t f=0;f<sd->nfields;f++){ if(struct_empty(g_curprog,sd->fields[f].ty.struct_name)) continue;
+                char fl[64]; type_ll(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.struct_name,sd->fields[f].ty.vecn);
                 if(emitted++)o+=snprintf(buf+o,n-o,", "); o+=snprintf(buf+o,n-o,"%s",fl); }
             continue;
         }
@@ -2388,6 +2675,7 @@ static void emit_kernel_meta(Meta *m, const Program *prog, Function *fn, KernelM
             meta_emit(m,"!%d = !{i32 %d, !\"air.sampler\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,argidx,p->name); argidx++; continue; }
         if(p->ty.is_ptr){ int r=read[a],w=written[a]; const char *acc=(r&&w)?"air.read_write":w?"air.write":"air.read";
             int sz=tsz(p->ty.kind,p->ty.vecn,p->ty.matn),al=tal(p->ty.kind,p->ty.vecn,p->ty.matn); char tnb[64];
+            if(getenv("BINC_DEBUG_IW")&&!strcmp(p->name,"__uniforms")) fprintf(stderr,"DBG meta-u: kind=%d sname=%s is_ptr=%d as=%d vecn=%d\n",p->ty.kind,p->ty.struct_name?p->ty.struct_name:"(null)",p->ty.is_ptr,p->ty.as,p->ty.vecn);
             ptn_of(tnb,sizeof tnb,p->ty.kind,p->ty.vecn,p->ty.matn); const char *tn=tnb;
             if(p->ty.kind==T_ATOMIC){ snprintf(tnb,sizeof tnb,"metal::_atomic"); tn=tnb; }
             if(p->ty.kind==T_STRUCT){ StructDef *s=find_struct(prog,p->ty.struct_name);
@@ -2435,15 +2723,14 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
         if(fn->stage==ST_VERTEX) meta_emit(m,"!%d = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n",sm->leaf);
         else meta_emit(m,"!%d = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\"}\n",sm->leaf);
     }
-    meta_emit(m,"!%d = !{",sm->args); for(int a=0;a<sm->nin;a++){ if(a)meta_emit(m,", "); meta_emit(m,"!%d",sm->argnode[a]); } meta_emit(m,"}\n");
     meta_emit(m,"!%d = !{%s, !%d, !%d}\n",sm->node,fp,sm->outs,sm->args);
-    int argi=0;
+    int argi=0; int locn=0; /* cumulative across stage-in structs: each unpacked field gets a unique user(locnN) */
     for(size_t a=0;a<fn->nparams;a++){ Param *p=&fn->params[a]; char tn[64]; ptn_of(tn,sizeof tn,p->ty.kind,p->ty.vecn,p->ty.matn);
+        if(p->ty.kind==T_STRUCT&&p->ty.struct_name) snprintf(tn,sizeof tn,"%s",p->ty.struct_name); /* buffer structs: the AIR frontend needs the struct tag (kernel emitter parity) */
         if(fn->stage!=ST_NONE && p->ty.kind==T_STRUCT && !p->ty.is_ptr){
             /* stage-in struct: one metadata node per unpacked field */
             StructDef *sd=find_struct(prog,p->ty.struct_name);
-            int locn=0;
-            for(size_t f=0;f<sd->nfields;f++){
+            for(size_t f=0;f<sd->nfields;f++){ if(struct_empty(prog,sd->fields[f].ty.struct_name)) continue;
                 Field *fd=&sd->fields[f]; char ftn[64]; ptn_of(ftn,sizeof ftn,fd->ty.kind,fd->ty.vecn,0);
                 if(fn->stage==ST_VERTEX){
                     int ln=fd->attr==5?fd->attr_idx:locn; locn++;
@@ -2452,6 +2739,9 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
                     meta_emit(m,"!%d = !{i32 %d, !\"air.vertex_input\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,ln,ftn,fd->name);
                 } else if(fd->attr==1){
                     meta_emit(m,"!%d = !{i32 %d, !\"air.position\", !\"air.center\", !\"air.no_perspective\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,ftn,fd->name);
+                } else if(fd->sem && strncasecmp(fd->sem,"SV_IsFrontFace",14)==0){
+                    /* SV_IsFrontFace -> the front_facing attribute (no user(locnN)) */
+                    meta_emit(m,"!%d = !{i32 %d, !\"air.front_facing\", !\"air.arg_type_name\", !\"bool\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,fd->name);
                 } else { int ln=fd->attr==5?fd->attr_idx:locn; locn++;
                     meta_emit(m,"!%d = !{i32 %d, !\"air.fragment_input\", !\"user(locn%d)\", !\"air.center\", !\"%s\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,ln,fd->attr==2?"air.flat":"air.perspective",ftn,fd->name); }
                 argi++;
@@ -2468,6 +2758,9 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
         else meta_emit(m,"!%d = !{i32 %d, !\"air.buffer\", !\"air.buffer_size\", i32 %d, !\"air.location_index\", i32 %d, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 %d, !\"air.arg_type_align_size\", i32 %d, !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,elem_size(prog,&p->ty),argi,elem_size(prog,&p->ty),elem_align(prog,&p->ty),tn,p->name);
         argi++;
     }
+    /* the arg list must follow the nodes: empty-struct fields are skipped, so
+     * only the actually-emitted nodes (first argi) get listed */
+    meta_emit(m,"!%d = !{",sm->args); for(int a=0;a<argi;a++){ if(a)meta_emit(m,", "); meta_emit(m,"!%d",sm->argnode[a]); } meta_emit(m,"}\n");
 }
 
 void emit_air(FILE *out, Program *prog){
@@ -2570,8 +2863,8 @@ void emit_air(FILE *out, Program *prog){
             StructDef *s=&prog->structs[order[k]];
             if(s->is_template||!sused[order[k]]) continue;
             fprintf(out,"%%struct.%s = type { ",s->tag);
-            for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[64];
-                char elt[32];
+            for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[192];
+                char elt[128];
                 if(s->fields[j].ty.kind==T_STRUCT&&s->fields[j].ty.struct_name) snprintf(elt,sizeof elt,"%%struct.%s",s->fields[j].ty.struct_name);
                 else if(s->fields[j].ty.matn) mll_of(elt,sizeof elt,s->fields[j].ty.matn,s->fields[j].ty.matm);
                 else ll_of(elt,sizeof elt,s->fields[j].ty.kind,s->fields[j].ty.vecn);
@@ -2635,7 +2928,8 @@ void emit_air(FILE *out, Program *prog){
                 /* stage-in struct (vertex attributes or fragment interpolants):
                  * unpacked as separate arguments */
                 StructDef *sd=find_struct(prog,p->ty.struct_name);
-                for(size_t f=0;f<sd->nfields;f++){ char fl[64]; type_ll(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.struct_name,sd->fields[f].ty.vecn);
+                for(size_t f=0;f<sd->nfields;f++){ if(struct_empty(prog,sd->fields[f].ty.struct_name)) continue;
+                    char fl[64]; type_ll(fl,sizeof fl,sd->fields[f].ty.kind,sd->fields[f].ty.struct_name,sd->fields[f].ty.vecn);
                     if(emitted++)so+=snprintf(sig+so,sizeof sig-so,", ");
                     so+=snprintf(sig+so,sizeof sig-so,"%s noundef %%_%s.%zu",fl,p->name,f); }
                 continue;
@@ -2650,7 +2944,7 @@ void emit_air(FILE *out, Program *prog){
                 so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(%d)* nocapture noundef %%_%s",elt,p->ty.as,p->name); }
             else if(fn->is_kernel){ char ll[32]; pll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn,p->ty.matn,p->ty.matm);
                 so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(2)* nocapture noundef readonly align %d dereferenceable(%d) %%_%s",ll,tal(p->ty.kind,p->ty.vecn,p->ty.matn),tsz(p->ty.kind,p->ty.vecn,p->ty.matn),p->name); }
-            else { char ll[32];
+            else { char ll[96];
                 if(p->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",p->ty.struct_name);
                 else pll_of(ll,sizeof ll,p->ty.kind,p->ty.vecn,p->ty.matn,p->ty.matm);
                 so+=snprintf(sig+so,sizeof sig-so,"%s noundef %%_%s",ll,p->name); } }
@@ -2689,9 +2983,11 @@ void emit_air(FILE *out, Program *prog){
             StructDef *sd=find_struct(prog,p->ty.struct_name);
             int sal; struct_layout(sd,&sal);
             char *slot=newtmp(&c); sb_printf(c.pre,"  %s = alloca %%struct.%s, align %d\n",slot,p->ty.struct_name,sal);
-            for(size_t f=0;f<sd->nfields;f++){
+            for(size_t f=0;f<sd->nfields;f++){ if(struct_empty(prog,sd->fields[f].ty.struct_name)) continue;
                 char pty[96]; pty_str(pty,sizeof pty,sd->fields[f].ty.kind,sd->fields[f].ty.struct_name,0,1,sd->fields[f].ty.vecn,0);
-                char ll[32]; ll_of(ll,sizeof ll,sd->fields[f].ty.kind,sd->fields[f].ty.vecn);
+                char ll[64];
+                if(sd->fields[f].ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",sd->fields[f].ty.struct_name);
+                else ll_of(ll,sizeof ll,sd->fields[f].ty.kind,sd->fields[f].ty.vecn);
                 char sp[64]; snprintf(sp,sizeof sp,"%%struct.%s*",p->ty.struct_name);
                 const char *fp=newtmp(&c);
                 emit(&c,"  %s = getelementptr inbounds %%struct.%s, %s %s, i64 0, i32 %zu\n",fp,p->ty.struct_name,sp,slot,f);
@@ -2704,7 +3000,9 @@ void emit_air(FILE *out, Program *prog){
         /* top-level body: re-derive the Block after every statement, because a
          * template instantiation reallocs prog->funcs and moves the Function's
          * body field (nested blocks live in the heap-stable stmts array) */
-        for(size_t si=0;;si++){ Block *b=&c.fn->body; if(si>=b->n) break; gen_stmt(&c,&b->stmts[si]); }
+        for(size_t si=0;;si++){ Block *b=&c.fn->body; if(si>=b->n) break;
+            if(getenv("BINC_DEBUG_IW")&&!strcmp(c.fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")) fprintf(stderr,"DBG stmt %zu: kind=%d %s\n",si,b->stmts[si].kind,b->stmts[si].name?b->stmts[si].name:"");
+            gen_stmt(&c,&b->stmts[si]); }
         if(!c.term){ if(c.fn->ret.kind==T_VOID) emit(&c,"  ret void\n");
             else if(c.fn->ret.kind==T_STRUCT){ StructDef *sd=find_struct(prog,c.fn->ret.struct_name);
                 char lt[256]; stage_lit_type(lt,sizeof lt,sd); emit(&c,"  ret %s undef\n",lt); }
@@ -2717,6 +3015,7 @@ void emit_air(FILE *out, Program *prog){
         fprintf(out,"}\n\n");
     }
     g_recover=NULL;
+    if(g_uses_discard) fprintf(out,"declare void @air.discard_fragment() local_unnamed_addr\n");
     if(atomic_add_used[0]) fprintf(out,"declare float @air.atomic.global.add.f32(float addrspace(1)*, float, i32, i32, i32, i1) local_unnamed_addr\n");
     if(atomic_add_used[1]) fprintf(out,"declare i32 @air.atomic.global.add.i32(i32 addrspace(1)*, i32, i32, i32, i32, i1) local_unnamed_addr\n");
     /* texture intrinsics + the opaque texture/sampler types */

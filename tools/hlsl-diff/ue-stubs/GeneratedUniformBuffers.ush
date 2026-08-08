@@ -1,0 +1,94 @@
+// Stub for the SCW-generated Engine/Generated/GeneratedUniformBuffers.ush.
+#pragma once
+
+// The real file is generated per-shader by the ShaderCompilerWorker and
+// contains #include lines for the uniform buffers the shader uses plus
+// importer declarations. This stub pulls in the vendored per-buffer stubs.
+#include "/Engine/Generated/UniformBuffers/Primitive.ush"
+#include "/Engine/Generated/UniformBuffers/View.ush"
+
+// SCW generator-placeholder substitution: MaterialTemplate.ush's
+// FPixelMaterialInputs body is `%{pixel_material_inputs}`, filled at
+// generation time. The pp substitutes a live define of that name.
+// Fields audited from BasePassPixelShader.usf reachable references.
+#define pixel_material_inputs \
+    float4 EmissiveColor; \
+    float BaseColor; \
+    float Metallic; \
+    float Specular; \
+    float Roughness; \
+    float Anisotropy; \
+    float Opacity; \
+    float AmbientOcclusion; \
+    float4 WorldNormal; \
+    float4 Normal; \
+    float4 Tangent; \
+    float4 Refraction; \
+    float PixelDepthOffset; \
+    uint ShadingModel;
+
+// OpaqueBasePass: per-material SCW define (like WORKING_COLOR_SPACE_*_MAT).
+// The reachable code dereferences it as a struct value (Shared.*, Substrate).
+// Audited from BasePassPixelShader.usf reachable references.
+struct FBasePassPlanarReflectionData
+{
+    float4 ReflectionPlane;
+    float4 PlanarReflectionParameters;
+    float4 PlanarReflectionOrigin;
+    float4 PlanarReflectionXAxis;
+    float4 PlanarReflectionYAxis;
+    float4 PlanarReflectionParameters2;
+};
+struct FBasePassSharedData
+{
+    int UseBasePassSkylight;
+    float4 Forward;
+    float4 ForwardDirLightShadow;
+    float4 Reflection;
+    FBasePassPlanarReflectionData PlanarReflection;
+    float4 Fog;
+    float4 FogISR;
+    float4 LightFunctionAtlas;
+};
+struct FBasePassData
+{
+    FBasePassSharedData Shared;
+    float4 Substrate;
+    Texture2D ResolvedSceneDepthTexture;
+    bool Is24BitUnormDepthStencil;
+    Texture2D PreIntegratedGFTexture;
+};
+FBasePassData OpaqueBasePass;
+
+// Vertex-factory interpolants struct: defined per-factory by the generated
+// VertexFactory.ush (missing from the audit include chain). The base-pass
+// reachable code only passes it through, so a minimal registered struct
+// suffices for acceptance.
+struct FVertexFactoryInterpolantsVSToPS
+{
+    float4 _data;
+};
+
+// UE's interleaved gradient noise (defined outside the reachable include
+// chain in this corpus) — the classic hash used for dithered LOD transitions.
+struct FMaterialAttributes
+{
+    float4 _data;
+};
+float InterleavedGradientNoise(float2 PixelCoord, uint FrameIndex)
+{
+    const float3 Magic = float3(0.06711056f, 0.00583715f, 52.9829189f);
+    return frac(dot(PixelCoord, Magic.xy) + FrameIndex * Magic.z);
+}
+
+// Checkerboard-dither helper used by Substrate paths (definition outside the
+// reachable chain) — parity of the summed pixel coordinates.
+bool CheckerFromPixelPos(float2 PixelPos)
+{
+    return frac((PixelPos.x + PixelPos.y) * 0.5f) < 0.5f;
+}
+struct FBasePassInterpolantsVSToPS
+{
+    float4 _data;
+};
+

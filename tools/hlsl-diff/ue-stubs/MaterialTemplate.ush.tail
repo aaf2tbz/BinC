@@ -1,0 +1,6 @@
+// --- binc ue-stubs: GetPrimitiveData overloads (idempotence marker) ---
+// GetPrimitiveData overloads live behind #if GET_PRIMITIVE_DATA_OVERRIDE
+// (a per-material SCW define). The audit compile takes the #else branch of
+// GetWorldToInstanceDF, which needs them. Resolve through the uint overload.
+FPrimitiveSceneData GetPrimitiveData(FMaterialVertexParameters Parameters) { return GetPrimitiveData(Parameters.PrimitiveId); }
+FPrimitiveSceneData GetPrimitiveData(FMaterialPixelParameters Parameters) { return GetPrimitiveData(Parameters.PrimitiveId); }

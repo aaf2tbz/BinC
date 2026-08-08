@@ -219,6 +219,16 @@ HLSLProg hlsl_parse(TokStream *ts){
             if(peek(ts)->kind==TK_SEMI) advance(ts);
             continue;
         }
+        if(kt->kind==TK_IDENT&&!strcmp(kt->text,"_Pragma")){ /* DXC _Pragma("dxc ...") diagnostics */
+            advance(ts); /* _Pragma */
+            if(peek(ts)->kind==TK_LPAREN){ int d=0;
+                do{ Token *t=peek(ts);
+                    if(t->kind==TK_LPAREN)d++;
+                    else if(t->kind==TK_RPAREN)d--;
+                    if(t->kind==TK_EOF) die(t->line,"unterminated _Pragma");
+                    advance(ts); } while(d>0); }
+            continue;
+        }
         if(kt->kind==TK_IDENT&&!strcmp(kt->text,"typedef")){ /* C-style typedef: skip to ; (uses fall back to generic struct typing) */
             while(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_EOF) advance(ts);
             if(peek(ts)->kind==TK_SEMI) advance(ts);
@@ -229,7 +239,8 @@ HLSLProg hlsl_parse(TokStream *ts){
          * `texture X <...> : register(...);` — the sampler_state block carries
          * host-side filter/wrap state; the texture registers as a module
          * global so tex2D-family calls can bind it */
-        if((kt->kind==TK_KW_SAMPLER)||(kt->kind==TK_IDENT&&(!strcmp(kt->text,"texture")||!strcmp(kt->text,"textureCUBE")||!strcmp(kt->text,"sampler2D")||!strcmp(kt->text,"samplerCUBE")||!strcmp(kt->text,"sampler3D")||!strcmp(kt->text,"sampler1D")||!strcmp(kt->text,"sampler2DShadow")||!strcmp(kt->text,"samplerCUBEShadow")))){
+        if((kt->kind==TK_KW_SAMPLER&&!(ts->i+2<ts->n&&ts->toks[ts->i+2].kind==TK_LPAREN))|| /* `SamplerState F(...)` is a function */
+           (kt->kind==TK_IDENT&&(!strcmp(kt->text,"texture")||!strcmp(kt->text,"textureCUBE")||!strcmp(kt->text,"sampler2D")||!strcmp(kt->text,"samplerCUBE")||!strcmp(kt->text,"sampler3D")||!strcmp(kt->text,"sampler1D")||!strcmp(kt->text,"sampler2DShadow")||!strcmp(kt->text,"samplerCUBEShadow")))){
             if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG d3d9: %s at line %d\n",kt->text,kt->line);
             int is_samp=(kt->kind==TK_KW_SAMPLER)||(strcmp(kt->text,"texture")&&strcmp(kt->text,"textureCUBE"));
             advance(ts);
@@ -308,6 +319,7 @@ HLSLProg hlsl_parse(TokStream *ts){
         /* D3D10 state objects: `DepthStencilState X { ... };` /
          * `BlendState X { ... };` / `RasterizerState X { ... };` — host-side */
         if(kt->kind==TK_IDENT&&(ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_IDENT&&
+           !(ts->i+2<ts->n&&ts->toks[ts->i+2].kind==TK_LPAREN)&& /* `SamplerState F(...)` is a function */
            (!strcmp(kt->text,"DepthStencilState")||!strcmp(kt->text,"BlendState")||
             !strcmp(kt->text,"RasterizerState")||!strcmp(kt->text,"SamplerState"))){
             advance(ts); advance(ts); /* type + name */
@@ -515,6 +527,7 @@ HLSLProg hlsl_parse(TokStream *ts){
         accept(ts,TK_KW_CONSTANT); /* `precise`/`const` return qualifier */
         hf.ret=hlsl_type(ts);
         Token *fn=peek(ts);
+        if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG fnprobe: ret_kind=%d fn='%s' kind=%d next=%d\n",hf.ret.kind,fn->text,fn->kind,(ts->i+1<ts->n)?ts->toks[ts->i+1].kind:-1);
         int is_fn = fn->kind==TK_IDENT && (ts->i+1<ts->n) && ts->toks[ts->i+1].kind==TK_LPAREN;
         if(!is_fn){
             ts->i=save;
@@ -596,7 +609,7 @@ HLSLProg hlsl_parse(TokStream *ts){
             /* in/out/inout and const/static/uniform interleave (`const in float3 P`) */
             for(;;){
                 if(peek(ts)->kind==TK_KW_INOUT&&!hp.inq){ hp.inq=3; advance(ts); }
-                else if(peek(ts)->kind==TK_KW_OUT&&!hp.inq){ hp.inq=2; advance(ts); }
+                else if(peek(ts)->kind==TK_KW_OUT){ if(!hp.inq) hp.inq=2; else if(hp.inq==1) hp.inq=3; advance(ts); } /* `in out` = inout */
                 else if(peek(ts)->kind==TK_KW_IN&&!hp.inq){ hp.inq=1; advance(ts); }
                 else if(peek(ts)->kind==TK_KW_UNIFORM){ hp.is_uniform=1; advance(ts); }
                 else if(peek(ts)->kind==TK_KW_CONSTANT||peek(ts)->kind==TK_KW_STATIC) advance(ts);
@@ -604,6 +617,13 @@ HLSLProg hlsl_parse(TokStream *ts){
             }
             while(peek(ts)->kind==TK_KW_LINEAR||peek(ts)->kind==TK_KW_NOPERSPECTIVE||
                   peek(ts)->kind==TK_KW_CENTROID||peek(ts)->kind==TK_KW_SAMPLE) advance(ts);
+            /* unknown qualifier macro (config-gated off, e.g.
+             * INPUT_POSITION_QUALIFIERS) before a keyword type: skip it */
+            if(peek(ts)->kind==TK_IDENT&&(ts->i+1<ts->n)){
+                TokKind nk=ts->toks[ts->i+1].kind;
+                if(nk==TK_KW_FLOAT||nk==TK_KW_HALF||nk==TK_KW_INT||nk==TK_KW_UINT||nk==TK_KW_BOOL||nk==TK_KW_MAT)
+                    advance(ts);
+            }
             /* GS input primitives: point / line / lineadj / triangle /
              * triangleadj — the primitive keyword precedes the struct type */
             while(peek(ts)->kind==TK_IDENT&&
@@ -619,16 +639,10 @@ HLSLProg hlsl_parse(TokStream *ts){
                 hp.ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
             }
             if(accept(ts,TK_COLON)){ Token *st=peek(ts); expect(ts,TK_IDENT,"semantic after :"); hp.sem=strdup(st->text); }
-            /* HLSL default arguments (`float DepthC = 0.0f`): parsed and ignored
-             * (calls omitting a defaulted arg are not yet supported) */
+            /* HLSL default arguments (`float DepthC = 0.0f`): keep the
+             * expression so calls omitting a defaulted arg can fill it in */
             if(accept(ts,TK_EQ)){
-                int dep=0;
-                for(;;){ TokKind k=peek(ts)->kind;
-                    if(k==TK_LPAREN||k==TK_LBRACK) dep++;
-                    else if(k==TK_RPAREN||k==TK_RBRACK){ if(!dep) break; dep--; }
-                    else if(k==TK_COMMA&&!dep) break;
-                    else if(k==TK_SEMI||k==TK_EOF) break;
-                    advance(ts); }
+                hp.def=parse_expr(ts);
             }
             hpush((void**)&ps,&np,&pcap,&hp,sizeof hp);
             if(!accept(ts,TK_COMMA))break;
@@ -641,6 +655,7 @@ HLSLProg hlsl_parse(TokStream *ts){
         expect(ts,TK_LBRACE,"{");
         hf.body=parse_braced(ts);
         hpush((void**)&hp.funcs,&hp.nfuncs,&fcap,&hf,sizeof hf);
+        if(getenv("BINC_DEBUG_D3D9")&&!strcmp(hf.name,"IsNonZeroFast")) fprintf(stderr,"DBG fnreg: %s nparams=%zu line=%d\n",hf.name,hf.np,hf.line);
     }
     return hp;
 }

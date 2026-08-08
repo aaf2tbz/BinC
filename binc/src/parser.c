@@ -62,7 +62,7 @@ Type parse_type(TokStream *ts){
         expect(ts,TK_GT,">");
     } else if(accept(ts,TK_KW_FLOAT)){t.kind=T_FLOAT;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_HALF))t.kind=T_HALF;
     else if(accept(ts,TK_KW_INT)){t.kind=T_INT32;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_UINT)){t.kind=T_UINT32;t.vecn=(int)pt->ival;}
-    else if(accept(ts,TK_KW_BOOL))t.kind=T_BOOL; else if(accept(ts,TK_KW_VOID))t.kind=T_VOID;
+    else if(accept(ts,TK_KW_BOOL)){t.kind=T_BOOL;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_VOID))t.kind=T_VOID;
     else if(accept(ts,TK_KW_MAT)){ t.kind=T_FLOAT; t.matn=(int)pt->ival;
         /* non-square spellings (float2x3) parse into (matn=rows, matm=cols);
          * codegen rejects them at emission (no silent squash) */
@@ -277,7 +277,8 @@ static Expr *parse_postfix(TokStream *ts){
                 args[na++]=parse_expr(ts);
                 if(!accept(ts,TK_COMMA))break; }
             expect(ts,TK_RPAREN,")");
-            n->args=args; n->nargs=na; e=n; }
+            n->args=args; n->nargs=na; e=n;
+            if(getenv("BINC_DEBUG_D3D9")&&n->name&&!strcmp(n->name,"IsNonZeroFast")) fprintf(stderr,"DBG callparse: na=%zu line=%d first_kind=%d\n",na,n->line,na?args[0]->kind:-1); }
         else if(ot->kind==TK_LBRACK){ advance(ts); Expr *i=parse_expr(ts); expect(ts,TK_RBRACK,"]");
             Expr *n=E(E_INDEX,ot->line,ot->col); n->operand=e; n->rhs=i; e=n; }
         else if(ot->kind==TK_DOT){ advance(ts); Token *f=peek(ts);
@@ -454,6 +455,11 @@ Stmt parse_stmt(TokStream *ts){
     }
     Token *kt=peek(ts);
     if(kt->kind==TK_SEMI){ advance(ts); Stmt st={0}; st.kind=S_BLOCK; st.line=kt->line; st.col=kt->col; return st; } /* empty statement `;` */
+    if(kt->kind==TK_IDENT&&!strcmp(kt->text,"_Pragma")){ /* DXC _Pragma("dxc ...") inside bodies */
+        while(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_RBRACE&&peek(ts)->kind!=TK_EOF) advance(ts);
+        if(peek(ts)->kind==TK_SEMI) advance(ts);
+        Stmt st={0}; st.kind=S_BLOCK; st.line=kt->line; st.col=kt->col; return st;
+    }
     if(kt->kind==TK_KW_RETURN){ advance(ts); Stmt st={0}; st.kind=S_RETURN; st.line=kt->line; st.col=kt->col;
         if(peek(ts)->kind!=TK_SEMI) st.expr=parse_expr(ts);
         expect(ts,TK_SEMI,";"); return st; }

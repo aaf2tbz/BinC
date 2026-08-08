@@ -73,7 +73,7 @@ struct Stmt {
     /* S_SWITCH */ Expr *sw_cond; SCase *cases; size_t ncases; int has_default; Block def_body;
 };
 
-typedef struct { char *name; Type ty; Uniformity un; } Param;
+typedef struct { char *name; Type ty; Uniformity un; Expr *def; } Param;
 typedef enum { ST_NONE, ST_VERTEX, ST_FRAGMENT, ST_GEOMETRY } Stage;
 typedef struct { char *name; char *link_name; Param *params; size_t nparams; Block body; int is_kernel; Stage stage; Type ret; int line;
     int is_template; char *tvar; Type tvar_ty; } Function;
@@ -115,6 +115,7 @@ int had_errors(void);
 extern int g_last_line, g_last_col, g_err_count;
 /* when set, die() reports and longjmps to the recovery point instead of exiting */
 extern jmp_buf *g_recover;
+extern int g_uses_discard;
 Program parse_program(TokStream *ts);
 /* ---- shared parser API (also used by the HLSL frontend) ---- */
 Token *peek(TokStream *ts); Token *advance(TokStream *ts);
@@ -128,7 +129,7 @@ void blk_push(Block *b, Stmt s); int is_stag(const char *s);
 void parse_struct(TokStream *ts, Program *prog); void parse_function(TokStream *ts, Program *prog);
 extern const char *g_tvar; extern Program *g_parse_prog;
 /* ---- HLSL frontend (Phases 1-7) ---- */
-typedef struct { char *name; char *sem; Type ty; int inq; int reg; int is_uniform; } HLSLParam; /* inq: 0 plain, 1 in, 2 out, 3 inout */
+typedef struct { char *name; char *sem; Type ty; int inq; int reg; int is_uniform; Expr *def; } HLSLParam; /* inq: 0 plain, 1 in, 2 out, 3 inout */
 typedef struct { char *name; HLSLParam *params; size_t np; Type ret; char *ret_sem;
     Block body; int line; int numtx, numty, numtz; int has_numthreads; int is_export; } HLSLFunc;
 typedef struct { char *tag; Field *fields; size_t nfields; } HLSLStruct;

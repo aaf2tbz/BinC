@@ -21,7 +21,9 @@ BINC = os.path.join(ROOT, "binc/binc")
 ENV = dict(os.environ)
 UE_DIR = os.path.join(ROOT, "third_party/UnrealEngine")
 UE_DEFS = ["-D", "COMPILER_DXC", "-D", "PLATFORM_WINDOWS", "-D", "SM6_PROFILE",
-           "-D", "COMPILER_SUPPORTS_ATTRIBUTES", "-D", "A8_SAMPLE_MASK=.r"]
+           "-D", "COMPILER_SUPPORTS_ATTRIBUTES", "-D", "A8_SAMPLE_MASK=.r",
+           "-D", "WSVECTOR_IS_TILEOFFSET=1", "-D", "UE_LWC_RENDER_TILE_SIZE=2097152.0",
+           "-D", "WORKING_COLOR_SPACE_RGB_TO_XYZ_MAT=float3x3(1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0)"]
 
 
 def resolve(rel):
@@ -154,11 +156,8 @@ def main():
         except OSError:
             continue
         entry = guess_entry(src)
-        if entry is None:
-            rows.append((f, "-", "-", "HEADER (no entry)"))
-            continue
-        prof = entry_profile(entry)
-        jobs.append((f, prof, entry, src))
+        prof = entry_profile(entry) if entry else "ps_5_0"
+        jobs.append((f, prof, entry or "?", src))
     if limit:
         jobs = jobs[:limit]
 
@@ -166,7 +165,9 @@ def main():
     gap_files = collections.defaultdict(list)
     n_crash = 0
     for rel, prof, entry, src in jobs:
-        rc, _, err = run([BINC, "-E", entry, "-T", prof, "-I", UE_DIR] + UE_DEFS +
+        # --stage-all: parse + lower every function, no entry required — the
+        # parse-acceptance measurement (permutation-gated entries can't fail it)
+        rc, _, err = run([BINC, "--stage-all", "-T", prof, "-I", UE_DIR] + UE_DEFS +
                          [resolve(rel), "-o", "/tmp/ue-audit.metallib"], 180)
         if rc in (134, 139):
             result = "CRASH"

@@ -146,6 +146,12 @@ golden-d3d9:
 		bash ../tools/hlsl-diff/golden-d3d9.sh $$g || exit 1; \
 	done
 
+# Phase-2 UE base-pass feature golden (reduced fixture; the real
+# BasePassPixelShader.usf needs the vendored UE tree + SCW-generated stubs)
+golden-basepass:
+	@echo "== basepass"
+	bash ../tools/hlsl-diff/goldens/basepass/golden.sh || exit 1
+
 # GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
 ci: binc test-negative test-fuzz test-interp examples
 	@echo "CI OK"
@@ -153,4 +159,4 @@ ci: binc test-negative test-fuzz test-interp examples
 clean:
 	rm -f binc harness pong_host binc_runtime.o build/*.metallib build/*.h *.ll *.air
 
-.PHONY: binc harness runtime examples pong verify test-negative test-fuzz ci clean golden-d3d9
+.PHONY: binc harness runtime examples pong verify test-negative test-fuzz ci clean golden-d3d9 golden-basepass

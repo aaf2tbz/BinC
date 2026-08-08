@@ -1,0 +1,51 @@
+// Stub for the SCW-generated Engine/Generated/UniformBuffers/View.ush.
+#pragma once
+
+// The real file is generated per-engine-version by the ShaderCompilerWorker and
+// carries the full view uniform state (~200 fields). This stub provides the
+// ViewState struct with the fields the vendored shader corpus actually
+// references (64 uses across the base-pass material pipeline) plus the
+// GetPrimaryView/ResolveView entry points, so the frontend can resolve the
+// reachable code. Field types follow the UE ViewState declarations.
+#include "/Engine/Private/DoubleFloat.ush"
+struct ViewState
+{
+    float4x4 ViewToClip;
+    float3 PrecomputedIndirectLightingColorScale;
+    float4x4 TranslatedWorldToClip;
+    float4x4 TranslatedWorldToView;
+    float4x4 FirstPersonTransform;
+    float4x4 PrevFirstPersonTransform;
+    float4x4 SVPositionToTranslatedWorld;
+    float4 ScreenPositionScaleBias;
+    float4 ViewSizeAndInvSize;
+    float4 BufferSizeAndInvSize;
+    FDFVector3 PreViewTranslation;
+    FDFVector3 PrevPreViewTranslation;
+    FDFVector3 WorldCameraOrigin;
+    FDFVector3 WorldViewOrigin;
+    FDFVector3 PrevWorldCameraOrigin;
+    FDFVector3 PrevWorldViewOrigin;
+    float3 ViewForward;
+    float3 AtmosphereLightDirection[2];
+    float2 ViewRectMin;
+    float2 TemporalAAJitter;
+    uint2 TileOffset;
+    uint StateFrameIndex;
+    uint StateFrameIndexMod8;
+    uint StereoPassIndex;
+    uint bCheckerboardSubsurfaceProfileRendering;
+    uint RenderingReflectionCaptureMask;
+    uint bSubsurfacePostprocessEnabled;
+    float4 TemporalAAParams;
+    float PreExposure;
+    float MaterialMaxEmissiveValue;
+};
+
+ViewState ResolvedView;
+ViewState View;
+
+ViewState GetPrimaryView()
+{
+    return ResolvedView;
+}

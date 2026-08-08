@@ -45,18 +45,42 @@ static char *dirname_of(const char *path){
     memcpy(d, path, (size_t)(slash-path)); d[slash-path]='\0';
     return d;
 }
+static void norm_path(char *p){
+    /* collapse /./ and /../ segments in place so two spellings of the same
+     * file (e.g. "DoubleFloat.ush" vs "../DoubleFloat.ush" vs
+     * "/Engine/Private/DoubleFloat.ush") compare equal in is_once() */
+    char *dst=p; const char *s=p;
+    if(*s=='/'){ *dst++='/'; s++; }
+    while(*s){
+        while(*s=='/') s++;
+        if(!*s) break;
+        const char *e=s; while(*e&&*e!='/') e++;
+        size_t l=(size_t)(e-s);
+        if(l==1&&s[0]=='.'){ s=e; continue; }
+        if(l==2&&s[0]=='.'&&s[1]=='.'){
+            if(dst>p+1){ dst--; while(dst>p+1&&dst[-1]!='/') dst--; }
+            else if(dst==p){ /* leading .. with nothing to collapse: keep it verbatim */
+                *dst++='.'; *dst++='.'; }
+            s=e; continue;
+        }
+        if(dst!=p&&dst[-1]!='/') *dst++='/';
+        memcpy(dst,s,l); dst+=l;
+        s=e;
+    }
+    *dst='\0';
+}
 static char *resolve_include(const char *curdir, const char *want){
     if(curdir && want[0]!='/' && want[0]!='\\'){ char p[1024]; snprintf(p,sizeof p,"%s/%s",curdir,want);
-        if(!access(p,R_OK)) return strdup(p); }
+        if(!access(p,R_OK)){ norm_path(p); return strdup(p); } }
     /* UE virtual include paths: `/Engine/Public/X.ush` lives at
      * <inc_dir>/Engine/Shaders/Public/X.ush (ShaderCompilerWorker mapping) */
     if(!strncmp(want,"/Engine/",8)){
         for(size_t i=0;i<ninc_dirs;i++){ char p[1024]; snprintf(p,sizeof p,"%s/Engine/Shaders/%s",inc_dirs[i],want+8);
-            if(!access(p,R_OK)) return strdup(p); }
+            if(!access(p,R_OK)){ norm_path(p); return strdup(p); } }
     }
     for(size_t i=0;i<ninc_dirs;i++){ char p[1024]; snprintf(p,sizeof p,"%s/%s",inc_dirs[i],want);
-        if(!access(p,R_OK)) return strdup(p); }
-    if(!access(want,R_OK)) return strdup(want);
+        if(!access(p,R_OK)){ norm_path(p); return strdup(p); } }
+    if(!access(want,R_OK)){ char p[1024]; snprintf(p,sizeof p,"%s",want); norm_path(p); return strdup(p); }
     return NULL;
 }
 static int is_once(const char *path){ for(size_t i=0;i<n_once;i++) if(!strcmp(once_files[i],path)) return 1; return 0; }
@@ -86,6 +110,11 @@ static char *splice_file(const char *path){
         char *ln=ls; line++;
         char *t=ln; while(*t==' '||*t=='\t')t++;
         if(!strncmp(t,"once;",5)){ mark_once(path); }
+        else if(!strncmp(t,"#pragma",7)){
+            char *pq=t+7; while(*pq==' '||*pq=='\t')pq++;
+            if(!strncmp(pq,"once",4)&&!(isalnum((unsigned char)pq[4])||pq[4]=='_')) mark_once(path);
+            bput(&out,ln,strlen(ln)); bput(&out,"\n",1);
+        }
         else if(!strncmp(t,"include ",8)){
             char *q=t+8; while(*q==' '||*q=='\t')q++;
             if(*q!='"'){ fprintf(stderr,"binc: error (%s line %ld): include needs \"path\";\n",path,line); free(out.p); return NULL; }
@@ -118,15 +147,41 @@ typedef struct { char *name; char *val; char params[8][64]; int nparams; } Def;
  * word) + function-like NAME(args) expansion with `##` pasting. Repeats
  * until stable (an expansion may introduce another macro's name). This runs
  * during pp_process so `#define/#undef` scoping is position-correct
- * (`#define FDFType FDFVector3 ... #undef FDFType` instantiations). */
+ * (`#define FDFType FDFVector3 ... #undef FDFType` instantiations).
+ *
+ * C99 6.10.3.4 self-reference suppression: when a macro's expansion contains
+ * the macro's OWN name, that residue is painted and never re-expanded (UE:
+ * `#define UseBasePassSkylight OpaqueBasePass.Shared.UseBasePassSkylight`).
+ * Without this, the multi-round rescan re-expands it until the round cap
+ * (16 nested copies in the pp output). Track suppressed names per line. */
+static int body_has_word(const char *body, const char *name){
+    size_t nl=strlen(name);
+    for(const char *b=body; (b=strstr(b,name)); b+=nl){
+        int lb=b==body||!(isalnum((unsigned char)b[-1])||b[-1]=='_');
+        int rb=!(isalnum((unsigned char)b[nl])||b[nl]=='_');
+        if(lb&&rb) return 1;
+    }
+    return 0;
+}
+static int name_is_suppressed(const char *const *sup, int ns, const char *name){
+    for(int i=0;i<ns;i++) if(!strcmp(sup[i],name)) return 1;
+    return 0;
+}
+static void suppress_name(const char **sup, int *ns, const char *name){
+    if(*ns>=16||name_is_suppressed(sup,*ns,name)) return;
+    sup[(*ns)++] = name; /* defs table outlives the line: point, don't copy */
+}
 static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
     Buf out={0}; const char *q=line;
     int changed=1; int ever=0;
+    const char *suppressed[16]; int nsup=0;
     for(int round=0; changed&&round<16; round++){
         Buf nxt={0}; int did=0;
+        if(getenv("BINC_DUMP_PP")&&strstr(line,"INVARIANT_ADD(INVARIANT_SUB")) fprintf(stderr,"DBG sub-round: r=%d q='%.120s'\n",round,q?q:"(null)");
         for(size_t d=0;d<ndefs;d++){
             size_t nl2=strlen(defs[d].name);
             if(!nl2) continue;
+            if(name_is_suppressed(suppressed,nsup,defs[d].name)) continue;
             Buf o2={0};
             /* after a substitution emptied the line (did=1, nxt.p=NULL), keep
              * it empty — only fall back to the original line before any
@@ -172,6 +227,10 @@ static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
                         snprintf(body,sizeof body,"%s",b2.p?b2.p:""); free(b2.p);
                     }
                     bput(&o2,s,(size_t)(hit-s)); bput(&o2,body,strlen(body));
+                    /* C99 6.10.3.4: only the macro's name in its OWN replacement
+                     * list is painted — check val, NOT the arg-substituted body
+                     * (an arg containing the name is caller text, not a residue) */
+                    if(body_has_word(defs[d].val,defs[d].name)) suppress_name(suppressed,&nsup,defs[d].name);
                     s=p+1; did=1;
                 }
             } else {
@@ -181,7 +240,10 @@ static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
                     int lb=hit==s||!(isalnum((unsigned char)hit[-1])||hit[-1]=='_');
                     int rb=!(isalnum((unsigned char)hit[nl2])||hit[nl2]=='_');
                     if(getenv("BINC_DUMP_PP")&&!strcmp(defs[d].name,"CALL_SITE_DEBUGLOC")) fprintf(stderr,"DBG obj: hit=%ld lb=%d rb=%d nl2=%zu c='%c'\n",(long)(hit-s),lb,rb,nl2,hit[nl2]?hit[nl2]:'0');
-                    if(lb&&rb){ bput(&o2,s,(size_t)(hit-s)); bput(&o2,defs[d].val,strlen(defs[d].val)); s=hit+nl2; did=1; }
+                    if(getenv("BINC_DUMP_PP")&&!strcmp(defs[d].name,"OPTIONAL_IsFrontFace")) fprintf(stderr,"DBG opt: hit=%ld lb=%d rb=%d nl2=%zu\n",(long)(hit-s),lb,rb,nl2);
+                    if(lb&&rb){ bput(&o2,s,(size_t)(hit-s)); bput(&o2,defs[d].val,strlen(defs[d].val));
+                        if(body_has_word(defs[d].val,defs[d].name)) suppress_name(suppressed,&nsup,defs[d].name);
+                        s=hit+nl2; did=1; }
                     else { bput(&o2,s,(size_t)(hit-s+nl2)); s=hit+nl2; }
                 }
             }
@@ -361,7 +423,7 @@ static void pp_process(const char *path, const char *src, Buf *out, Def *defs, s
                 char *nm=p+7; char *sp=nm;
                 while(*sp&&*sp!=' '&&*sp!='\t'&&*sp!='(') sp++;
                 char *val=sp; while(*val==' '||*val=='\t') val++;
-                if(sp>nm&&*ndefs<1024){
+                if(sp>nm&&*ndefs<16384){
                     char params[8][64]; int nparams=0; int fl=0;
                     if(*sp=='('){ /* function-like macro: NAME(a, b) body */
                         fl=1;
@@ -405,11 +467,39 @@ static void pp_process(const char *path, const char *src, Buf *out, Def *defs, s
         } else if(active){
             /* substitute with the live defs table (position-correct scoping:
              * `#define FDFType FDFVector3 ... #undef FDFType` instantiations) */
-            if(getenv("BINC_DUMP_PP")&&strstr(L,"CALL_SITE_DEBUGLOC")){ fprintf(stderr,"DBG sub: line='%s' ndefs=%zu\n",L,*ndefs); const Def *df=pp_find(defs,*ndefs,"CALL_SITE_DEBUGLOC"); fprintf(stderr,"DBG sub: found=%s val='%s' np=%d\n",df?"yes":"NO",df?df->val:"",df?df->nparams:-1); }
+            if(strstr(L,"%{")){ /* SCW generator placeholder (%{name}): the
+                worker fills these at generation time. Substitute a live define
+                of that name (the stubs define e.g. pixel_material_inputs), or
+                drop the line. */
+                const char *pb=strstr(L,"%{");
+                const char *pe=pb?strchr(pb+2,'}'):NULL;
+                if(pb&&pe){
+                    char pname[64]; size_t pl=(size_t)(pe-pb-2);
+                    if(pl>=sizeof pname) pl=sizeof pname-1;
+                    memcpy(pname,pb+2,pl); pname[pl]=0;
+                    const Def *pd=pp_find(defs,*ndefs,pname);
+                    if(pd){ bput(out,pd->val,strlen(pd->val)); bput(out,"\n",1); }
+                }
+            }
+            else if(strstr(L,"_Pragma(")){ /* DXC diagnostic directives
+                (_Pragma("dxc diagnostic ...")) — meaningless outside DXC; drop */ }
+            else {
+            if(getenv("BINC_DUMP_PP")&&strstr(L,"DEFINE_ATMOSPHERELIGHTVECTOR")){
+                fprintf(stderr,"DBG sub: line='%.60s' ndefs=%zu\n",L,*ndefs);
+                const Def *df=pp_find(defs,*ndefs,"DEFINE_ATMOSPHERELIGHTVECTOR");
+                fprintf(stderr,"DBG atmo: found=%s np=%d val='%.50s'\n",df?"yes":"NO",df?df->nparams:-1,df?df->val:"");
+            }
+            if(getenv("BINC_DUMP_PP")&&(strstr(L,"CALL_SITE_DEBUGLOC")||strstr(L,"OPTIONAL_IsFrontFace"))){
+                fprintf(stderr,"DBG sub: line='%s' ndefs=%zu\n",L,*ndefs);
+                for(size_t di=0;di<*ndefs;di++) if(strstr(defs[di].name,"FrontFace")) fprintf(stderr,"DBG def: '%s' val='%.40s' np=%d\n",defs[di].name,defs[di].val,defs[di].nparams);
+            }
             char *sub=pp_subst_line(L,defs,*ndefs);
             if(getenv("BINC_DUMP_PP")&&strstr(L,"CALL_SITE_DEBUGLOC")) fprintf(stderr,"DBG sub -> '%s'\n",sub?sub:"(null)");
-            bput(out,sub?sub:L,strlen(sub?sub:L)); free(sub);
-            bput(out,"\n",1);
+            if(sub&&strstr(sub,"_Pragma(")){ /* SHADER_PUSH/POP_WARNINGS_STATE
+                expand to _Pragma("dxc diagnostic ...") — drop the expansion */ free(sub); }
+            else { bput(out,sub?sub:L,strlen(sub?sub:L)); free(sub);
+            bput(out,"\n",1); }
+            }
         }
     }
     free(dir);
@@ -539,10 +629,10 @@ int main(int argc, char **argv) {
          * collected defines; #include spliced recursively (active branches
          * only); #define NAME value collected for whole-word substitution. */
         Buf all={0};
-        Def defs[1024]; size_t ndefs=0;
+        Def *defs=calloc(16384,sizeof(Def)); size_t ndefs=0; /* heap: 16K x ~540B > the 8MB stack */
         /* -D NAME[=value] command-line defines (UE's ShaderCompileWorker passes
          * dozens: COMPILER_DXC, PLATFORM_*, ENGINE_*, ...) */
-        for(size_t dd=0;dd<nddefs&&ndefs<1024;dd++){
+        for(size_t dd=0;dd<nddefs&&ndefs<16384;dd++){
             const char *dv=ddefs[dd]; const char *eq=strchr(dv,'=');
             char nm[256]; size_t nl=eq?(size_t)(eq-dv):strlen(dv);
             if(nl>=sizeof nm) nl=sizeof nm-1;
@@ -556,6 +646,7 @@ int main(int argc, char **argv) {
         src=all.p;
         if(getenv("BINC_DUMP_PP")){ FILE *pp=fopen("/tmp/binc_pp.txt","wb"); fwrite(src,1,strlen(src),pp); fclose(pp);
             for(size_t d=0;d<ndefs;d++){ fprintf(stderr,"DBG def: %s np=%d p0=%s val=%.30s\n",defs[d].name,defs[d].nparams,defs[d].nparams?defs[d].params[0]:"-",defs[d].val); } }
+        free(defs);
     } else {
     {
         Buf all={0};
