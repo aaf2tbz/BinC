@@ -146,11 +146,13 @@ golden-d3d9:
 		bash ../tools/hlsl-diff/golden-d3d9.sh $$g || exit 1; \
 	done
 
-# Phase-2 UE base-pass feature golden (reduced fixture; the real
+# Phase-2 UE base-pass + compute goldens (reduced fixtures; the real
 # BasePassPixelShader.usf needs the vendored UE tree + SCW-generated stubs)
 golden-basepass:
 	@echo "== basepass"
 	bash ../tools/hlsl-diff/goldens/basepass/golden.sh || exit 1
+	@echo "== uecompute"
+	bash ../tools/hlsl-diff/goldens/uecompute/golden.sh || exit 1
 
 # GPU-free CI pipeline: build, negative tests, fuzz, interpreter, compile all examples
 ci: binc test-negative test-fuzz test-interp examples

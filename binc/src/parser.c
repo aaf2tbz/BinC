@@ -268,6 +268,21 @@ static Expr *parse_postfix(TokStream *ts){
     Expr *e=parse_primary(ts);
     for(;;){
         Token *ot=peek(ts);
+        if(ot->kind==TK_LT && e->kind==E_IDENT){
+            /* explicit template args: Name<T0, T1>(...) — the < opens the
+             * template-arg list (not a comparison) when a call follows */
+            size_t save=ts->i;
+            advance(ts); int tdepth=1;
+            while(tdepth>0&&peek(ts)->kind!=TK_EOF){
+                Token *t2=peek(ts);
+                if(t2->kind==TK_LT) tdepth++;
+                else if(t2->kind==TK_GT) tdepth--;
+                advance(ts);
+            }
+            if(peek(ts)->kind==TK_LPAREN){ continue; } /* the template call: re-loop onto the LPAREN branch */
+            ts->i=save; /* not a template call — restore and let `<` be a comparison */
+            ot=peek(ts);
+        }
         if(ot->kind==TK_LPAREN){ /* calls may also target an atomic method (`acc->add`) */
             if(e->kind!=E_IDENT && !(e->kind==E_FIELD && e->field)) die(ot->line,"callee must be a function or method name");
             advance(ts); Expr *n=E(E_CALL,ot->line,ot->col); n->name=e->kind==E_IDENT?e->name:e->field; if(e->kind!=E_IDENT)n->callee=e;
@@ -718,7 +733,32 @@ void parse_struct(TokStream *ts, Program *prog){
               peek(ts)->kind==TK_KW_CENTROID||peek(ts)->kind==TK_KW_SAMPLE)
             advance(ts); /* HLSL field storage/interpolation modifiers */
         Type ty=parse_type(ts); if(ty.is_ptr) die(peek(ts)->line,"pointer fields unsupported");
+        int was_method=0;
         do{ Token *fn=peek(ts); expect_name(ts,"field name");
+            int is_oper = fn && !strcmp(fn->text,"operator") && (ts->i+1<ts->n) && ts->toks[ts->i+1].kind!=TK_IDENT;
+            if(peek(ts)->kind==TK_LPAREN || is_oper){
+                /* struct method with a complex (template-instantiation) return
+                 * type — the (i+1)==IDENT heuristic misses `TDual<T> f(...)`;
+                 * `operator+`/`operator-` lex as IDENT PLUS/MINUS (skip the
+                 * operator token, then the signature follows) */
+                if(is_oper) advance(ts);
+                int mdepth=0;
+                do{ Token *t=peek(ts);
+                    if(t->kind==TK_LPAREN)mdepth++;
+                    else if(t->kind==TK_RPAREN)mdepth--;
+                    if(t->kind==TK_EOF) die(t->line,"unterminated method signature");
+                    advance(ts); } while(mdepth>0);
+                if(peek(ts)->kind==TK_LBRACE){
+                    int bdepth=0;
+                    do{ Token *t=peek(ts);
+                        if(t->kind==TK_LBRACE)bdepth++;
+                        else if(t->kind==TK_RBRACE)bdepth--;
+                        if(t->kind==TK_EOF) die(t->line,"unterminated method body");
+                        advance(ts); } while(bdepth>0);
+                } else if(peek(ts)->kind==TK_SEMI) advance(ts);
+                was_method=1;
+                break;
+            }
             /* optional HLSL array extent BEFORE the semantic: `uint4 Verts[3] : CONTROLPOINTS;` */
             if(accept(ts,TK_LBRACK)){ ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
                 if(accept(ts,TK_LBRACK)){ ty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); } }
@@ -745,7 +785,9 @@ void parse_struct(TokStream *ts, Program *prog){
             if(accept(ts,TK_LBRACK)){ ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
                 if(accept(ts,TK_LBRACK)){ ty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); } }
             if(n==cap){cap=cap?cap*2:8;f=realloc(f,cap*sizeof(Field));} f[n++]=(Field){strdup(fn->text),ty,attr,attr_idx,fsem};
-        } while(accept(ts,TK_COMMA)); expect(ts,TK_SEMI,";");
+        } while(accept(ts,TK_COMMA));
+        if(!was_method) expect(ts,TK_SEMI,";");
+        was_method=0;
     }
     expect(ts,TK_RBRACE,"}"); expect(ts,TK_SEMI,";");
     g_tvar=NULL; /* template type parameter ends with the struct body */

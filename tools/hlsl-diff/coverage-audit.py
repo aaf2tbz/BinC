@@ -111,7 +111,7 @@ def guess_entry(src):
 
 
 def main():
-    outmd = sys.argv[1]
+    outmd = sys.argv[1] if len(sys.argv) > 1 else "build/hlsl-diff/coverage.md"
     limit = 0
     for a in sys.argv[2:]:
         if a.startswith("--limit="):

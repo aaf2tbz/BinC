@@ -313,7 +313,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
          * a dedicated spell table; type them so overload rankers see the
          * right width instead of T_INT32 */
         { static const char *scalars[]={"dot","length","distance",NULL};
-          static const char *width_of_arg[]={"normalize","reflect","clamp","lerp","mix","step","smoothstep","fract","frac","mod","radians","degrees","sign","cross",NULL};
+          static const char *width_of_arg[]={"normalize","rcp","reflect","clamp","lerp","mix","step","smoothstep","fract","frac","mod","radians","degrees","sign","cross",NULL};
           int matched=0;
           for(int si=0;scalars[si]&&!matched;si++) if(!strcmp(scalars[si],e->name)){ out->kind=T_FLOAT; out->vecn=0; matched=1; }
           for(int si=0;width_of_arg[si]&&!matched;si++) if(!strcmp(width_of_arg[si],e->name)){
@@ -684,7 +684,7 @@ static const char *spread(CG *c, const char *v, int w, int n){
 /* returns the result register, or NULL if `e->name` is not a composite builtin */
 static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
     const char *nm=e->name;
-    static const char *names[]={"dot","cross","length","distance","normalize","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","fmod","radians","degrees","saturate","abs","min","max","mul","inverse","asfloat","asuint","asint"};
+    static const char *names[]={"dot","cross","length","distance","normalize","rcp","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","fmod","radians","degrees","saturate","abs","min","max","mul","inverse","asfloat","asuint","asint"};
     int hit=0; for(size_t i=0;i<sizeof names/sizeof *names;i++) if(!strcmp(names[i],nm)){ hit=1; break; }
     if(!hit) return NULL;
     if(e->nargs<1||e->nargs>3) die(0,"%s: wrong number of arguments",nm);
@@ -872,6 +872,12 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
         const char *len=n>1?splat(c,r,"float",n):r;
         *k=VK_F32; c->rvw=n>1?n:0;
         return vbin(c,"fdiv fast",va,len,n);
+    }
+    if(!strcmp(nm,"rcp")){ /* HLSL rcp(x) = 1/x (per-element) */
+        if(e->nargs!=1) die(0,"rcp expects 1 argument");
+        const char *one=fconst(c,1.0);
+        *k=VK_F32; c->rvw=n>1?n:0;
+        return vbin(c,"fdiv fast",spread(c,one,0,n?n:1),av,n);
     }
     if(!strcmp(nm,"reflect")){
         if(e->nargs!=2) die(0,"reflect expects 2 arguments");
@@ -2781,8 +2787,8 @@ void emit_air(FILE *out, Program *prog){
         if(cd->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",cd->ty.struct_name);
         else ll_of(ll,sizeof ll,cd->ty.kind,cd->mut?cd->ty.vecn:0);
         char val[64];
-        if(cd->mut) snprintf(val,sizeof val,"zeroinitializer");
-        else if(cd->ty.kind==T_STRUCT) snprintf(val,sizeof val,"zeroinitializer");
+        if(cd->ty.kind==T_STRUCT) snprintf(val,sizeof val,"zeroinitializer");
+        else if(cd->ty.vecn>1) snprintf(val,sizeof val,"zeroinitializer");
         else if(cd->ty.kind==T_BOOL) snprintf(val,sizeof val,"%s",cd->ival?"true":"false");
         else if(cd->ty.kind==T_FLOAT||cd->ty.kind==T_HALF){
             float fv=(float)(cd->is_int?(double)cd->ival:cd->fval); unsigned bits; memcpy(&bits,&fv,4);

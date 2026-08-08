@@ -381,6 +381,15 @@ static void ra_block(Block *b, const char *const *res, size_t nres){
 static int refs_expr(Expr *e, const char *name){
     if(!e) return 0;
     if(e->kind==E_IDENT&&e->name&&!strcmp(e->name,name)) return 1;
+    if(e->kind==E_IDENT&&e->name){
+        /* a bare cbuffer-field reference (HLSL cbuffer members are module
+         * globals): the access requires the cbuffer's resource param */
+        char tag[64]; snprintf(tag,sizeof tag,"%s$cb",name);
+        for(size_t i=0;i<g_prog.nstructs;i++)
+            if(!strcmp(g_prog.structs[i].tag,tag))
+                for(size_t f=0;f<g_prog.structs[i].nfields;f++)
+                    if(!strcmp(g_prog.structs[i].fields[f].name,e->name)) return 1;
+    }
     if(e->kind==E_CALL&&e->name&&!e->callee){
         /* a call forwards the callee's resource params, so the caller must
          * carry them too (transitive resource requirement) */

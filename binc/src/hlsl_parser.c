@@ -234,6 +234,21 @@ HLSLProg hlsl_parse(TokStream *ts){
             if(peek(ts)->kind==TK_SEMI) advance(ts);
             continue;
         }
+        if(kt->kind==TK_KW_TEMPLATE){
+            /* HLSL2021 template decl: skip the template<...> header, then
+             * parse the struct/function on the next iteration (tvar
+             * references fall back to generic struct typing) */
+            advance(ts); /* template */
+            expect(ts,TK_LT,"<");
+            int tdepth=1;
+            while(tdepth>0&&peek(ts)->kind!=TK_EOF){
+                Token *t=peek(ts);
+                if(t->kind==TK_LT) tdepth++;
+                else if(t->kind==TK_GT) tdepth--;
+                advance(ts);
+            }
+            continue;
+        }
 
         /* D3D9 effect globals: `sampler X = sampler_state {...};` and
          * `texture X <...> : register(...);` — the sampler_state block carries
