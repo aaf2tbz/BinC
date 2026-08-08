@@ -116,6 +116,7 @@ extern int g_last_line, g_last_col, g_err_count;
 /* when set, die() reports and longjmps to the recovery point instead of exiting */
 extern jmp_buf *g_recover;
 extern int g_uses_discard;
+extern int g_uses_bitintrin;
 Program parse_program(TokStream *ts);
 /* ---- shared parser API (also used by the HLSL frontend) ---- */
 Token *peek(TokStream *ts); Token *advance(TokStream *ts);

@@ -315,10 +315,28 @@ static int cast_type_start(TokStream *ts){
     TokKind k=(ts->i+1<ts->n)?ts->toks[ts->i+1].kind:TK_EOF;
     if(k==TK_IDENT&&g_tvar&&!strcmp(ts->toks[ts->i+1].text,g_tvar)) return 1; /* (T) in a template body */
     if(k==TK_IDENT&&is_stag(ts->toks[ts->i+1].text)) return 1; /* (S) struct cast */
+    /* vector-type idents: half3/float4x3/min16float2 — the lexer emits the
+     * whole spelling as one ident (parse_type accepts them) */
+    if(k==TK_IDENT){
+        const char *tx=ts->toks[ts->i+1].text;
+        const char *bases[]={"min16float","min10float","min16int","min16uint","float","half","int","uint","bool","dword",NULL};
+        for(int b=0;bases[b];b++){
+            size_t bl=strlen(bases[b]);
+            if(!strncmp(tx,bases[b],bl)&&tx[bl]>='1'&&tx[bl]<='4'&&(tx[bl+1]=='\0'||tx[bl+1]=='x')) return 1;
+        }
+    }
     /* unknown struct cast `(ViewState)0.0f` (struct from a dropped include):
      * treat as a cast only when the operand is a literal — never steal
-     * parenthesized variables like `(bits) & ...` */
-    if(k==TK_IDENT&&(ts->i+3<ts->n)&&ts->toks[ts->i+2].kind==TK_RPAREN&&(ts->toks[ts->i+3].kind==TK_FCONST||ts->toks[ts->i+3].kind==TK_ICONST||ts->toks[ts->i+3].kind==TK_MINUS)) return 1;
+     * parenthesized variables like `(bits) & ...`. An ident operand counts
+     * when it ends the expression (statement/arg/close paren): `(S)Ident;` */
+    if(k==TK_IDENT&&(ts->i+3<ts->n)&&ts->toks[ts->i+2].kind==TK_RPAREN){
+        TokKind ok3=ts->toks[ts->i+3].kind;
+        if(ok3==TK_FCONST||ok3==TK_ICONST||ok3==TK_MINUS) return 1;
+        if(ok3==TK_IDENT){
+            TokKind after=(ts->i+4<ts->n)?ts->toks[ts->i+4].kind:TK_EOF;
+            if(after==TK_SEMI||after==TK_RPAREN||after==TK_COMMA) return 1;
+        }
+    }
     return k==TK_KW_FLOAT||k==TK_KW_HALF||k==TK_KW_INT||k==TK_KW_UINT||k==TK_KW_BOOL||k==TK_KW_MAT;
 }
 static Expr *parse_unary(TokStream *ts){
@@ -467,6 +485,34 @@ Stmt parse_stmt(TokStream *ts){
             else if(t->kind==TK_RBRACK)depth--;
             if(t->kind==TK_EOF) die(t->line,"unterminated attribute");
             advance(ts); } while(depth>0);
+    }
+    /* UE loop/branch attributes that stay bare idents when the SCW defines
+     * are absent (the standalone Random.ush etc. don't include Platform.ush):
+     * UNROLL/LOOP/BRANCH/FLATTEN/ALLOW_UAV_CONDITION before for/while/if;
+     * UNROLL_N(N) too */
+    while(peek(ts)->kind==TK_IDENT && (!strcmp(peek(ts)->text,"UNROLL")||!strcmp(peek(ts)->text,"UNROLL_N")||
+                                       !strcmp(peek(ts)->text,"LOOP")||!strcmp(peek(ts)->text,"BRANCH")||
+                                       !strcmp(peek(ts)->text,"FLATTEN")||!strcmp(peek(ts)->text,"ALLOW_UAV_CONDITION"))){
+        advance(ts);
+        if(peek(ts)->kind==TK_LPAREN){ int d=0;
+            do{ Token *t=peek(ts);
+                if(t->kind==TK_LPAREN)d++;
+                else if(t->kind==TK_RPAREN)d--;
+                if(t->kind==TK_EOF) die(t->line,"unterminated attribute args");
+                advance(ts); } while(d>0); }
+    }
+    /* D3D9-era inline assembly: `asm { tfetch2D ... }` (Fxaa3_11) — skip */
+    if(peek(ts)->kind==TK_IDENT&&!strcmp(peek(ts)->text,"asm")){
+        Token *at=peek(ts); advance(ts);
+        if(peek(ts)->kind==TK_LBRACE){
+            int depth=0;
+            do{ Token *t=peek(ts);
+                if(t->kind==TK_LBRACE)depth++;
+                else if(t->kind==TK_RBRACE)depth--;
+                if(t->kind==TK_EOF) die(t->line,"unterminated asm block");
+                advance(ts); } while(depth>0);
+        }
+        Stmt st={0}; st.kind=S_BLOCK; st.line=at->line; st.col=at->col; return st;
     }
     Token *kt=peek(ts);
     if(kt->kind==TK_SEMI){ advance(ts); Stmt st={0}; st.kind=S_BLOCK; st.line=kt->line; st.col=kt->col; return st; } /* empty statement `;` */

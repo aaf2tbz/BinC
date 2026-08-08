@@ -63,3 +63,35 @@ diff-suite, diff-nbody, test-lit 67.6%, test-ue, test-fuzz)
 - [x] every row triaged (parser gap / unsupported-by-design / harness artifact)
 - [x] top cross-family buckets fixed (see table above)
 - [x] this file published
+
+## Phase 2: UE corpus (`ue-audit.py`, 1,146 shaders)
+
+The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
+(`tools/hlsl-diff/ue-audit.py --stage-all`, SM6 defines, `-D WSVECTOR_IS_TILEOFFSET`).
+
+| metric | value |
+|---|---|
+| baseline (entry mode, pre-Phase-2) | 11.3% parse acceptance |
+| after the SCW-stub + LWC define batch | 50.4% |
+| after templates + HLSL2021 + bit intrinsics | (see the live `build/hlsl-diff/ue-audit.md`) |
+| crashes/hangs | 0 |
+
+Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
+end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced
+goldens: `goldens/basepass` (packed cbuffers, LWC tile-offset, front-facing,
+default params, matrix by-value) and `goldens/uecompute` (groupshared +
+barrier) — both in the gate suite.
+
+Phase-2 frontend work landed in `f844cb6`/`9d87e8b`/`fc8d814`:
+- C99 6.10.3.4 macro own-name suppression (INVARIANT nesting), `#pragma once`
+- LWC tile-offset mode (`WSVECTOR_IS_TILEOFFSET`) + `mad`/`round`/`rcp`
+- HLSL2021 templates: header skip, templated methods (`operator+`), explicit
+  template-arg calls, tvar-typed overload resolution
+- SCW-generated stubs (`Engine/Generated/…`, installer:
+  `tools/hlsl-diff/ue-stubs-install.sh`), `%{name}` substitution, default
+  params, inout-arg-index-aware rewrites, AIR metadata/pointer/array-shape
+  fixes (struct tags, addrspace(2), packed `[3 x float]` loads)
+- SM6 bit intrinsics `firstbithigh`/`firstbitlow`/`countbits`
+  (`llvm.ctlz/cttz/ctpop`)
+- nbody differential green: mutable static globals now emit their
+  initializers (the gravity sim was zero-mass)

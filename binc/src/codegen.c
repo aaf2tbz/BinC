@@ -315,8 +315,11 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
         { static const char *scalars[]={"dot","length","distance",NULL};
           static const char *width_of_arg[]={"normalize","rcp","reflect","clamp","lerp","mix","step","smoothstep","fract","frac","mod","radians","degrees","sign","cross",NULL};
           int matched=0;
-          for(int si=0;scalars[si]&&!matched;si++) if(!strcmp(scalars[si],e->name)){ out->kind=T_FLOAT; out->vecn=0; matched=1; }
-          for(int si=0;width_of_arg[si]&&!matched;si++) if(!strcmp(width_of_arg[si],e->name)){
+          static const char *int_scalars[]={"firstbithigh","firstbitlow","countbits",NULL};
+          for(int si=0;int_scalars[si]&&!matched;si++) if(!strcmp(int_scalars[si],e->name)){ out->kind=T_INT32; out->vecn=0; matched=1; }
+          int matched2=0;
+          for(int si=0;scalars[si]&&!matched2;si++) if(!strcmp(scalars[si],e->name)){ out->kind=T_FLOAT; out->vecn=0; matched2=1; }
+          for(int si=0;width_of_arg[si]&&!matched2;si++) if(!strcmp(width_of_arg[si],e->name)){
               if(e->nargs>=1){ expr_type_of(c,e->args[0],out); }
               else { out->kind=T_FLOAT; }
               matched=1; }
@@ -1935,6 +1938,33 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         }
         /* composite math builtins (dot, cross, length, clamp, mix, ...) */
         { const char *cm=gen_composite_math(c,e,k); if(cm) return cm; }
+        /* HLSL SM6 bit intrinsics (UE bindless/bit helpers): firstbithigh,
+         * firstbitlow, countbits — via the LLVM ctlz/cttz/ctpop intrinsics
+         * (the AIR frontend accepts them; ctlz(0)=32 gives firstbithigh(0)=-1) */
+        if(!strcmp(e->name,"firstbithigh")||!strcmp(e->name,"firstbitlow")||!strcmp(e->name,"countbits")){
+            if(e->nargs!=1) die(0,"%s expects 1 argument",e->name);
+            ValKind ak; const char *av=gen_rval(c,e->args[0],&ak);
+            if(ak!=VK_I32) av=coerce(c,av,ak,VK_I32);
+            const char *r=newtmp(c);
+            if(!strcmp(e->name,"firstbithigh")){
+                g_uses_bitintrin=1;
+                const char *z=newtmp(c);
+                emit(c,"  %s = call i32 @llvm.ctlz.i32(i32 %s, i1 false)\n",z,av);
+                emit(c,"  %s = sub i32 31, %s\n",r,z);
+            } else if(!strcmp(e->name,"firstbitlow")){
+                g_uses_bitintrin=1;
+                const char *is0=newtmp(c);
+                emit(c,"  %s = icmp eq i32 %s, 0\n",is0,av);
+                const char *ct=newtmp(c);
+                emit(c,"  %s = call i32 @llvm.cttz.i32(i32 %s, i1 false)\n",ct,av);
+                emit(c,"  %s = select i1 %s, i32 -1, i32 %s\n",r,is0,ct);
+            } else {
+                g_uses_bitintrin=1;
+                emit(c,"  %s = call i32 @llvm.ctpop.i32(i32 %s)\n",r,av);
+            }
+            *k=VK_I32; c->rvw=0;
+            return r;
+        }
         /* user function? the whole Program is visible, so definition order doesn't matter.
          * HLSL overloads: rank-based selection (exact > int→float promotion >
          * scalar→vector splat); the best-ranked candidate wins. */
@@ -2597,6 +2627,7 @@ static void fn_ptr_str(Function *fn,char *buf,size_t n){
 char g_air_triple[64]="air64_v29-apple-macosx27.0.0";
 int g_air_sdk=27, g_air_minor=9;
 int g_uses_discard=0;
+int g_uses_bitintrin=0;
 void binc_set_air(const char *triple, int sdk, int minor){
     snprintf(g_air_triple,sizeof g_air_triple,"%s",triple); g_air_sdk=sdk; g_air_minor=minor; }
 /* a struct type with no fields (UE stubs like FStereoVSToPS): contributes no
@@ -3022,6 +3053,11 @@ void emit_air(FILE *out, Program *prog){
     }
     g_recover=NULL;
     if(g_uses_discard) fprintf(out,"declare void @air.discard_fragment() local_unnamed_addr\n");
+    if(g_uses_bitintrin){
+        fprintf(out,"declare i32 @llvm.ctlz.i32(i32, i1) local_unnamed_addr\n");
+        fprintf(out,"declare i32 @llvm.cttz.i32(i32, i1) local_unnamed_addr\n");
+        fprintf(out,"declare i32 @llvm.ctpop.i32(i32) local_unnamed_addr\n");
+    }
     if(atomic_add_used[0]) fprintf(out,"declare float @air.atomic.global.add.f32(float addrspace(1)*, float, i32, i32, i32, i1) local_unnamed_addr\n");
     if(atomic_add_used[1]) fprintf(out,"declare i32 @air.atomic.global.add.i32(i32 addrspace(1)*, i32, i32, i32, i32, i1) local_unnamed_addr\n");
     /* texture intrinsics + the opaque texture/sampler types */
