@@ -26,6 +26,8 @@ typedef struct {
     TypeKind atomic_base; /* T_ATOMIC's scalar payload */
     TypeKind tex_elt; /* T_TEXTURE's texel scalar type */
     int      tex_cube; /* T_TEXTURE: cube map (sample with float3 direction) */
+    int      tex_dim;  /* T_TEXTURE coordinate dimension: 0/2, 1, or 3 */
+    int      tex_array; /* T_TEXTURE: array texture; final coordinate is the layer */
     int      array_n, array_m; /* threadgroup array extents, if declared */
 } Type;
 

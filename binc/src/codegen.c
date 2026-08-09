@@ -631,7 +631,21 @@ static const char *swizzle_read(CG *c, const char *vec, const char *vty, const c
 static int builtin_used[sizeof builtins/sizeof *builtins];
 static void mark_builtin(const char *name){ for(size_t i=0;i<sizeof builtins/sizeof *builtins;i++) if(!strcmp(builtins[i].name,name)){ builtin_used[i]=1; return; } }
 static int atomic_add_used[3];
-static int tex_read_used[4], tex_write_used[4], tex_sample_used[4], tex_sample_cube_used[4], get_samp_used;
+static int tex_read_used[4], tex_write_used[4], tex_sample_used[4], tex_sample_cube_used[4], tex_sample_1d_used[4], tex_sample_3d_used[4], tex_sample_2d_array_used[4], get_samp_used;
+static const char *tex_air_type(const Type *ty){
+    if(ty->tex_cube) return "%struct._texture_2d_t"; /* existing cube ABI */
+    if(ty->tex_array && ty->tex_dim==2) return "%struct._texture_2d_array_t";
+    if(ty->tex_dim==1) return "%struct._texture_1d_t";
+    if(ty->tex_dim==3) return "%struct._texture_3d_t";
+    return "%struct._texture_2d_t";
+}
+static const char *tex_meta_type(const Type *ty){
+    if(ty->tex_cube) return "texturecube<float, sample>";
+    if(ty->tex_array && ty->tex_dim==2) return "texture2d_array<float, sample>";
+    if(ty->tex_dim==1) return "texture1d<float, sample>";
+    if(ty->tex_dim==3) return "texture3d<float, sample>";
+    return "texture2d<float, sample>";
+}
 static void tex_kinds(TypeKind et, const char **elt, const char **vec, const char **suf, const char **an){
     if(et==T_HALF){ *elt="half"; *vec="<4 x half>"; *suf="v4f16"; *an="half4"; }
     else if(et==T_INT32){ *elt="i32"; *vec="<4 x i32>"; *suf="v4i32"; *an="int4"; }
@@ -1790,20 +1804,38 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         int si; if(e->args[0]->kind!=E_IDENT||resolve(c,e->args[0]->name,&si)!=R_SAMPLER)
                             die(0,"texture sample's first argument must be a sampler parameter");
                         ValKind uk; const char *uv=gen_rval(c,e->args[1],&uk);
-                        if(tp->ty.tex_cube){ if(c->rvw!=3) die(0,"cube sample direction must be a float3"); }
-                        else if(c->rvw!=2) die(0,"texture sample uv must be a float2");
+                        int uvw=c->rvw;
+                        if(uk!=VK_F32) die(0,"texture sample coordinate must be float");
                         const char *lod=fconst(c,0.0);
                         if(e->nargs==3){ ValKind lk; lod=gen_rval(c,e->args[2],&lk);
                             if(c->rvw) die(0,"texture sample lod must be a scalar"); }
-                        tex_sample_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
-                        if(tp->ty.tex_cube) tex_sample_cube_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
-                        char sname[64]; snprintf(sname,sizeof sname,"%%_%s",e->args[0]->name);
+                        int ti_kind=tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0;
                         const char *r=newtmp(c);
+                        char sname[64]; snprintf(sname,sizeof sname,"%%_%s",e->args[0]->name);
                         if(tp->ty.tex_cube){
+                            if(uvw!=3) die(0,"cube sample direction must be a float3");
+                            tex_sample_cube_used[ti_kind]=1;
                             /* probed: air.sample_texture_cube.<suf>(tex, samp, <3 x float>, i1, lod, grad, i32) */
-                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_cube.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, i1 false, float %s, float %s, i32 0)\n",r,vec,suf,tname,sname,uv,lod,fconst(c,0.0));
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_cube.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, i1 false, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod,fconst(c,0.0));
+                        } else if(tp->ty.tex_dim==1){
+                            if(uvw) die(0,"texture1d sample coordinate must be a float");
+                            tex_sample_1d_used[ti_kind]=1;
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_1d.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, float %s, i1 false, i32 0, i1 true, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod,fconst(c,0.0));
+                        } else if(tp->ty.tex_dim==3){
+                            if(uvw!=3) die(0,"texture3d sample coordinate must be a float3");
+                            tex_sample_3d_used[ti_kind]=1;
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_3d.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, i1 true, <3 x i32> zeroinitializer, i1 true, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod,fconst(c,0.0));
+                        } else if(tp->ty.tex_array&&tp->ty.tex_dim==2){
+                            if(uvw!=3) die(0,"texture2d array sample coordinate must be a float3");
+                            const char *uv2=newtmp(c); emit(c,"  %s = shufflevector <3 x float> %s, <3 x float> undef, <2 x i32> <i32 0, i32 1>\n",uv2,uv);
+                            const char *lf=newtmp(c); emit(c,"  %s = extractelement <3 x float> %s, i32 2\n",lf,uv);
+                            const char *layer=newtmp(c); emit(c,"  %s = fptosi float %s to i32\n",layer,lf);
+                            tex_sample_2d_array_used[ti_kind]=1;
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d_array.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i32 %s, i1 true, <2 x i32> zeroinitializer, i1 true, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv2,layer,lod,fconst(c,0.0));
                         } else {
-                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i1 true, <2 x i32> zeroinitializer, i1 false, float %s, float %s, i32 0)\n",r,vec,suf,tname,sname,uv,lod,fconst(c,0.0));
+                            if(uvw!=2) die(0,"texture sample uv must be a float2");
+                            tex_sample_used[ti_kind]=1;
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i1 true, <2 x i32> zeroinitializer, i1 true, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod,fconst(c,0.0));
                         }
                         const char *v=newtmp(c);
                         emit(c,"  %s = extractvalue { %s, i8 } %s, 0\n",v,vec,r);
@@ -2788,7 +2820,7 @@ static void fn_ptr_str(Function *fn,char *buf,size_t n){
     for(size_t i=0;i<fn->nparams;i++){ Param *p=&fn->params[i]; if(p->ty.array_n)continue; if(emitted++)o+=snprintf(buf+o,n-o,", ");
         if(p->ty.kind==T_COORD){ char cl[32]; coord_ll(&p->ty,cl,sizeof cl); o+=snprintf(buf+o,n-o,"%s",cl); }
         else if(p->ty.kind==T_GRID_EXTENT) o+=snprintf(buf+o,n-o,"i32");
-        else if(p->ty.kind==T_TEXTURE) o+=snprintf(buf+o,n-o,"%%struct._texture_2d_t addrspace(1)*");
+        else if(p->ty.kind==T_TEXTURE) o+=snprintf(buf+o,n-o,"%s addrspace(1)*",tex_air_type(&p->ty));
         else if(p->ty.kind==T_SAMPLER) o+=snprintf(buf+o,n-o,"%%struct._sampler_t addrspace(2)*");
         else if(p->ty.is_ptr){ char elt[64]; if(p->ty.matn) mll_of(elt,sizeof elt,p->ty.matn,p->ty.matm); else type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
             o+=snprintf(buf+o,n-o,"%s addrspace(%d)*",elt,p->ty.as); }
@@ -2833,7 +2865,7 @@ static void stage_ptr_str(Function *fn,char *buf,size_t n){
         }
         char pl[64]; type_ll(pl,sizeof pl,p->ty.kind,p->ty.struct_name,p->ty.vecn);
         if(emitted++)o+=snprintf(buf+o,n-o,", ");
-        if(p->ty.kind==T_TEXTURE) o+=snprintf(buf+o,n-o,"%%struct._texture_2d_t addrspace(1)*");
+        if(p->ty.kind==T_TEXTURE) o+=snprintf(buf+o,n-o,"%s addrspace(1)*",tex_air_type(&p->ty));
         else if(p->ty.kind==T_SAMPLER) o+=snprintf(buf+o,n-o,"%%struct._sampler_t addrspace(2)*");
         else if(p->ty.is_ptr) o+=snprintf(buf+o,n-o,"%s addrspace(%d)*",pl,p->ty.as);
         else o+=snprintf(buf+o,n-o,"%s",pl);
@@ -2963,7 +2995,7 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
             continue;
         }
         if(p->ty.kind==T_TEXTURE){ /* probed: air.texture with access flags */
-            meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"air.sample\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->ty.tex_cube?"texturecube<float, sample>":"texture2d<float, sample>",p->name); }
+            meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"air.sample\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,tex_meta_type(&p->ty),p->name); }
         else if(p->ty.kind==T_SAMPLER){ /* probed: air.sampler */
             meta_emit(m,"!%d = !{i32 %d, !\"air.sampler\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,argi,p->name); }
         else if(fn->stage==ST_VERTEX && p->ty.as==AS_THREAD){ meta_emit(m,"!%d = !{i32 %d, !\"air.vertex_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",sm->argnode[argi],argi,p->name); }
@@ -3152,7 +3184,7 @@ void emit_air(FILE *out, Program *prog){
             if(p->ty.kind==T_COORD){ char cl[32]; coord_ll(&p->ty,cl,sizeof cl);
                 so+=snprintf(sig+so,sizeof sig-so,"%s noundef %%_%s",cl,p->name); }
             else if(p->ty.kind==T_GRID_EXTENT){ so+=snprintf(sig+so,sizeof sig-so,"i32 noundef %%_%s",p->name); }
-            else if(p->ty.kind==T_TEXTURE){ so+=snprintf(sig+so,sizeof sig-so,"%%struct._texture_2d_t addrspace(1)* nocapture %%_%s",p->name); }
+            else if(p->ty.kind==T_TEXTURE){ so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(1)* nocapture %%_%s",tex_air_type(&p->ty),p->name); }
             else if(p->ty.kind==T_SAMPLER){ so+=snprintf(sig+so,sizeof sig-so,"%%struct._sampler_t addrspace(2)* nocapture %%_%s",p->name); }
             else if(p->ty.is_ptr){ char elt[64]; type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
                 so+=snprintf(sig+so,sizeof sig-so,"%s addrspace(%d)* nocapture noundef %%_%s",elt,p->ty.as,p->name); }
@@ -3245,8 +3277,11 @@ void emit_air(FILE *out, Program *prog){
                 if(prog->funcs[fi].params[pi].ty.kind==T_TEXTURE||prog->funcs[fi].params[pi].ty.kind==T_SAMPLER){ any_tex_param=1; break; }
         if(get_samp_used||tex_read_used[0]||tex_read_used[1]||tex_read_used[2]||tex_read_used[3]||
            tex_write_used[0]||tex_write_used[1]||tex_write_used[2]||tex_write_used[3]||
-           tex_sample_used[0]||tex_sample_used[1]||tex_sample_used[2]||tex_sample_used[3]||any_tex_param){
-        fprintf(out,"%%struct._texture_2d_t = type opaque\n%%struct._sampler_t = type opaque\n");
+           tex_sample_used[0]||tex_sample_used[1]||tex_sample_used[2]||tex_sample_used[3]||
+           tex_sample_1d_used[0]||tex_sample_1d_used[1]||tex_sample_1d_used[2]||tex_sample_1d_used[3]||
+           tex_sample_3d_used[0]||tex_sample_3d_used[1]||tex_sample_3d_used[2]||tex_sample_3d_used[3]||
+           tex_sample_2d_array_used[0]||tex_sample_2d_array_used[1]||tex_sample_2d_array_used[2]||tex_sample_2d_array_used[3]||any_tex_param){
+        fprintf(out,"%%struct._texture_2d_t = type opaque\n%%struct._texture_1d_t = type opaque\n%%struct._texture_3d_t = type opaque\n%%struct._texture_2d_array_t = type opaque\n%%struct._sampler_t = type opaque\n");
         if(get_samp_used) fprintf(out,"declare %%struct._sampler_t addrspace(2)* @air.get_read_sampler() local_unnamed_addr\n");
         static const char *sufs[4]={"v4f32","v4f16","v4i32","v4u32"};
         static const char *vecs[4]={"<4 x float>","<4 x half>","<4 x i32>","<4 x i32>"};
@@ -3254,6 +3289,9 @@ void emit_air(FILE *out, Program *prog){
             if(tex_read_used[i]) fprintf(out,"declare { %s, i8 } @air.read_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)*, <2 x i32>, <2 x i32>, i32, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_write_used[i]) fprintf(out,"declare void @air.write_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture, <2 x i32>, %s, i32, i32) local_unnamed_addr\n",sufs[i],vecs[i]);
             if(tex_sample_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, i1, <2 x i32>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
+            if(tex_sample_1d_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_1d.%s(%%struct._texture_1d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, float, i1, i32, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
+            if(tex_sample_3d_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_3d.%s(%%struct._texture_3d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, i1, <3 x i32>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
+            if(tex_sample_2d_array_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_2d_array.%s(%%struct._texture_2d_array_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, i32, i1, <2 x i32>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_sample_cube_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_cube.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
         }
         }

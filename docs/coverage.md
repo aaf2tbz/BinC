@@ -86,6 +86,7 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 | post-`3f2caf5` LWC/trunc sweep | **238/1,146 = 20.8%** (81 metallibs; ViewState stub gap found) |
 | post-`6065cd9` FOV-ViewState sweep | **604/1,146 = 52.7%** (81 metallibs; transform ViewState gap found) |
 | post-`9bed921` transform-ViewState sweep | **238/1,146 = 20.8%** (81 metallibs; const scalar swizzle gap found) |
+| post-`82d223e` const-swizzle sweep | **604/1,146 = 52.7%** (81 metallibs; texture-shape gap found) |
 | crashes/hangs | 0 |
 
 The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
@@ -135,7 +136,12 @@ are now present in the tracked stub; the canonical source advances past
 `MakeDFInverseMatrix`, and the next full sweep is pending. The `9bed921` sweep
 then reached UE's `MaxHalfFloat.xx` helpers: a const scalar swizzle was
 incorrectly routed as a writable lvalue. It now lowers as a value splat and is
-covered by a GPU differential; full gate revalidation is pending.
+covered by a GPU differential; full gate revalidation is pending. The
+`82d223e` re-sweep then reached shared 1D/3D/2D-array sample helpers. BinC
+now preserves texture dimension and array shape through parsing, AIR
+signatures, intrinsic selection, and stage metadata; a Metallib-backed UE
+frontend regression covers all three ABIs, and the canonical helper advances
+past the prior texture-shape diagnostics.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced

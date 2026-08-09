@@ -40,6 +40,9 @@ static Type hlsl_type(TokStream *ts){
            !strcmp(txt,"Texture1DArray")||!strcmp(txt,"RWTexture1DArray")||
            !strcmp(txt,"Texture2DMS")||!strcmp(txt,"Texture2DMSArray")){
             advance(ts); Type t={0}; t.kind=T_TEXTURE;
+            t.tex_dim=!strcmp(txt,"Texture1D")||!strcmp(txt,"RWTexture1D")||!strcmp(txt,"Texture1DArray")||!strcmp(txt,"RWTexture1DArray")?1:!strcmp(txt,"Texture3D")||!strcmp(txt,"RWTexture3D")?3:2;
+            t.tex_array=!strcmp(txt,"Texture1DArray")||!strcmp(txt,"RWTexture1DArray")||!strcmp(txt,"Texture2DArray")||!strcmp(txt,"RWTexture2DArray")||!strcmp(txt,"TextureCubeArray")||!strcmp(txt,"Texture2DMSArray");
+            t.tex_cube=!strcmp(txt,"TextureCube")||!strcmp(txt,"TextureCubeArray");
             if(accept(ts,TK_LT)){ Type et=parse_type(ts); t.tex_elt=et.kind;
                 if(accept(ts,TK_COMMA)){ /* Texture2DMS<T, S>: sample count */
                     Token *sc=peek(ts); expect(ts,TK_ICONST,"MS sample count"); (void)sc;
