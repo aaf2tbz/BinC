@@ -20,6 +20,10 @@ struct ViewState
     float4 ScreenPositionScaleBias;
     float4 ViewSizeAndInvSize;
     float4 BufferSizeAndInvSize;
+    // CommonViewUniformBuffer.ush uses xy as tan(FOV/2) and zw as its
+    // reciprocal for current and previous views.
+    float4 TanAndInvTanHalfFOV;
+    float4 PrevTanAndInvTanHalfFOV;
     FDFVector3 PreViewTranslation;
     FDFVector3 PrevPreViewTranslation;
     FDFVector3 WorldCameraOrigin;

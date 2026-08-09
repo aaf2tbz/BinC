@@ -83,6 +83,7 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 | post-`34da8c5` vector-index sweep | **604/1,146 = 52.7%** (81 metallibs) |
 | post-`23b2670` struct-tag sweep | **604/1,146 = 52.7%** (81 metallibs; vector-logical gap found) |
 | post-`6064080` vector-logical sweep | **604/1,146 = 52.7%** (81 metallibs; missing SCW LWC defines found) |
+| post-`3f2caf5` LWC/trunc sweep | **238/1,146 = 20.8%** (81 metallibs; ViewState stub gap found) |
 | crashes/hangs | 0 |
 
 The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
@@ -122,8 +123,10 @@ UE's componentwise `&&`, `||`, and `!` on bool vectors (366 rows); the AIR
 vector logical lowering and a Metallib-backed UE frontend regression are now
 in place. That sweep also revealed that the audit omitted three
 ShaderCompilerWorker LWC scale defines; they are now pinned at the 2^21 tile
-setting alongside a GPU-differential `trunc` lowering, with the next full sweep
-pending.
+setting alongside a GPU-differential `trunc` lowering. The `3f2caf5` sweep
+then exposed two CommonViewUniformBuffer fields absent from the reproducible
+SCW ViewState stub; those fields are now typed as `float4`, matching their
+xy/zw uses, and the next full sweep is pending.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced
