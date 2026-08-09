@@ -192,8 +192,11 @@ static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
                     const char *hit=strstr(s,defs[d].name);
                     if(!hit){ bput(&o2,s,strlen(s)); break; }
                     int lb=hit==s||!(isalnum((unsigned char)hit[-1])||hit[-1]=='_');
-                    if(!lb||hit[nl2]!='('){ bput(&o2,s,(size_t)(hit-s+nl2)); s=hit+nl2; continue; }
-                    const char *p=hit+nl2+1; int dep=1; const char *argstart=p; int found=0;
+                    /* C99 permits whitespace between a function-like macro name
+                     * and its opening parenthesis (UE uses `NAME  (...)`). */
+                    const char *call=hit+nl2; while(*call&&isspace((unsigned char)*call)) call++;
+                    if(!lb||*call!='('){ bput(&o2,s,(size_t)(hit-s+nl2)); s=hit+nl2; continue; }
+                    const char *p=call+1; int dep=1; const char *argstart=p; int found=0;
                     char argbuf[8][128]; int nargs=0;
                     for(; *p; p++){
                         if(*p=='(') dep++;

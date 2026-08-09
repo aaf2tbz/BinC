@@ -82,7 +82,9 @@ The follow-up sweep after `61f3b9c` verified that `f32tof16`/`f16tof32` no
 longer form an error bucket (the scalar/vector differential is green): it
 moved through to the next helper gap, `PackTileCoordXXbits` (378 files).
 Parse acceptance therefore remains **620/1,146 = 54.1%**, while metallib
-compiles increased from 80 to 81; both sweeps had zero crashes/hangs.
+compiles increased from 80 to 81; both sweeps had zero crashes/hangs. The
+follow-up `5ca96b3` sweep verified the exact UE CS-derivative marker fix: the
+`parse: expected ;` bucket fell from 100 to 99, with no crash/hang regression.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced
