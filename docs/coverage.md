@@ -78,6 +78,7 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 | initial post-`2ce7165` MakePrecise sweep | **242/1,146 = 21.1%** (81 metallibs; parser regression found) |
 | post-`5dfacf6` parenthesized-subtraction sweep | **611/1,146 = 53.3%** (81 metallibs) |
 | post-`4f2a000` simultaneous-macro sweep | **610/1,146 = 53.2%** (81 metallibs) |
+| post-`63cb878` sincos sweep | **610/1,146 = 53.2%** (81 metallibs) |
 | crashes/hangs | 0 |
 
 The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
@@ -102,8 +103,10 @@ an earlier argument when its source used a later formal's name
 (`INVARIANT_MUL(-Rhs.Low, Th)`). The simultaneous-substitution correction is
 differential-tested and restored the correct DoubleFloat expressions. The
 `4f2a000` sweep next made `sincos` (370 files) the dominant first error;
-scalar/vector out-parameter lowering is covered by a DXC→Metal differential and
-gate revalidation is in progress.
+scalar/vector out-parameter lowering is covered by a DXC→Metal differential.
+The `63cb878` sweep cleared that bucket and made `modf` (369 files) dominant;
+its truncation-toward-zero lowering and scalar/vector output handling are now
+differential-tested and gate revalidation is in progress.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced

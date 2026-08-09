@@ -2021,6 +2021,33 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             *k=VK_I32; c->rvw=0;
             return r;
         }
+        /* HLSL modf(x, out integer) returns x-trunc(x). AIR exposes floor and
+         * ceil rather than an out-parameter modf, so select ceil for negative
+         * lanes and floor otherwise to implement truncation toward zero. */
+        if(!strcmp(e->name,"modf")){
+            if(e->nargs!=2) die(0,"modf expects (x, out integer)");
+            ValKind ak; const char *x=gen_rval(c,e->args[0],&ak); int width=c->rvw;
+            if(ak!=VK_F32) die(0,"modf expects a float argument");
+            mark_builtin("floor"); mark_builtin("ceil");
+            int lanes=width?width:1;
+            const char *fl=elem_call(c,"air.fast_floor.f32",x,lanes,T_FLOAT,T_FLOAT);
+            const char *ce=elem_call(c,"air.fast_ceil.f32",x,lanes,T_FLOAT,T_FLOAT);
+            const char *integer=newtmp(c), *frac=newtmp(c);
+            if(width){
+                char ty[32], mty[32]; snprintf(ty,sizeof ty,"<%d x float>",width); snprintf(mty,sizeof mty,"<%d x i1>",width);
+                const char *mask=newtmp(c);
+                emit(c,"  %s = fcmp olt %s %s, zeroinitializer\n",mask,ty,x);
+                emit(c,"  %s = select %s %s, %s %s, %s %s\n",integer,mty,mask,ty,ce,ty,fl);
+                emit(c,"  %s = fsub fast %s %s, %s\n",frac,ty,x,integer);
+            } else {
+                const char *mask=newtmp(c);
+                emit(c,"  %s = fcmp olt float %s, 0.0\n",mask,x);
+                emit(c,"  %s = select i1 %s, float %s, float %s\n",integer,mask,ce,fl);
+                emit(c,"  %s = fsub fast float %s, %s\n",frac,x,integer);
+            }
+            store_float_out(c,e->args[1],integer,width);
+            *k=VK_F32; c->rvw=width; return frac;
+        }
         /* HLSL sincos(x, out sin, out cos): calculate the two AIR intrinsics
          * and write their results to scalar/vector lvalues. */
         if(!strcmp(e->name,"sincos")){
