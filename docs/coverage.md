@@ -73,8 +73,15 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 |---|---|
 | baseline (entry mode, pre-Phase-2) | 11.3% parse acceptance |
 | after the SCW-stub + LWC define batch | 50.4% |
-| after templates + HLSL2021 + bit intrinsics | (see the live `build/hlsl-diff/ue-audit.md`) |
+| post-`2eaef84` stage-all sweep (before binary16 pack/unpack) | **620/1,146 = 54.1%** |
 | crashes/hangs | 0 |
+
+The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
+showed 40 additional parse/codegen-stage acceptances over the 50.6% report.
+Its remaining leading blocker is `f32tof16` (379 files). The scalar/vector
+`f32tof16`/`f16tof32` implementation and differential fixture are pending the
+next explicitly authorized full sweep; do not attribute an acceptance increase
+to them until that sweep completes.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced

@@ -317,6 +317,11 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
           int matched=0;
           static const char *int_scalars[]={"firstbithigh","firstbitlow","countbits",NULL};
           for(int si=0;int_scalars[si]&&!matched;si++) if(!strcmp(int_scalars[si],e->name)){ out->kind=T_INT32; out->vecn=0; matched=1; }
+          if(!strcmp(e->name,"f32tof16")||!strcmp(e->name,"f16tof32")){
+              Type at={0}; if(e->nargs) expr_type_of(c,e->args[0],&at);
+              out->kind=!strcmp(e->name,"f32tof16")?T_UINT32:T_FLOAT;
+              out->vecn=at.vecn; matched=1;
+          }
           int matched2=0;
           for(int si=0;scalars[si]&&!matched2;si++) if(!strcmp(scalars[si],e->name)){ out->kind=T_FLOAT; out->vecn=0; matched2=1; }
           for(int si=0;width_of_arg[si]&&!matched2;si++) if(!strcmp(width_of_arg[si],e->name)){
@@ -1938,6 +1943,35 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         }
         /* composite math builtins (dot, cross, length, clamp, mix, ...) */
         { const char *cm=gen_composite_math(c,e,k); if(cm) return cm; }
+        /* HLSL SM6 binary16 pack/unpack. f32tof16 returns the low 16 IEEE-754
+         * binary16 bits in a uint; f16tof32 consumes those low bits. Keep the
+         * intermediate as a real LLVM half so rounding matches hardware. */
+        if(!strcmp(e->name,"f32tof16")||!strcmp(e->name,"f16tof32")){
+            if(e->nargs!=1) die(0,"%s expects 1 argument",e->name);
+            ValKind ak; const char *av=gen_rval(c,e->args[0],&ak); int vw=c->rvw;
+            char fty[32], hty[32], ity[32];
+            if(vw){
+                snprintf(fty,sizeof fty,"<%d x float>",vw);
+                snprintf(hty,sizeof hty,"<%d x half>",vw);
+                snprintf(ity,sizeof ity,"<%d x i16>",vw);
+            } else { strcpy(fty,"float"); strcpy(hty,"half"); strcpy(ity,"i16"); }
+            if(!strcmp(e->name,"f32tof16")){
+                if(ak!=VK_F32) die(0,"f32tof16 expects a float argument");
+                const char *h=newtmp(c), *bits16=newtmp(c), *r=newtmp(c);
+                emit(c,"  %s = fptrunc %s %s to %s\n",h,fty,av,hty);
+                emit(c,"  %s = bitcast %s %s to %s\n",bits16,hty,h,ity);
+                if(vw) emit(c,"  %s = zext %s %s to <%d x i32>\n",r,ity,bits16,vw);
+                else emit(c,"  %s = zext i16 %s to i32\n",r,bits16);
+                *k=VK_U32; c->rvw=vw; return r;
+            }
+            if(ak!=VK_I32&&ak!=VK_U32) die(0,"f16tof32 expects a uint argument");
+            const char *bits16=newtmp(c), *h=newtmp(c), *r=newtmp(c);
+            if(vw) emit(c,"  %s = trunc <%d x i32> %s to %s\n",bits16,vw,av,ity);
+            else emit(c,"  %s = trunc i32 %s to i16\n",bits16,av);
+            emit(c,"  %s = bitcast %s %s to %s\n",h,ity,bits16,hty);
+            emit(c,"  %s = fpext %s %s to %s\n",r,hty,h,fty);
+            *k=VK_F32; c->rvw=vw; return r;
+        }
         /* HLSL SM6 bit intrinsics (UE bindless/bit helpers): firstbithigh,
          * firstbitlow, countbits — via the LLVM ctlz/cttz/ctpop intrinsics
          * (the AIR frontend accepts them; ctlz(0)=32 gives firstbithigh(0)=-1) */
