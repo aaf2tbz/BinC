@@ -75,6 +75,7 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 | after the SCW-stub + LWC define batch | 50.4% |
 | post-`2eaef84` stage-all sweep (before binary16 pack/unpack) | **620/1,146 = 54.1%** |
 | post-`3e93d07` macro-expansion sweep | **611/1,146 = 53.3%** (81 metallibs) |
+| initial post-`2ce7165` MakePrecise sweep | **242/1,146 = 21.1%** (81 metallibs; parser regression found) |
 | crashes/hangs | 0 |
 
 The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
@@ -90,7 +91,11 @@ The `3e93d07` whitespace-before-`(` macro fix removed the 378-file
 `PackTileCoordXXbits` first-error bucket, exposing `MakePrecise` (369 files)
 as the next UE helper blocker. Its 53.3% acceptance metric has the same 81
 metallib outputs; the lower score reflects fewer paths remaining classified as
-codegen-stage gaps after deeper macro expansion.
+codegen-stage gaps after deeper macro expansion. The initial `2ce7165` sweep
+then exposed a parser ambiguity: `(S) - (Lhs)` was misread as an unknown-struct
+cast of negative parentheses, producing 287 first-error rows and lowering the
+reported metric to 21.1%. The targeted parser correction is differential-tested
+and gate-green; its full re-sweep is pending.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced

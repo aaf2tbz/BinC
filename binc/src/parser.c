@@ -331,7 +331,11 @@ static int cast_type_start(TokStream *ts){
      * when it ends the expression (statement/arg/close paren): `(S)Ident;` */
     if(k==TK_IDENT&&(ts->i+3<ts->n)&&ts->toks[ts->i+2].kind==TK_RPAREN){
         TokKind ok3=ts->toks[ts->i+3].kind;
-        if(ok3==TK_FCONST||ok3==TK_ICONST||ok3==TK_MINUS) return 1;
+        if(ok3==TK_FCONST||ok3==TK_ICONST) return 1;
+        /* `(Unknown)-1` is a negative literal cast; `(value) - (other)`
+         * is subtraction and must stay a parenthesized expression. */
+        if(ok3==TK_MINUS&&(ts->i+4<ts->n)&&
+           (ts->toks[ts->i+4].kind==TK_FCONST||ts->toks[ts->i+4].kind==TK_ICONST)) return 1;
         if(ok3==TK_IDENT){
             TokKind after=(ts->i+4<ts->n)?ts->toks[ts->i+4].kind:TK_EOF;
             if(after==TK_SEMI||after==TK_RPAREN||after==TK_COMMA) return 1;
