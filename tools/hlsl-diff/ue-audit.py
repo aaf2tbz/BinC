@@ -23,6 +23,12 @@ UE_DIR = os.path.join(ROOT, "third_party/UnrealEngine")
 UE_DEFS = ["-D", "COMPILER_DXC", "-D", "PLATFORM_WINDOWS", "-D", "SM6_PROFILE",
            "-D", "COMPILER_SUPPORTS_ATTRIBUTES", "-D", "A8_SAMPLE_MASK=.r",
            "-D", "WSVECTOR_IS_TILEOFFSET=1", "-D", "UE_LWC_RENDER_TILE_SIZE=2097152.0",
+           # ShaderCompilerWorker provides the LWC scale family alongside the
+           # base tile size. Keep the parity values explicit: the lightweight
+           # BinC preprocessor does not evaluate arithmetic macro expressions.
+           "-D", "UE_LWC_RENDER_TILE_SIZE_RCP=4.76837158203125e-7",
+           "-D", "UE_LWC_RENDER_TILE_SIZE_SQRT=1448.1546878700494",
+           "-D", "UE_LWC_RENDER_TILE_SIZE_RSQRT=0.00069053396600248776",
            "-D", "WORKING_COLOR_SPACE_RGB_TO_XYZ_MAT=float3x3(1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0)"]
 
 

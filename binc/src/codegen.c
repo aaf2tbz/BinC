@@ -328,7 +328,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
          * a dedicated spell table; type them so overload rankers see the
          * right width instead of T_INT32 */
         { static const char *scalars[]={"dot","length","distance",NULL};
-          static const char *width_of_arg[]={"normalize","rcp","reflect","clamp","lerp","mix","step","smoothstep","fract","frac","mod","radians","degrees","sign","cross",NULL};
+          static const char *width_of_arg[]={"normalize","rcp","reflect","clamp","lerp","mix","step","smoothstep","fract","frac","mod","trunc","radians","degrees","sign","cross",NULL};
           int matched=0;
           static const char *int_scalars[]={"firstbithigh","firstbitlow","countbits",NULL};
           for(int si=0;int_scalars[si]&&!matched;si++) if(!strcmp(int_scalars[si],e->name)){ out->kind=T_INT32; out->vecn=0; matched=1; }
@@ -707,7 +707,7 @@ static const char *spread(CG *c, const char *v, int w, int n){
 /* returns the result register, or NULL if `e->name` is not a composite builtin */
 static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
     const char *nm=e->name;
-    static const char *names[]={"dot","cross","length","distance","normalize","rcp","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","fmod","radians","degrees","saturate","abs","min","max","mul","inverse","asfloat","asuint","asint"};
+    static const char *names[]={"dot","cross","length","distance","normalize","rcp","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","trunc","fmod","radians","degrees","saturate","abs","min","max","mul","inverse","asfloat","asuint","asint"};
     int hit=0; for(size_t i=0;i<sizeof names/sizeof *names;i++) if(!strcmp(names[i],nm)){ hit=1; break; }
     if(!hit) return NULL;
     if(e->nargs<1||e->nargs>3) die(0,"%s: wrong number of arguments",nm);
@@ -954,6 +954,25 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
         const char *t2=n>1?splat(c,fconst(c,2.0),"float",n):fconst(c,2.0);
         *k=VK_F32; c->rvw=n>1?n:0;
         return vbin(c,"fmul fast",tt,vbin(c,"fsub fast",t3,vbin(c,"fmul fast",t2,tc,n),n),n);
+    }
+    if(!strcmp(nm,"trunc")){
+        if(e->nargs!=1) die(0,"trunc expects 1 argument");
+        /* HLSL trunc rounds toward zero. AIR has floor/ceil but no direct
+         * trunc spelling, so choose ceil for negative lanes. */
+        mark_builtin("floor"); mark_builtin("ceil");
+        const char *va=spread(c,av,aw,n);
+        const char *fl=elem_call(c,"air.fast_floor.f32",va,n,T_FLOAT,T_FLOAT);
+        const char *ce=elem_call(c,"air.fast_ceil.f32",va,n,T_FLOAT,T_FLOAT);
+        const char *zero=fconst(c,0.0), *z=n>1?splat(c,zero,"float",n):zero;
+        const char *m=newtmp(c), *r=newtmp(c);
+        if(n>1){
+            emit(c,"  %s = fcmp olt <%d x float> %s, %s\n",m,n,va,z);
+            emit(c,"  %s = select <%d x i1> %s, <%d x float> %s, <%d x float> %s\n",r,n,m,n,ce,n,fl);
+        } else {
+            emit(c,"  %s = fcmp olt float %s, %s\n",m,va,z);
+            emit(c,"  %s = select i1 %s, float %s, float %s\n",r,m,ce,fl);
+        }
+        *k=VK_F32; c->rvw=n>1?n:0; return r;
     }
     if(!strcmp(nm,"fract")||!strcmp(nm,"frac")){
         if(e->nargs!=1) die(0,"fract expects 1 argument");
