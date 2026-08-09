@@ -28,6 +28,7 @@ typedef struct {
     int      tex_cube; /* T_TEXTURE: cube map (sample with float3 direction) */
     int      tex_dim;  /* T_TEXTURE coordinate dimension: 0/2, 1, or 3 */
     int      tex_array; /* T_TEXTURE: array texture; final coordinate is the layer */
+    int      tex_rw;    /* T_TEXTURE: RWTexture* resource: read_write AIR metadata */
     int      array_n, array_m; /* threadgroup array extents, if declared */
 } Type;
 

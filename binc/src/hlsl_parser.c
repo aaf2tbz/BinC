@@ -21,7 +21,7 @@ static Type hlsl_type(TokStream *ts){
         advance(ts); k=peek(ts)->kind;
     }
     if(k==TK_KW_RWTEXTURE2D){
-        advance(ts); Type t={0}; t.kind=T_TEXTURE;
+        advance(ts); Type t={0}; t.kind=T_TEXTURE; t.tex_rw=1;
         if(accept(ts,TK_LT)){ Type et=parse_type(ts);
             t.tex_elt=et.kind;
             if(t.tex_elt!=T_FLOAT&&t.tex_elt!=T_HALF&&t.tex_elt!=T_INT32&&t.tex_elt!=T_UINT32)
@@ -39,7 +39,7 @@ static Type hlsl_type(TokStream *ts){
            !strcmp(txt,"RWTexture2DArray")||!strcmp(txt,"RWTexture3D")||!strcmp(txt,"RWTexture1D")||
            !strcmp(txt,"Texture1DArray")||!strcmp(txt,"RWTexture1DArray")||
            !strcmp(txt,"Texture2DMS")||!strcmp(txt,"Texture2DMSArray")){
-            advance(ts); Type t={0}; t.kind=T_TEXTURE;
+            advance(ts); Type t={0}; t.kind=T_TEXTURE; t.tex_rw=!strncmp(txt,"RWTexture",9);
             t.tex_dim=!strcmp(txt,"Texture1D")||!strcmp(txt,"RWTexture1D")||!strcmp(txt,"Texture1DArray")||!strcmp(txt,"RWTexture1DArray")?1:!strcmp(txt,"Texture3D")||!strcmp(txt,"RWTexture3D")?3:2;
             t.tex_array=!strcmp(txt,"Texture1DArray")||!strcmp(txt,"RWTexture1DArray")||!strcmp(txt,"Texture2DArray")||!strcmp(txt,"RWTexture2DArray")||!strcmp(txt,"TextureCubeArray")||!strcmp(txt,"Texture2DMSArray");
             t.tex_cube=!strcmp(txt,"TextureCube")||!strcmp(txt,"TextureCubeArray");

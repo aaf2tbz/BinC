@@ -1144,7 +1144,7 @@ static const char *reflect_reg(HLSLProg *hp, const char *name, char *buf, size_t
 }
 static const char *reflect_kind(Type *ty){
     if(ty->is_ptr) return ty->as==AS_CONSTANT?"constant":"buffer";
-    if(ty->kind==T_TEXTURE) return "texture2d";
+    if(ty->kind==T_TEXTURE) return ty->tex_cube?"texturecube":ty->tex_array&&ty->tex_dim==2?"texture2d_array":ty->tex_dim==1?"texture1d":ty->tex_dim==3?"texture3d":"texture2d";
     if(ty->kind==T_SAMPLER) return "sampler";
     return "value";
 }

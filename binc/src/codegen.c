@@ -251,7 +251,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
         if(r==R_LOCAL){ out->kind=c->locs[idx].kind; out->struct_name=c->locs[idx].sname;
             out->vecn=c->locs[idx].vecn; out->matn=c->locs[idx].matn; }
         else if(r==R_CONST){ out->kind=c->prog->consts[idx].ty.kind; }
-        else if(r==R_PTR||r==R_SCALAR){ Type t=c->fn->params[idx].ty; t.tvar=NULL; *out=t; }
+        else if(r==R_PTR||r==R_SCALAR||r==R_TEXTURE||r==R_SAMPLER){ Type t=c->fn->params[idx].ty; t.tvar=NULL; *out=t; }
         else if(r==R_COORD||r==R_EXTENT){ Type t=c->fn->params[idx].ty; t.tvar=NULL; *out=t; }
         else { out->kind=T_INT32; }
         break; }
@@ -639,13 +639,13 @@ static const char *tex_air_type(const Type *ty){
     if(ty->tex_dim==3) return "%struct._texture_3d_t";
     return "%struct._texture_2d_t";
 }
-static const char *tex_meta_type(const Type *ty){
-    if(ty->tex_cube) return "texturecube<float, sample>";
-    if(ty->tex_array && ty->tex_dim==2) return "texture2d_array<float, sample>";
-    if(ty->tex_dim==1) return "texture1d<float, sample>";
-    if(ty->tex_dim==3) return "texture3d<float, sample>";
-    return "texture2d<float, sample>";
+static const char *tex_meta_type_with_access(const Type *ty, const char *access){
+    const char *shape=ty->tex_cube?"texturecube":ty->tex_array&&ty->tex_dim==2?"texture2d_array":ty->tex_dim==1?"texture1d":ty->tex_dim==3?"texture3d":"texture2d";
+    const char *elt=ty->tex_elt==T_HALF?"half":ty->tex_elt==T_INT32?"int":ty->tex_elt==T_UINT32?"uint":"float";
+    static char text[64]; snprintf(text,sizeof text,"%s<%s, %s>",shape,elt,access);
+    return text;
 }
+static const char *tex_meta_type(const Type *ty){ return tex_meta_type_with_access(ty,ty->tex_rw?"read_write":"sample"); }
 static void tex_kinds(TypeKind et, const char **elt, const char **vec, const char **suf, const char **an){
     if(et==T_HALF){ *elt="half"; *vec="<4 x half>"; *suf="v4f16"; *an="half4"; }
     else if(et==T_INT32){ *elt="i32"; *vec="<4 x i32>"; *suf="v4i32"; *an="int4"; }
@@ -1793,6 +1793,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         if(vw!=4) die(0,"texture write value must be a float4");
                         if(c->rvw!=2) die(0,"texture write coordinate must be an int2");
                         tex_write_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
+                        c->written[ti]=1;
                         const char *sv=vv;
                         if(tp->ty.tex_elt==T_HALF){ const char *h=newtmp(c); emit(c,"  %s = fptrunc <4 x float> %s to <4 x half>\n",h,vv); sv=h; }
                         else if(tp->ty.tex_elt==T_INT32||tp->ty.tex_elt==T_UINT32) sv=vconv(c,vv,4,VK_F32,tp->ty.tex_elt==T_INT32?VK_I32:VK_U32);
@@ -1800,15 +1801,18 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         *k=VK_I32; c->rvw=0; return "0";
                     }
                     if(!strcmp(e->name,"sample")||!strcmp(e->name,"Sample")||!strcmp(e->name,"SampleLevel")){
-                        if(e->nargs!=2&&e->nargs!=3) die(0,"texture sample expects 2 arguments (sampler, uv) or 3 (sampler, uv, lod)");
+                        int is_level=!strcmp(e->name,"SampleLevel");
+                        if((is_level&&e->nargs!=3)||(!is_level&&e->nargs!=2))
+                            die(0,is_level?"SampleLevel expects (sampler, uv, lod)":"Sample expects (sampler, uv)");
                         int si; if(e->args[0]->kind!=E_IDENT||resolve(c,e->args[0]->name,&si)!=R_SAMPLER)
                             die(0,"texture sample's first argument must be a sampler parameter");
                         ValKind uk; const char *uv=gen_rval(c,e->args[1],&uk);
                         int uvw=c->rvw;
                         if(uk!=VK_F32) die(0,"texture sample coordinate must be float");
                         const char *lod=fconst(c,0.0);
-                        if(e->nargs==3){ ValKind lk; lod=gen_rval(c,e->args[2],&lk);
+                        if(is_level){ ValKind lk; lod=gen_rval(c,e->args[2],&lk);
                             if(c->rvw) die(0,"texture sample lod must be a scalar"); }
+                        const char *lod_flag=is_level?"true":"false";
                         int ti_kind=tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0;
                         const char *r=newtmp(c);
                         char sname[64]; snprintf(sname,sizeof sname,"%%_%s",e->args[0]->name);
@@ -1816,26 +1820,26 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                             if(uvw!=3) die(0,"cube sample direction must be a float3");
                             tex_sample_cube_used[ti_kind]=1;
                             /* probed: air.sample_texture_cube.<suf>(tex, samp, <3 x float>, i1, lod, grad, i32) */
-                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_cube.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, i1 false, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod,fconst(c,0.0));
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_cube.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, i1 %s, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod_flag,lod,fconst(c,0.0));
                         } else if(tp->ty.tex_dim==1){
                             if(uvw) die(0,"texture1d sample coordinate must be a float");
                             tex_sample_1d_used[ti_kind]=1;
-                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_1d.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, float %s, i1 false, i32 0, i1 true, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod,fconst(c,0.0));
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_1d.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, float %s, i1 false, i32 0, i1 %s, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod_flag,lod,fconst(c,0.0));
                         } else if(tp->ty.tex_dim==3){
                             if(uvw!=3) die(0,"texture3d sample coordinate must be a float3");
                             tex_sample_3d_used[ti_kind]=1;
-                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_3d.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, i1 true, <3 x i32> zeroinitializer, i1 true, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod,fconst(c,0.0));
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_3d.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, i1 true, <3 x i32> zeroinitializer, i1 %s, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod_flag,lod,fconst(c,0.0));
                         } else if(tp->ty.tex_array&&tp->ty.tex_dim==2){
                             if(uvw!=3) die(0,"texture2d array sample coordinate must be a float3");
                             const char *uv2=newtmp(c); emit(c,"  %s = shufflevector <3 x float> %s, <3 x float> undef, <2 x i32> <i32 0, i32 1>\n",uv2,uv);
                             const char *lf=newtmp(c); emit(c,"  %s = extractelement <3 x float> %s, i32 2\n",lf,uv);
                             const char *layer=newtmp(c); emit(c,"  %s = fptosi float %s to i32\n",layer,lf);
                             tex_sample_2d_array_used[ti_kind]=1;
-                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d_array.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i32 %s, i1 true, <2 x i32> zeroinitializer, i1 true, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv2,layer,lod,fconst(c,0.0));
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d_array.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i32 %s, i1 true, <2 x i32> zeroinitializer, i1 %s, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv2,layer,lod_flag,lod,fconst(c,0.0));
                         } else {
                             if(uvw!=2) die(0,"texture sample uv must be a float2");
                             tex_sample_used[ti_kind]=1;
-                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i1 true, <2 x i32> zeroinitializer, i1 true, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod,fconst(c,0.0));
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_2d.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x float> %s, i1 true, <2 x i32> zeroinitializer, i1 %s, float %s, float %s, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,lod_flag,lod,fconst(c,0.0));
                         }
                         const char *v=newtmp(c);
                         emit(c,"  %s = extractvalue { %s, i8 } %s, 0\n",v,vec,r);
@@ -2249,6 +2253,14 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         die(0,"%s: struct type mismatch on argument %d",e->name,(int)i+1);
                     char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",p->ty.struct_name);
                     o+=snprintf(args+o,sizeof args-o,"%s %s",sn,v);
+                } else if(p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER){
+                    int ri;
+                    if(arge->kind!=E_IDENT||resolve(c,arge->name,&ri)!=(p->ty.kind==T_TEXTURE?R_TEXTURE:R_SAMPLER))
+                        die(0,"%s: resource argument %d must be a matching resource parameter",e->name,(int)i+1);
+                    if(p->ty.kind==T_TEXTURE)
+                        o+=snprintf(args+o,sizeof args-o,"%s addrspace(1)* %%_%s",tex_air_type(&p->ty),arge->name);
+                    else
+                        o+=snprintf(args+o,sizeof args-o,"%%struct._sampler_t addrspace(2)* %%_%s",arge->name);
                 } else if(p->ty.is_ptr){ Expr *a=arge; int pi;
                     if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG ptrarg: %s arg%zu name=%s fn=%s rk=%d\n",e->name,i,a->name?a->name:"(null)",c->fn->name,a->kind==E_IDENT?resolve(c,a->name,&pi):-99);
                     if(a->kind!=E_IDENT||resolve(c,a->name,&pi)!=R_PTR)
@@ -2915,8 +2927,10 @@ static void emit_kernel_meta(Meta *m, const Program *prog, Function *fn, KernelM
         if(p->ty.kind==T_COORD){ char cn[32]; snprintf(cn,sizeof cn,p->ty.coordn==1?"uint":p->ty.coordn==2?"ushort2":"ushort3");
             meta_emit(m,"!%d = !{i32 %d, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,cn,p->name); argidx++; continue; }
         if(p->ty.kind==T_GRID_EXTENT){ meta_emit(m,"!%d = !{i32 %d, !\"air.threads_per_grid\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,p->name); argidx++; continue; }
-        if(p->ty.kind==T_TEXTURE){ const char *elt,*vec,*suf,*an; tex_kinds(p->ty.tex_elt,&elt,&vec,&suf,&an);
-            meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"air.read_write\", !\"air.arg_type_name\", !\"texture2d<%s, read_write>\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,argidx,elt,p->name); argidx++; continue; }
+        if(p->ty.kind==T_TEXTURE){
+            int isrw=p->ty.tex_rw||written[a];
+            const char *access=isrw?"air.read_write":"air.sample";
+            meta_emit(m,"!%d = !{i32 %d, !\"air.texture\", !\"air.location_index\", i32 %d, i32 1, !\"%s\", !\"air.arg_type_name\", !\"%s\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,argidx,access,tex_meta_type_with_access(&p->ty,isrw?"read_write":"sample"),p->name); argidx++; continue; }
         if(p->ty.kind==T_SAMPLER){
             meta_emit(m,"!%d = !{i32 %d, !\"air.sampler\", !\"air.location_index\", i32 %d, i32 1, !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"%s\"}\n",km->argnode[ai++],argidx,argidx,p->name); argidx++; continue; }
         if(p->ty.is_ptr){ int r=read[a],w=written[a]; const char *acc=(r&&w)?"air.read_write":w?"air.write":"air.read";

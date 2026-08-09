@@ -140,8 +140,17 @@ covered by a GPU differential; full gate revalidation is pending. The
 `82d223e` re-sweep then reached shared 1D/3D/2D-array sample helpers. BinC
 now preserves texture dimension and array shape through parsing, AIR
 signatures, intrinsic selection, and stage metadata; a Metallib-backed UE
-frontend regression covers all three ABIs, and the canonical helper advances
-past the prior texture-shape diagnostics.
+frontend regression covers 1D/3D/2D-array plus cube `Sample`/`SampleLevel`.
+A controlled rerun of the historical 367-row bucket advanced 366 rows to
+`ComputeRayConeLod`: HLSL resource-by-value helper arguments had been typed as
+integers during overload selection. Texture/sampler argument typing and AIR
+parameter forwarding now preserve their resource types, so canonical
+`IndirectVirtualTextureCommon.ush` reaches the distinct remaining
+`SampleGrad`/gather/cube-array gaps. The same investigation added C99
+pre-expansion and whitespace-correct `##` token pasting; canonical
+`ASTCCompressionCommon.ush` now advances beyond its historical `expected ;`
+parse failure. The native GPU `verify` suite remains green after preserving
+`air.read_write` metadata for actual texture writes.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced

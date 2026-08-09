@@ -208,6 +208,28 @@ static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
                     }
                     if(!found){ bput(&o2,s,(size_t)(p-s)); break; }
                     if(nargs!=defs[d].nparams){ bput(&o2,s,(size_t)(p+1-s)); s=p+1; continue; }
+                    /* C99 macro arguments are expanded before substitution unless
+                     * that formal participates in ##.  Without this prescan,
+                     * CONCAT(BitStreamReader_Read_, TYPE_SUFFIX) reaches the
+                     * inner CONCAT2 as the literal TYPE_SUFFIX instead of RO. */
+                    for(int ai=0;ai<nargs;ai++){
+                        int pasted=0; size_t pl=strlen(defs[d].params[ai]);
+                        for(const char *fp=defs[d].val; (fp=strstr(fp,defs[d].params[ai])); fp+=pl){
+                            int bl=fp==defs[d].val||!(isalnum((unsigned char)fp[-1])||fp[-1]=='_');
+                            int br=!(isalnum((unsigned char)fp[pl])||fp[pl]=='_');
+                            if(!bl||!br) continue;
+                            const char *l=fp; while(l>defs[d].val&&isspace((unsigned char)l[-1])) l--;
+                            const char *r=fp+pl; while(*r&&isspace((unsigned char)*r)) r++;
+                            if((l-defs[d].val)>=2&&l[-1]=='#'&&l[-2]=='#') pasted=1;
+                            if(r[0]=='#'&&r[1]=='#') pasted=1;
+                        }
+                        if(pasted){
+                            char *ab=argbuf[ai], *beg=ab; while(*beg&&isspace((unsigned char)*beg)) beg++;
+                            if(beg!=ab) memmove(ab,beg,strlen(beg)+1);
+                            size_t al=strlen(ab); while(al&&isspace((unsigned char)ab[al-1])) ab[--al]=0;
+                        } else { char *expanded_arg=pp_subst_line(argbuf[ai],defs,ndefs);
+                            if(expanded_arg){ snprintf(argbuf[ai],sizeof argbuf[ai],"%s",expanded_arg); free(expanded_arg); } }
+                    }
                     /* Replace formals with private sentinels first, then expand
                      * those sentinels into arguments.  Replacing Lhs directly
                      * before Rhs corrupts an Lhs argument that itself contains
