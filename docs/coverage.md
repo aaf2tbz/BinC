@@ -79,6 +79,7 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 | post-`5dfacf6` parenthesized-subtraction sweep | **611/1,146 = 53.3%** (81 metallibs) |
 | post-`4f2a000` simultaneous-macro sweep | **610/1,146 = 53.2%** (81 metallibs) |
 | post-`63cb878` sincos sweep | **610/1,146 = 53.2%** (81 metallibs) |
+| post-`536f45e` modf sweep | **244/1,146 = 21.3%** (81 metallibs; vector-indexing gap found) |
 | crashes/hangs | 0 |
 
 The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
@@ -106,7 +107,11 @@ differential-tested and restored the correct DoubleFloat expressions. The
 scalar/vector out-parameter lowering is covered by a DXC→Metal differential.
 The `63cb878` sweep cleared that bucket and made `modf` (369 files) dominant;
 its truncation-toward-zero lowering and scalar/vector output handling are now
-differential-tested and gate revalidation is in progress.
+differential-tested and gate-green. The initial `536f45e` sweep then exposed
+vector-valued struct-field dynamic indexing (for example `V.High[C]`) being
+routed through buffer-pointer lowering, producing 297 first-error rows. The
+value-extract correction is now differential-tested and its full re-sweep is
+pending.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced

@@ -1098,6 +1098,21 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         die(0,"undefined name %s",e->name);
     }
     case E_DEREF: case E_FIELD: case E_INDEX:{
+        /* `structValue.float2Field[i]` indexes a vector value; it is not a
+         * buffer-pointer expression. Evaluate the field then extract its lane. */
+        if(e->kind==E_INDEX){
+            Type base; expr_type_of(c,e->operand,&base);
+            if(base.vecn>1&&!base.is_ptr&&!base.array_n&&!base.array_m){
+                ValKind vk; const char *v=gen_rval(c,e->operand,&vk); int width=c->rvw;
+                ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
+                if(c->rvw) die(e->line,"vector index must be scalar");
+                iv=coerce(c,iv,ik,VK_I32);
+                char ty[32]; ll_of(ty,sizeof ty,base.kind,width);
+                const char *r=newtmp(c);
+                emit(c,"  %s = extractelement %s %s, i32 %s\n",r,ty,v,iv);
+                *k=vk; c->rvw=0; return r;
+            }
+        }
         /* Coordinate properties are built-ins rather than memory fields. The explicit
          * coordinate itself is the global position; local/group values are appended as
          * hidden built-in arguments when referenced. */
