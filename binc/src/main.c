@@ -208,8 +208,14 @@ static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
                     }
                     if(!found){ bput(&o2,s,(size_t)(p-s)); break; }
                     if(nargs!=defs[d].nparams){ bput(&o2,s,(size_t)(p+1-s)); s=p+1; continue; }
+                    /* Replace formals with private sentinels first, then expand
+                     * those sentinels into arguments.  Replacing Lhs directly
+                     * before Rhs corrupts an Lhs argument that itself contains
+                     * the token Rhs (UE's INVARIANT_MUL(-Rhs.Low, Th)). */
                     char body[16384]; snprintf(body,sizeof body,"%s",defs[d].val);
+                    char mark[8][8];
                     for(int ai=0;ai<nargs;ai++){
+                        snprintf(mark[ai],sizeof mark[ai],"\x1e%d\x1f",ai);
                         size_t pl=strlen(defs[d].params[ai]);
                         Buf b2={0}; char *bq=body;
                         while(bq&&*bq){
@@ -218,17 +224,25 @@ static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
                             int bl=bh==bq||!(isalnum((unsigned char)bh[-1])||bh[-1]=='_');
                             int br=!(isalnum((unsigned char)bh[pl])||bh[pl]=='_');
                             if(bh[pl]=='#'&&bh[pl+1]=='#'){
-                                bput(&b2,bq,(size_t)(bh-bq)); bput(&b2,argbuf[ai],strlen(argbuf[ai]));
+                                bput(&b2,bq,(size_t)(bh-bq)); bput(&b2,mark[ai],strlen(mark[ai]));
                                 bq=bh+pl+2;
                             } else if(pl>=2&&(bh-bq)>=2&&bh[-2]=='#'&&bh[-1]=='#'&&bl){
-                                if(b2.n>=2) b2.n-=2; b2.p[b2.n]=0; bput(&b2,argbuf[ai],strlen(argbuf[ai]));
+                                if(b2.n>=2) b2.n-=2; b2.p[b2.n]=0; bput(&b2,mark[ai],strlen(mark[ai]));
                                 bq=bh+pl;
                             } else if(bl&&br){
-                                bput(&b2,bq,(size_t)(bh-bq)); bput(&b2,argbuf[ai],strlen(argbuf[ai])); bq=bh+pl;
+                                bput(&b2,bq,(size_t)(bh-bq)); bput(&b2,mark[ai],strlen(mark[ai])); bq=bh+pl;
                             } else { bput(&b2,bq,(size_t)(bh-bq+pl)); bq=bh+pl; }
                         }
                         snprintf(body,sizeof body,"%s",b2.p?b2.p:""); free(b2.p);
                     }
+                    Buf expanded={0};
+                    for(char *bq=body;*bq;){
+                        int ai=-1;
+                        for(int k=0;k<nargs;k++) if(!strncmp(bq,mark[k],strlen(mark[k]))){ ai=k; break; }
+                        if(ai>=0){ bput(&expanded,argbuf[ai],strlen(argbuf[ai])); bq+=strlen(mark[ai]); }
+                        else bput(&expanded,bq++,1);
+                    }
+                    snprintf(body,sizeof body,"%s",expanded.p?expanded.p:""); free(expanded.p);
                     bput(&o2,s,(size_t)(hit-s)); bput(&o2,body,strlen(body));
                     /* C99 6.10.3.4: only the macro's name in its OWN replacement
                      * list is painted — check val, NOT the arg-substituted body
