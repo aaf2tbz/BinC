@@ -63,7 +63,7 @@ GAP_BUCKETS = [
     (r"metal front-end failed", "codegen/AIR emit"),
     (r"struct type mismatch", "struct typing"),
     (r"unknown struct (\w+)", "unknown struct (%s)"),
-    (r"unknown texture method (\w+)", "texture method (%s)"),
+    (r"unknown texture method \\.?(\w+)", "texture method (%s)"),
     (r"texture sample uv must be", "texture sample typing"),
     (r"unsupported .* method", "object method"),
     (r"compute entry must return void", "entry signature"),
