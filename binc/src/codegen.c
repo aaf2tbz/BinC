@@ -297,6 +297,10 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
                     if(at.kind==T_INT32&&(pt.kind==T_FLOAT||pt.kind==T_HALF)&&!at.vecn&&!pt.vecn){ rk+=1; continue; }
                     if(at.kind==T_INT32&&pt.kind==T_FLOAT&&!at.vecn&&pt.vecn>0){ rk+=3; continue; } /* int scalar splat */
                     ok=0; break; }
+                /* Struct overloads must match the tag as well as T_STRUCT.
+                 * Otherwise Negate(FDFVector2) is typed as the first
+                 * Negate(FDFScalar) and poisons its caller's overload choice. */
+                if(at.kind==T_STRUCT&&(!at.struct_name||!pt.struct_name||strcmp(at.struct_name,pt.struct_name))){ ok=0; break; }
                 if(at.vecn!=pt.vecn){
                     if(at.vecn==0&&pt.vecn>0){ rk+=2; continue; }
                     if(at.vecn>pt.vecn&&pt.vecn>0){ rk+=2; continue; }
