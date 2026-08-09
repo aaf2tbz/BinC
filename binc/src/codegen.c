@@ -1024,6 +1024,17 @@ static const char *as_op(AssignOp a, int isfloat, int isuns){
         case A_SHLEQ:return "shl"; case A_SHREQ:return isuns?"lshr":"ashr"; default:return NULL; }
 }
 
+static void store_float_out(CG *c, Expr *target, const char *value, int width){
+    LInfo li; char *addr=gen_lval(c,target,&li,1);
+    if(li.tk!=T_FLOAT||li.matn||li.an||li.vecn!=width)
+        die(target->line,"out argument must be a float%s lvalue",width?" vector":"");
+    const char *stored=to_storage(c,value,VK_F32,width,T_FLOAT,width);
+    char pty[96], ll[32];
+    pty_str(pty,sizeof pty,li.tk,li.sname,li.as,li.is_local,width,0);
+    ll_of(ll,sizeof ll,T_FLOAT,width);
+    emit(c,"  store %s %s, %s %s, align %d\n",ll,stored,pty,addr,type_align(T_FLOAT,width));
+}
+
 static const char *gen_rval(CG *c, Expr *e, ValKind *k){
     g_last_line=e->line; g_last_col=e->col;
     c->rvw=0; c->rmat=0; c->rstruct=NULL; /* cases set these to the width of their result, if any */
@@ -2009,6 +2020,19 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             }
             *k=VK_I32; c->rvw=0;
             return r;
+        }
+        /* HLSL sincos(x, out sin, out cos): calculate the two AIR intrinsics
+         * and write their results to scalar/vector lvalues. */
+        if(!strcmp(e->name,"sincos")){
+            if(e->nargs!=3) die(0,"sincos expects (x, out sin, out cos)");
+            ValKind ak; const char *x=gen_rval(c,e->args[0],&ak); int width=c->rvw;
+            if(ak!=VK_F32) die(0,"sincos expects a float argument");
+            mark_builtin("sin"); mark_builtin("cos");
+            const char *s=elem_call(c,"air.fast_sin.f32",x,width?width:1,T_FLOAT,T_FLOAT);
+            const char *co=elem_call(c,"air.fast_cos.f32",x,width?width:1,T_FLOAT,T_FLOAT);
+            store_float_out(c,e->args[1],s,width);
+            store_float_out(c,e->args[2],co,width);
+            *k=VK_I32; c->rvw=0; return "0";
         }
         /* precise is a compile-time optimization qualifier. Once UE's Platform.ush
          * has declared MakePrecise, lowering it as an identity preserves HLSL
