@@ -74,6 +74,7 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 | baseline (entry mode, pre-Phase-2) | 11.3% parse acceptance |
 | after the SCW-stub + LWC define batch | 50.4% |
 | post-`2eaef84` stage-all sweep (before binary16 pack/unpack) | **620/1,146 = 54.1%** |
+| post-`3e93d07` macro-expansion sweep | **611/1,146 = 53.3%** (81 metallibs) |
 | crashes/hangs | 0 |
 
 The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
@@ -85,6 +86,11 @@ Parse acceptance therefore remains **620/1,146 = 54.1%**, while metallib
 compiles increased from 80 to 81; both sweeps had zero crashes/hangs. The
 follow-up `5ca96b3` sweep verified the exact UE CS-derivative marker fix: the
 `parse: expected ;` bucket fell from 100 to 99, with no crash/hang regression.
+The `3e93d07` whitespace-before-`(` macro fix removed the 378-file
+`PackTileCoordXXbits` first-error bucket, exposing `MakePrecise` (369 files)
+as the next UE helper blocker. Its 53.3% acceptance metric has the same 81
+metallib outputs; the lower score reflects fewer paths remaining classified as
+codegen-stage gaps after deeper macro expansion.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced

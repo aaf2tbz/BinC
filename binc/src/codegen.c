@@ -266,6 +266,17 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
         else { *out=base; size_t fl=strlen(e->field); if(fl==1) out->vecn=0; else if(fl<=4) out->vecn=(int)fl; } /* vector swizzle: the swizzle width (v.xy -> 2) */
         break; }
     case E_CALL:{
+        /* UE's MakePrecise overloads are an optimization constraint, not a
+         * value transformation. Preserve the operand type even when parsing a
+         * large overloaded helper body leaves an ambiguous expression type.
+         * Keep it source-scoped: an undeclared MakePrecise must still fail. */
+        if(!strcmp(e->name,"MakePrecise")&&e->nargs==1){
+            for(size_t i=0;i<c->prog->nfuncs;i++) if(!strcmp(c->prog->funcs[i].name,"MakePrecise")){
+                expr_type_of(c,e->args[0],out);
+                break;
+            }
+            if(out->kind) break;
+        }
         /* user function: best-overload by arg compatibility (mirrors the codegen
          * ranker) — a plain first-name match is wrong for overloaded helpers
          * like MakePrecise(float / float2 / float3 / float4) */
@@ -1998,6 +2009,14 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             }
             *k=VK_I32; c->rvw=0;
             return r;
+        }
+        /* precise is a compile-time optimization qualifier. Once UE's Platform.ush
+         * has declared MakePrecise, lowering it as an identity preserves HLSL
+         * values while avoiding overload ranking on parser-ambiguous expressions. */
+        if(!strcmp(e->name,"MakePrecise")&&e->nargs==1){
+            int declared=0;
+            for(size_t i=0;i<c->prog->nfuncs;i++) if(!strcmp(c->prog->funcs[i].name,"MakePrecise")){ declared=1; break; }
+            if(declared) return gen_rval(c,e->args[0],k);
         }
         /* user function? the whole Program is visible, so definition order doesn't matter.
          * HLSL overloads: rank-based selection (exact > int→float promotion >
