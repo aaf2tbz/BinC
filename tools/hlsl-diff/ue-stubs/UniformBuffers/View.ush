@@ -24,6 +24,28 @@ struct ViewState
     // reciprocal for current and previous views.
     float4 TanAndInvTanHalfFOV;
     float4 PrevTanAndInvTanHalfFOV;
+    // FinalizeViewState (generated CommonView code) constructs these LWC
+    // transforms from the high/low origin pairs and relative matrices.
+    float3 ViewOriginHigh;
+    float3 ViewOriginLow;
+    float3 WorldViewOriginHigh;
+    float3 WorldViewOriginLow;
+    float3 PrevWorldCameraOriginHigh;
+    float3 PrevWorldCameraOriginLow;
+    float3 PrevWorldViewOriginHigh;
+    float3 PrevWorldViewOriginLow;
+    float3 PreViewTranslationHigh;
+    float3 PreViewTranslationLow;
+    float3 PrevPreViewTranslationHigh;
+    float3 PrevPreViewTranslationLow;
+    float4x4 RelativeWorldToClip;
+    float4x4 ClipToRelativeWorld;
+    float4x4 ScreenToRelativeWorld;
+    float4x4 PrevClipToRelativeWorld;
+    FDFInverseMatrix WorldToClip;
+    FDFMatrix ClipToWorld;
+    FDFMatrix ScreenToWorld;
+    FDFMatrix PrevClipToWorld;
     FDFVector3 PreViewTranslation;
     FDFVector3 PrevPreViewTranslation;
     FDFVector3 WorldCameraOrigin;
