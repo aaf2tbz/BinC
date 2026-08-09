@@ -1343,8 +1343,13 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         }
         if(vw) die(0,"cannot cast a vector to a scalar");
         const char *r=coerce(c,v,lk,want); *k=want; c->rvw=0; return r; }
-    case E_NOT:{ ValKind lk; const char *v=gen_rval(c,e->operand,&lk); if(lk!=VK_I1) die(0,"! on non-bool");
-        const char *r=newtmp(c); *k=VK_I1; emit(c,"  %s = xor i1 %s, true\n",r,v); return r; }
+    case E_NOT:{ ValKind lk; const char *v=gen_rval(c,e->operand,&lk); int vw=c->rvw;
+        if(lk!=VK_I1) die(0,"! on non-bool");
+        const char *r=newtmp(c); *k=VK_I1; c->rvw=vw;
+        if(vw){ char ty[32]; ll_of(ty,sizeof ty,T_BOOL,vw); const char *ones=splat(c,"true","i1",vw);
+            emit(c,"  %s = xor %s %s, %s\n",r,ty,v,ones); }
+        else emit(c,"  %s = xor i1 %s, true\n",r,v);
+        return r; }
     case E_BIN:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw; int lm=c->rmat;
         if(getenv("BINC_DEBUG_IW")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")) fprintf(stderr,"DBG bin: bop=%d lk=%d lw=%d lh=%d\n",e->bop,lk,lw,e->lhs->kind);
         const char *r=gen_rval(c,e->rhs,&rk); int rw=c->rvw; int rm=c->rmat;
@@ -1536,8 +1541,21 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         if(isf){ l=coerce(c,l,lk,VK_F32); r=coerce(c,r,rk,VK_F32); }
         const char *v=newtmp(c); *k=VK_I1;
         emit(c,"  %s = %s %s %s %s, %s\n",v,isf?"fcmp":"icmp",cmp_name(e->cmp,isf,uns),isf?"float":"i32",l,r); return v; }
-    case E_LOG:{ ValKind lk; const char *l=gen_rval(c,e->lhs,&lk);
-        if(c->rvw) die(0,"vector operand in logical operator");
+    case E_LOG:{ ValKind lk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw;
+        /* HLSL applies && and || componentwise to bool vectors (no scalar
+         * short-circuit semantics). */
+        if(lw){
+            if(lk!=VK_I1) die(0,"vector logical operands must be bool");
+            ValKind rk; const char *r=gen_rval(c,e->rhs,&rk); int rw=c->rvw;
+            if(rk!=VK_I1) die(0,"vector logical operands must be bool");
+            int vw=lw>rw?lw:rw;
+            if(rw&&rw!=lw) die(0,"vector width mismatch in logical operator");
+            char ty[32]; ll_of(ty,sizeof ty,T_BOOL,vw);
+            if(!rw) r=splat(c,r,"i1",vw);
+            const char *v=newtmp(c); *k=VK_I1; c->rvw=vw;
+            emit(c,"  %s = %s %s %s, %s\n",v,e->log==L_AND?"and":"or",ty,l,r);
+            return v;
+        }
         if(lk!=VK_I1){ if(lk==VK_I32||lk==VK_U32){ const char *n=newtmp(c); emit(c,"  %s = icmp ne i32 %s, 0\n",n,l); l=n; } else die(0,"logical operands must be bool"); }
         /* short-circuit && / || via control flow (C semantics) */
         int p0=c->curbb, eval=newlbl(c), done=newlbl(c);

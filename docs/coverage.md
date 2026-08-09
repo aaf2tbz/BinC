@@ -81,6 +81,7 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 | post-`63cb878` sincos sweep | **610/1,146 = 53.2%** (81 metallibs) |
 | post-`536f45e` modf sweep | **244/1,146 = 21.3%** (81 metallibs; vector-indexing gap found) |
 | post-`34da8c5` vector-index sweep | **604/1,146 = 52.7%** (81 metallibs) |
+| post-`23b2670` struct-tag sweep | **604/1,146 = 52.7%** (81 metallibs; vector-logical gap found) |
 | crashes/hangs | 0 |
 
 The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
@@ -115,7 +116,10 @@ value-extract correction is now differential-tested and its full re-sweep is
 pending. The `34da8c5` re-sweep recovered to 52.7% and exposed struct-tag-blind
 overload typing: nested calls such as `DFAdd(Lhs, DFNegate(Rhs))` could select a
 same-kind but different-tag overload. The exact-tag ranker correction has a GPU
-differential; full gate revalidation is pending.
+differential; full gate revalidation is pending. The `23b2670` sweep exposed
+UE's componentwise `&&`, `||`, and `!` on bool vectors (366 rows); the AIR
+vector logical lowering and a Metallib-backed UE frontend regression are now
+in place, with the next full sweep pending.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced
