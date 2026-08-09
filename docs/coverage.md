@@ -78,10 +78,11 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 
 The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
 showed 40 additional parse/codegen-stage acceptances over the 50.6% report.
-Its remaining leading blocker is `f32tof16` (379 files). The scalar/vector
-`f32tof16`/`f16tof32` implementation and differential fixture are pending the
-next explicitly authorized full sweep; do not attribute an acceptance increase
-to them until that sweep completes.
+The follow-up sweep after `61f3b9c` verified that `f32tof16`/`f16tof32` no
+longer form an error bucket (the scalar/vector differential is green): it
+moved through to the next helper gap, `PackTileCoordXXbits` (378 files).
+Parse acceptance therefore remains **620/1,146 = 54.1%**, while metallib
+compiles increased from 80 to 81; both sweeps had zero crashes/hangs.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced

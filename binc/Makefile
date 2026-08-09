@@ -39,7 +39,7 @@ test-negative: binc
 # scoping, function-like macro chains, precise, typedef, _Static_assert, ::)
 test-ue: binc
 	@set -e; \
-	for t in tests/hlsl/pp_regress.hlsl ../third_party/UnrealEngine/Engine/Shaders/Private/NullPixelShader.usf ../third_party/UnrealEngine/Engine/Shaders/Private/LateZDummyPS.usf; do \
+	for t in tests/hlsl/pp_regress.hlsl tests/hlsl/ue_standalone_directive.hlsl ../third_party/UnrealEngine/Engine/Shaders/Private/NullPixelShader.usf ../third_party/UnrealEngine/Engine/Shaders/Private/LateZDummyPS.usf; do \
 		case "$$t" in \
 		*.hlsl) entry=main; prof=cs_5_0; defs="-D SM6_PROFILE";; \
 		*NullPixelShader.usf) entry=Main; prof=ps_5_0; defs="-D COMPILER_DXC -D PLATFORM_WINDOWS -D SM6_PROFILE -D COMPILER_SUPPORTS_ATTRIBUTES -D A8_SAMPLE_MASK=.r";; \

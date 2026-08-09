@@ -204,6 +204,14 @@ HLSLProg hlsl_parse(TokStream *ts){
     HLSLProg hp={0}; size_t fcap=0,scap=0,ccap=0,gcap=0;
     Program tmp={0};
     while(peek(ts)->kind!=TK_EOF){
+        /* UE's standalone ComputeShaderOutputCommon.ush leaves this compile
+         * marker bare when Platform.ush is absent from the isolated audit's
+         * include closure. It is an annotation, not a declaration. Whitelist
+         * only this exact spelling so malformed globals still fail normally. */
+        if(peek(ts)->kind==TK_IDENT&&!strcmp(peek(ts)->text,"COMPILER_ALLOW_CS_DERIVATIVES")){
+            advance(ts);
+            continue;
+        }
         /* .fx effect system: `technique ... { pass ... { ... } }` blocks carry
          * only host-side render states — strip them entirely */
         if(peek(ts)->kind==TK_KW_TECHNIQUE||
