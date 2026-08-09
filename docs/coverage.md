@@ -85,6 +85,7 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 | post-`6064080` vector-logical sweep | **604/1,146 = 52.7%** (81 metallibs; missing SCW LWC defines found) |
 | post-`3f2caf5` LWC/trunc sweep | **238/1,146 = 20.8%** (81 metallibs; ViewState stub gap found) |
 | post-`6065cd9` FOV-ViewState sweep | **604/1,146 = 52.7%** (81 metallibs; transform ViewState gap found) |
+| post-`9bed921` transform-ViewState sweep | **238/1,146 = 20.8%** (81 metallibs; const scalar swizzle gap found) |
 | crashes/hangs | 0 |
 
 The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
@@ -131,7 +132,10 @@ xy/zw uses. The `6065cd9` re-sweep recovered to 52.7% and then entered the
 SCW-generated `FinalizeViewState` path, which needs high/low origin pairs,
 relative matrices, and the corresponding DF matrix fields. Those exact fields
 are now present in the tracked stub; the canonical source advances past
-`MakeDFInverseMatrix`, and the next full sweep is pending.
+`MakeDFInverseMatrix`, and the next full sweep is pending. The `9bed921` sweep
+then reached UE's `MaxHalfFloat.xx` helpers: a const scalar swizzle was
+incorrectly routed as a writable lvalue. It now lowers as a value splat and is
+covered by a GPU differential; full gate revalidation is pending.
 
 Flagship fixture: `Engine/Shaders/Private/BasePassPixelShader.usf` compiles
 end-to-end to a valid metallib (`-E MainPS`, zero frontend errors). Reduced

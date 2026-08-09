@@ -1249,6 +1249,23 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     }
                 }
             }
+            /* Const globals are values, not writable storage. A scalar swizzle
+             * such as UE's MaxHalfFloat.xx is therefore an x-lane splat. */
+            if(e->operand->kind==E_IDENT){
+                int ci; if(resolve(c,e->operand->name,&ci)==R_CONST){
+                    ConstDef *cd=&c->prog->consts[ci]; int idxs[4];
+                    int nc=swizzle_idx(e->field,idxs);
+                    if(nc>0&&cd->ty.vecn==0){
+                        for(int i=0;i<nc;i++) if(idxs[i]!=0) die(0,"invalid scalar component .%s",e->field);
+                        ValKind ck; const char *cv=gen_rval(c,e->operand,&ck);
+                        if(c->rvw) die(0,"unexpected const-vector width");
+                        *k=ck;
+                        if(nc==1){ c->rvw=0; return cv; }
+                        const char *elt=cd->ty.kind==T_HALF?"float":scalar_ll(cd->ty.kind);
+                        c->rvw=nc; return splat(c,cv,elt,nc);
+                    }
+                }
+            }
             /* general multi-component swizzle on any vector lvalue (e.g. verts[vid].xy) */
             {
                 int idxs[4]; int nc=swizzle_idx(e->field,idxs);
