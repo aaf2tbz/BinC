@@ -146,7 +146,10 @@ A controlled rerun of the historical 367-row bucket advanced 366 rows to
 integers during overload selection. Texture/sampler argument typing and AIR
 parameter forwarding now preserve their resource types, so canonical
 `IndirectVirtualTextureCommon.ush` reaches the distinct remaining
-`SampleGrad`/gather/cube-array gaps. The same investigation added C99
+`SampleGrad`/gather/cube-array gaps. `SampleGrad` is now lowered with
+AIR-probed 2D, 3D, 2D-array, and cube ABI signatures; the shape fixture builds
+to a Metallib for all four forms, while cube-array and gather remain separately
+measured follow-ups. The same investigation added C99
 pre-expansion and whitespace-correct `##` token pasting; canonical
 `ASTCCompressionCommon.ush` now advances beyond its historical `expected ;`
 parse failure. The native GPU `verify` suite remains green after preserving
