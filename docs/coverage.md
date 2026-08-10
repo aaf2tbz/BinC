@@ -165,6 +165,10 @@ parameters using the receiving function's formal resource types; the
 `resource_field_sample.hlsl` regression verifies AIR resource metadata and
 `air.sample_texture_2d` forwarding without placing opaque resources in a value
 struct.
+Implicit compiler-forwarded pointer/texture/sampler parameters are accepted by
+HLSL overload resolution without changing ordinary value-argument arity;
+`implicit_uniform_overload.hlsl` locks the zero-argument cbuffer-forwarding
+case.
 The HLSL frontend now parses fixed-underlying unscoped enum declarations as
 strict immutable integral module constants, including declaration-order
 initializers, previous-enumerator references, implicit increments, and

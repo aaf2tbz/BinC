@@ -2515,9 +2515,13 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             if(e->nargs>cf->nparams) continue;
             int rk=0, bad=0;
             if(e->nargs<cf->nparams){ int no_def=0;
-                for(size_t q=e->nargs;q<cf->nparams;q++) if(!cf->params[q].def){ no_def=1; break; }
+                for(size_t q=e->nargs;q<cf->nparams;q++){
+                    if(cf->params[q].def||cf->params[q].ty.is_ptr||
+                       cf->params[q].ty.kind==T_TEXTURE||cf->params[q].ty.kind==T_SAMPLER) continue;
+                    no_def=1; break;
+                }
                 if(no_def) continue;
-                rk+=3; /* uses defaulted args */ }
+                rk+=3; /* uses defaulted args or implicit resource plumbing */ }
             for(size_t ai=0;ai<e->nargs;ai++){
                 Type at={0}; expr_type_of(c,e->args[ai],&at);
                 Type pt=cf->params[ai].ty;
@@ -2568,7 +2572,12 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             char args[2048]={0}; size_t o=0;
             if(getenv("BINC_DEBUG_IW")&&!strcmp(e->name,"CondMask")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")){ fprintf(stderr,"DBG cm-loop: nparams=%zu",f->nparams); for(size_t qi=0;qi<f->nparams;qi++) fprintf(stderr," [%s k%d v%d p%d]",f->params[qi].name,f->params[qi].ty.kind,f->params[qi].ty.vecn,f->params[qi].ty.is_ptr); fprintf(stderr,"\n"); }
             for(size_t i=0;i<f->nparams;i++){ Param *p=&f->params[i];
+                Expr implicit={0};
                 Expr *arge = (i<e->nargs)?e->args[i]:p->def; /* defaulted arg */
+                if(!arge&&(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER)){
+                    implicit.kind=E_IDENT; implicit.line=e->line; implicit.col=e->col; implicit.name=p->name;
+                    arge=&implicit;
+                }
                 if(!arge) die(0,"%s: missing argument %d (no default)",e->name,(int)i+1);
                 if(i)o+=snprintf(args+o,sizeof args-o,", ");
                 if(p->ty.kind==T_STRUCT && !p->ty.is_ptr){
