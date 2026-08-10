@@ -59,6 +59,8 @@ test-ue: binc test-ue-recovery harness
 	done; \
 	./binc -E main -T cs_5_0 tests/hlsl/const_vector_field.hlsl -o /tmp/const-vector-field.metallib; \
 	./harness /tmp/const-vector-field.metallib tests/hlsl/const_vector_field.spec; \
+	./binc -I ../tools/hlsl-diff/ue-stubs -I ../third_party/UnrealEngine -E main -T cs_5_0 tests/hlsl/view_state_preexposure.hlsl -o /tmp/view-state-preexposure.metallib; \
+	./harness /tmp/view-state-preexposure.metallib tests/hlsl/view_state_preexposure.spec; \
 	echo "UE FRONTEND REGRESSIONS PASS"
 
 # Mutation fuzz smoke: the compiler must never crash or hang on malformed input

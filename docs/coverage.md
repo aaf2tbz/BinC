@@ -165,9 +165,11 @@ HLSL resource-bearing struct fields are flattened to separate texture/sampler
 parameters using the receiving function's formal resource types; the
 `resource_field_sample.hlsl` regression verifies AIR resource metadata and
 `air.sample_texture_2d` forwarding without placing opaque resources in a value
-struct. The UE audit force-includes
-`Engine/Shaders/Private/Common.ush` for standalone common-shader
-rows and records that include in report provenance. The generated `ViewState`
+struct. The UE audit uses the versioned
+`tools/hlsl-diff/ue-stubs` virtual include root first, then the UE include root,
+for `/Engine/Generated/...` resolution; it force-includes
+`Engine/Shaders/Private/Common.ush` for standalone common-shader rows and
+records both paths in report provenance. The generated `ViewState`
 stub also carries UE's `float4
 InvDeviceZToWorldZTransform` field for indexed depth conversion helpers. It also
 carries scalar `PreExposure` and `OneOverPreExposure` fields used by postprocess
