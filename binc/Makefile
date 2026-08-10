@@ -34,12 +34,21 @@ test-negative: binc
 	chmod +x check_negative.sh
 	./check_negative.sh
 
+# Codegen recovery regression: an aborted stage function must report its
+# diagnostic without crashing during the later AIR metadata pass.
+test-ue-recovery: binc
+	@set +e; ./binc --stage-all -E MainPS -T ps_5_0 tests/hlsl/stage_recovery_regress.hlsl -o /tmp/stage-recovery.metallib >/tmp/stage-recovery.log 2>&1; rc=$$?; set -e; \
+	if [ $$rc -eq 0 ] || [ $$rc -eq 134 ] || [ $$rc -eq 139 ] || grep -Eqi 'segmentation fault|bus error|abort trap' /tmp/stage-recovery.log; then \
+		cat /tmp/stage-recovery.log; exit 1; \
+	fi; grep -q 'internal: struct return UnknownStageOutput not found' /tmp/stage-recovery.log; \
+	echo "UE CODEGEN RECOVERY PASS"
+
 # UE-frontend regression: the preprocessor constructs that fixed real bugs
 # must keep compiling to a metallib (tab directives, #ifndef, #define/#undef
 # scoping, function-like macro chains, precise, typedef, _Static_assert, ::)
-test-ue: binc
+test-ue: binc test-ue-recovery
 	@set -e; \
-	for t in tests/hlsl/pp_regress.hlsl tests/hlsl/ue_standalone_directive.hlsl tests/hlsl/vector_logical_ops.hlsl tests/hlsl/texture_shape_samples.hlsl tests/hlsl/texture_gather_methods.hlsl tests/hlsl/non_square_matrix.hlsl tests/hlsl/enum_regress.hlsl tests/hlsl/macro_token_paste.hlsl tests/hlsl/texture_byvalue_helper.hlsl ../third_party/UnrealEngine/Engine/Shaders/Private/NullPixelShader.usf ../third_party/UnrealEngine/Engine/Shaders/Private/LateZDummyPS.usf; do \
+	for t in tests/hlsl/pp_regress.hlsl tests/hlsl/ue_standalone_directive.hlsl tests/hlsl/vector_logical_ops.hlsl tests/hlsl/texture_shape_samples.hlsl tests/hlsl/texture_gather_methods.hlsl tests/hlsl/non_square_matrix.hlsl tests/hlsl/enum_regress.hlsl tests/hlsl/inout_resource_regress.hlsl tests/hlsl/norm_path_regress.hlsl tests/hlsl/macro_token_paste.hlsl tests/hlsl/texture_byvalue_helper.hlsl ../third_party/UnrealEngine/Engine/Shaders/Private/NullPixelShader.usf ../third_party/UnrealEngine/Engine/Shaders/Private/LateZDummyPS.usf; do \
 		case "$$t" in \
 		*.hlsl) entry=main; prof=cs_5_0; defs="-D SM6_PROFILE";; \
 		*NullPixelShader.usf) entry=Main; prof=ps_5_0; defs="-D COMPILER_DXC -D PLATFORM_WINDOWS -D SM6_PROFILE -D COMPILER_SUPPORTS_ATTRIBUTES -D A8_SAMPLE_MASK=.r";; \

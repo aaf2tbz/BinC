@@ -163,7 +163,10 @@ strict immutable integral module constants, including declaration-order
 initializers, previous-enumerator references, implicit increments, and
 trailing commas; `enum_regress.hlsl` covers the resulting AIR/Metallib path.
 The UE audit now also treats POSIX negative signal return codes as hard
-crash results instead of misclassifying them as ordinary `other` gaps.
+crash results instead of misclassifying them as ordinary `other` gaps. HLSL
+codegen recovery now records per-function emission validity before AIR metadata
+construction, so functions aborted by a diagnostic cannot be dereferenced by
+later stage metadata; `stage_recovery_regress.hlsl` locks this behavior.
 The same investigation added C99
 pre-expansion and whitespace-correct `##` token pasting; canonical
 `ASTCCompressionCommon.ush` now advances beyond its historical `expected ;`

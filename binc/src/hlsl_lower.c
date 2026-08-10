@@ -991,6 +991,10 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                 ret.expr->name=strdup(hf->params[io].name);
                 fn.body.stmts=realloc(fn.body.stmts,(fn.body.n+1)*sizeof(Stmt));
                 fn.body.stmts[fn.body.n++]=ret;
+                /* fn.body initially aliases hf->body.  The inout rewrite may
+                 * move the statement array, so publish the new owner before
+                 * the later resource-reference scan walks hf->body. */
+                hf->body=fn.body;
                 /* remember the helper so every function's call sites get rewritten */
                 iw_helpers=realloc(iw_helpers,(niw+1)*sizeof(char*));
                 iw_helpers[niw]=strdup(hf->name);

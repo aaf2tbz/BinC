@@ -3413,7 +3413,7 @@ void emit_air(FILE *out, Program *prog){
     if(atomic_base>=0) fprintf(out,"%%\"struct.metal::_atomic\" = type { %s }\n",scalar_ll((TypeKind)atomic_base));
     fprintf(out,"\n");
 
-    typedef struct { int *read,*written; int np, nmeta; } KF;
+    typedef struct { int *read,*written; int np, nmeta; int valid; } KF;
     size_t kf_cap=prog->nfuncs?prog->nfuncs:1;
     KF *kf=calloc(kf_cap,sizeof(KF));
     for(volatile size_t fi=0;fi<prog->nfuncs;fi++){
@@ -3536,6 +3536,7 @@ void emit_air(FILE *out, Program *prog){
         fprintf(out,"%s #%d {\n",sig,c.uses_sync?1:0);
         fwrite(pr.p,1,pr.n,out); fwrite(bd.p,1,bd.n,out);
         fprintf(out,"}\n\n");
+        kf[fi].valid=1;
     }
     g_recover=NULL;
     if(g_uses_discard) fprintf(out,"declare void @air.discard_fragment() local_unnamed_addr\n");
@@ -3606,20 +3607,20 @@ void emit_air(FILE *out, Program *prog){
     fprintf(out,"attributes #3 = { convergent mustprogress nounwind willreturn }\n\n");
     /* structured AIR metadata — node numbers allocated in fixed order:
      * all kernels first, then all stage functions, in source order. */
-    size_t nk=0; for(size_t fi=0;fi<prog->nfuncs;fi++) if(prog->funcs[fi].is_kernel) nk++;
-    size_t ns=0; for(size_t fi=0;fi<prog->nfuncs;fi++) if(prog->funcs[fi].stage!=ST_NONE) ns++;
+    size_t nk=0; for(size_t fi=0;fi<prog->nfuncs;fi++) if(kf[fi].valid&&prog->funcs[fi].is_kernel) nk++;
+    size_t ns=0; for(size_t fi=0;fi<prog->nfuncs;fi++) if(kf[fi].valid&&prog->funcs[fi].stage!=ST_NONE) ns++;
     Meta meta={0}; meta.next=13;
     KernelMeta *km=calloc(nk?nk:1,sizeof(KernelMeta));
     StageMeta *sm=calloc(ns?ns:1,sizeof(StageMeta));
     size_t ki=0;
-    for(size_t fi=0;fi<prog->nfuncs;fi++){ if(!prog->funcs[fi].is_kernel) continue;
+    for(size_t fi=0;fi<prog->nfuncs;fi++){ if(!kf[fi].valid||!prog->funcs[fi].is_kernel) continue;
         km[ki].knode=meta_alloc(&meta); km[ki].empty=meta_alloc(&meta); km[ki].arglist=meta_alloc(&meta);
         int na=kf[fi].nmeta; km[ki].argnode=malloc((na?na:1)*sizeof(int)); for(int a=0;a<na;a++)km[ki].argnode[a]=meta_alloc(&meta);
         km[ki].structnode=malloc((kf[fi].np?kf[fi].np:1)*sizeof(int)); for(int a=0;a<kf[fi].np;a++) km[ki].structnode[a]=-1;
         for(int a=0;a<kf[fi].np;a++) if(prog->funcs[fi].params[a].ty.kind==T_ATOMIC) km[ki].structnode[a]=meta_alloc(&meta);
         ki++; }
     size_t si=0;
-    for(size_t fi=0;fi<prog->nfuncs;fi++) if(prog->funcs[fi].stage!=ST_NONE){
+    for(size_t fi=0;fi<prog->nfuncs;fi++) if(kf[fi].valid&&prog->funcs[fi].stage!=ST_NONE){
         Function *sf=&prog->funcs[fi];
         size_t nin=0;
         for(size_t a=0;a<sf->nparams;a++){
@@ -3645,7 +3646,7 @@ void emit_air(FILE *out, Program *prog){
     meta_emit(&meta,"!air.compile_options = !{!7, !8}\n!llvm.ident = !{!9}\n!air.version = !{!10}\n!air.language_version = !{!11}\n!air.source_file_name = !{!12}\n\n");
     meta_emit(&meta,"!0 = !{i32 2, !\"SDK Version\", [2 x i32] [i32 %d, i32 0]}\n!1 = !{i32 1, !\"wchar_size\", i32 4}\n!2 = !{i32 7, !\"air.max_device_buffers\", i32 31}\n!3 = !{i32 7, !\"air.max_constant_buffers\", i32 31}\n!4 = !{i32 7, !\"air.max_threadgroup_buffers\", i32 31}\n!5 = !{i32 7, !\"air.max_textures\", i32 128}\n!6 = !{i32 7, !\"air.max_samplers\", i32 16}\n!7 = !{!\"air.compile.denorms_disable\"}\n!8 = !{!\"air.compile.fast_math_enable\"}\n!9 = !{!\"BinC compiler v0.0.1 (bootstrap, in C)\"}\n!10 = !{i32 2, i32 %d, i32 0}\n!11 = !{!\"Metal\", i32 4, i32 1, i32 0}\n!12 = !{!\"binc\"}\n",g_air_sdk,g_air_minor);
     ki=0;
-    for(size_t fi=0;fi<prog->nfuncs;fi++){ if(!prog->funcs[fi].is_kernel) continue;
+    for(size_t fi=0;fi<prog->nfuncs;fi++){ if(!kf[fi].valid||!prog->funcs[fi].is_kernel) continue;
         emit_kernel_meta(&meta,prog,&prog->funcs[fi],&km[ki],kf[fi].read,kf[fi].written,kf[fi].nmeta,kf[fi].np);
         ki++; }
     /* stage emission preserves the previous grouping: vertices first, then fragments */

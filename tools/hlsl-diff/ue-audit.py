@@ -5,7 +5,8 @@ Runs the BinC HLSL frontend over every UE .usf/.ush in corpus.json with the
 ShaderCompilerWorker-parity define set, classifies each (COMPILES vs first
 error bucketed into feature-gap categories), and emits ue-audit.md.
 
-Gate: any crash (rc 134/139) or hang (timeout) fails.
+Gate: any crash (a negative POSIX signal return or shell-style 134/139)
+or hang (timeout) fails.
 
 usage: ue-audit.py <out.md> [--limit N]
 """

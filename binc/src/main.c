@@ -64,7 +64,7 @@ static void norm_path(char *p){
             s=e; continue;
         }
         if(dst!=p&&dst[-1]!='/') *dst++='/';
-        memcpy(dst,s,l); dst+=l;
+        memmove(dst,s,l); dst+=l;
         s=e;
     }
     *dst='\0';
@@ -249,7 +249,13 @@ static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
                                 bput(&b2,bq,(size_t)(bh-bq)); bput(&b2,mark[ai],strlen(mark[ai]));
                                 bq=bh+pl+2;
                             } else if(pl>=2&&(bh-bq)>=2&&bh[-2]=='#'&&bh[-1]=='#'&&bl){
-                                if(b2.n>=2) b2.n-=2; b2.p[b2.n]=0; bput(&b2,mark[ai],strlen(mark[ai]));
+                                if(b2.n>=2){
+                                    b2.n-=2;
+                                    b2.p[b2.n]=0;
+                                } else if(b2.p) {
+                                    b2.p[b2.n]=0;
+                                }
+                                bput(&b2,mark[ai],strlen(mark[ai]));
                                 bq=bh+pl;
                             } else if(bl&&br){
                                 bput(&b2,bq,(size_t)(bh-bq)); bput(&b2,mark[ai],strlen(mark[ai])); bq=bh+pl;
