@@ -2645,22 +2645,29 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             Function *cf=&c->prog->funcs[i];
             if(getenv("BINC_DEBUG_IW")&&!strcmp(cf->name,e->name)){ fprintf(stderr,"DBG srch: %s line=%d nargs=%zu nparams=%zu kind=%d\n",e->name,e->line,e->nargs,cf->nparams,e->kind); if(e->nargs<=16){ for(size_t ai=0;ai<e->nargs;ai++) fprintf(stderr,"DBG   arg%zu: kind=%d%s%s\n",ai,e->args[ai]?e->args[ai]->kind:-1,e->args[ai]&&e->args[ai]->name?" name=":"",e->args[ai]&&e->args[ai]->name?e->args[ai]->name:""); } }
             if(strcmp(cf->name,e->name)) continue;
-            if(e->nargs>cf->nparams) continue;
+            int vis=0; for(size_t q=0;q<cf->nparams;q++) if(!cf->params[q].ty.array_n) vis++;
+            if(e->nargs> (size_t)vis) continue;
             int rk=0, bad=0;
-            if(e->nargs<cf->nparams){ int no_def=0;
-                for(size_t q=e->nargs;q<cf->nparams;q++){
+            if(e->nargs<(size_t)vis){ int no_def=0; size_t seen=0;
+                for(size_t q=0;q<cf->nparams;q++){
+                    if(cf->params[q].ty.array_n) continue;
+                    if(seen++<e->nargs) continue;
                     if(cf->params[q].def||cf->params[q].ty.is_ptr||
                        cf->params[q].ty.kind==T_TEXTURE||cf->params[q].ty.kind==T_SAMPLER) continue;
                     no_def=1; break;
                 }
                 if(no_def) continue;
                 rk+=3; /* uses defaulted args or implicit resource plumbing */ }
-            for(size_t ai=0;ai<e->nargs;ai++){
-                Type at={0}; expr_type_of(c,e->args[ai],&at);
-                Type pt=cf->params[ai].ty;
+            size_t ai=0;
+            for(size_t q=0;q<cf->nparams;q++){
+                if(cf->params[q].ty.array_n) continue;
+                if(ai>e->nargs) continue;
+                if(ai==e->nargs) continue;
+                Type at={0}; expr_type_of(c,e->args[ai++],&at);
+                Type pt=cf->params[q].ty;
                 if(getenv("BINC_DEBUG_IW")&&!strcmp(cf->name,e->name)) fprintf(stderr,"DBG arg %zu: at(k=%d,ptr=%d,as=%d,v=%d) pt(k=%d,ptr=%d,as=%d,v=%d)\n",ai,at.kind,at.is_ptr,at.as,at.vecn,pt.kind,pt.is_ptr,pt.as,pt.vecn);
                 if(pt.kind==T_TVAR) continue; /* template parameter matches anything */
-                if(!strcmp(cf->params[ai].name,"__uniforms")) continue; /* __uniforms plumbing arg matches anything */
+                if(!strcmp(cf->params[q].name,"__uniforms")) continue; /* __uniforms plumbing arg matches anything */
                 if(pt.is_ptr){ if(!at.is_ptr||at.as!=pt.as){ bad=1; break; } continue; }
                 if(at.kind!=pt.kind){
                     if(at.kind==T_INT32&&(pt.kind==T_FLOAT||pt.kind==T_HALF)&&!at.vecn&&!pt.vecn){ rk+=1; continue; } /* promotion */
@@ -2701,18 +2708,21 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             }
             if(f->is_kernel) die(0,"cannot call kernel function %s",e->name);
             if(f==c->fn) die(0,"recursion is not supported on the GPU (%s calls itself)",e->name);
-            if(e->nargs>f->nparams) die(0,"%s expects at most %d argument(s), got %d",e->name,(int)f->nparams,(int)e->nargs);
-            char args[2048]={0}; size_t o=0;
+            int fvis=0; for(size_t q=0;q<f->nparams;q++) if(!f->params[q].ty.array_n) fvis++;
+            if(e->nargs>(size_t)fvis) die(0,"%s expects at most %d argument(s), got %d",e->name,fvis,(int)e->nargs);
+            char args[2048]={0}; size_t o=0, ai=0; int emitted_arg=0;
             if(getenv("BINC_DEBUG_IW")&&!strcmp(e->name,"CondMask")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")){ fprintf(stderr,"DBG cm-loop: nparams=%zu",f->nparams); for(size_t qi=0;qi<f->nparams;qi++) fprintf(stderr," [%s k%d v%d p%d]",f->params[qi].name,f->params[qi].ty.kind,f->params[qi].ty.vecn,f->params[qi].ty.is_ptr); fprintf(stderr,"\n"); }
             for(size_t i=0;i<f->nparams;i++){ Param *p=&f->params[i];
+                if(p->ty.array_n) continue; /* synthetic threadgroup storage is not an AIR argument */
                 Expr implicit={0};
-                Expr *arge = (i<e->nargs)?e->args[i]:p->def; /* defaulted arg */
+                Expr *arge = (ai<e->nargs)?e->args[ai]:p->def; /* defaulted arg */
+                ai++;
                 if(!arge&&(p->ty.is_ptr||p->ty.kind==T_TEXTURE||p->ty.kind==T_SAMPLER)){
                     implicit.kind=E_IDENT; implicit.line=e->line; implicit.col=e->col; implicit.name=p->name;
                     arge=&implicit;
                 }
                 if(!arge) die(0,"%s: missing argument %d (no default)",e->name,(int)i+1);
-                if(i)o+=snprintf(args+o,sizeof args-o,", ");
+                if(emitted_arg++)o+=snprintf(args+o,sizeof args-o,", ");
                 if(p->ty.kind==T_STRUCT && !p->ty.is_ptr){
                     /* struct by-value argument */
                     ValKind ak; const char *v=gen_rval(c,arge,&ak);

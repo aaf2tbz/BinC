@@ -67,6 +67,8 @@ test-ue: binc test-ue-recovery harness
 	./harness /tmp/global-array-index.metallib tests/hlsl/global_array_index.spec; \
 	./binc -E main -T cs_5_0 tests/hlsl/vector_index_lvalue.hlsl -o /tmp/vector-index-lvalue.metallib; \
 	./harness /tmp/vector-index-lvalue.metallib tests/hlsl/vector_index_lvalue.spec; \
+	./binc -E main -T cs_5_0 tests/hlsl/groupshared_index.hlsl -o /tmp/groupshared-index.metallib; \
+	./harness /tmp/groupshared-index.metallib tests/hlsl/groupshared_index.spec; \
 	echo "UE FRONTEND REGRESSIONS PASS"
 
 # Mutation fuzz smoke: the compiler must never crash or hang on malformed input

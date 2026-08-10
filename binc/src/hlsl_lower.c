@@ -542,7 +542,7 @@ static void ra_expr(Expr *e, const char *const *res, size_t nres){
                 for(size_t q=0;q<g_prog.funcs[i].nparams;q++){
                     int isres=0;
                     for(size_t r=0;r<nres;r++) if(!strcmp(g_prog.funcs[i].params[q].name,res[r])){ isres=1; break; }
-                    if(!isres) continue;
+                    if(!isres||g_prog.funcs[i].params[q].ty.array_n) continue;
                     e->args=realloc(e->args,(e->nargs+1)*sizeof(Expr*));
                     Expr *a=E(E_IDENT,e->line,e->col); a->name=strdup(g_prog.funcs[i].params[q].name);
                     e->args[e->nargs++]=a;
