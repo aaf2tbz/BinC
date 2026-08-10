@@ -401,20 +401,22 @@ static void rn_block(Block *b){ for(size_t i=0;i<b->n;i++){
  * (the method form indexes element 0). */
 static void ax_expr(Expr *e){
     if(!e) return;
-    if(e->kind==E_CALL&&e->name&&!strncmp(e->name,"Interlocked",11)){
+    if(e->kind==E_CALL&&e->name&&!e->callee&&!strncmp(e->name,"Interlocked",11)){
         if(e->nargs<2) die(0,"%s expects (buffer, value)",e->name);
-        Expr *dst=e->args[0]; const char *bufname=NULL;
-        if(dst->kind==E_INDEX&&dst->operand->kind==E_IDENT) bufname=dst->operand->name;
+        Expr *dst=e->args[0]; if(dst->kind==E_BIN&&dst->bop==B_ADD&&dst->rhs&&((dst->rhs->kind==E_ICONST&&dst->rhs->ival==0)||(dst->rhs->kind==E_FCONST&&dst->rhs->fval==0.0))) dst=dst->lhs;
+        const char *bufname=NULL; int direct_buffer=0;
+        if(dst->kind==E_INDEX&&dst->operand->kind==E_IDENT){ bufname=dst->operand->name; direct_buffer=1; }
         else if(dst->kind==E_IDENT) bufname=dst->name;
-        else die(0,"Interlocked target must be a buffer element");
+        else if(dst->kind!=E_FIELD&&dst->kind!=E_INDEX&&dst->kind!=E_DEREF) die(0,"Interlocked target must be a buffer element");
         const char *m = !strcmp(e->name,"InterlockedAdd")?"add":!strcmp(e->name,"InterlockedMin")?"min":
             !strcmp(e->name,"InterlockedMax")?"max":!strcmp(e->name,"InterlockedAnd")?"and":
             !strcmp(e->name,"InterlockedOr")?"or":!strcmp(e->name,"InterlockedXor")?"xor":
             !strcmp(e->name,"InterlockedExchange")?"exchange":!strcmp(e->name,"InterlockedCompareExchange")?"compare_exchange":NULL;
         if(!m) die(0,"unsupported Interlocked op %s",e->name);
-        Expr *id=E(E_IDENT,dst->line,dst->col); id->name=strdup(bufname);
-        Expr *der=E(E_DEREF,dst->line,dst->col); der->operand=id;
-        Expr *callee=E(E_FIELD,e->line,e->col); callee->operand=der; callee->field=strdup(m);
+        Expr *target=NULL;
+        if(direct_buffer||dst->kind==E_IDENT){ Expr *id=E(E_IDENT,dst->line,dst->col); id->name=strdup(bufname); target=E(E_DEREF,dst->line,dst->col); target->operand=id; }
+        else target=rw_copy(dst);
+        Expr *callee=E(E_FIELD,e->line,e->col); callee->operand=target; callee->field=strdup(m);
         Expr *n=E(E_CALL,e->line,e->col); n->callee=callee; n->name=strdup(m);
         n->nargs=e->nargs-1;
         if(n->nargs){ n->args=calloc(n->nargs,sizeof(Expr*));

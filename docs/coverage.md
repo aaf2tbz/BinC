@@ -190,8 +190,9 @@ resource-field flattening ABI.
 accepts symbolic vector/matrix template dimensions, nested template headers,
 operator[] method signatures, and static/const compile-time member initializers;
 uninstantiated template function bodies are skipped rather than misclassified
-as ordinary concrete HLSL functions.
-unscoped enum declarations as
+as ordinary concrete HLSL functions. Nested enum constants are flattened for
+AIR symbol safety; `nested_enum_regress.hlsl` verifies scoped constant folding.
+The HLSL frontend parses fixed-underlying and unscoped enum declarations as
 strict immutable integral module constants, including declaration-order
 initializers, previous-enumerator references, implicit increments, and
 trailing commas; `enum_regress.hlsl` covers the resulting AIR/Metallib path.

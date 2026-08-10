@@ -317,6 +317,10 @@ static Expr *parse_postfix(TokStream *ts){
         else if(ot->kind==TK_ARROW){ advance(ts); Token *f=peek(ts); expect(ts,TK_IDENT,"field after ->");
             Expr *d=E(E_DEREF,ot->line,ot->col); d->operand=e; /* p->f == (*p).f == p[id].f */
             Expr *n=E(E_FIELD,ot->line,ot->col); n->operand=d; n->field=strdup(f->text); e=n; }
+        else if(ot->kind==TK_COLON&&ts->i+1<ts->n&&ts->toks[ts->i+1].kind==TK_COLON&&e->kind==E_IDENT){
+            advance(ts); advance(ts); Token *q=peek(ts); expect(ts,TK_IDENT,"qualified constant name");
+            char nm[256]; snprintf(nm,sizeof nm,"%s__%s",e->name,q->text); free(e->name); e->name=strdup(nm);
+        }
         else if(ot->kind==TK_INC||ot->kind==TK_DEC){ advance(ts);
             Expr *n=E(E_INCDEC,ot->line,ot->col); n->operand=e; n->bval = ot->kind==TK_DEC; e=n; }
         else break;
@@ -758,6 +762,34 @@ void parse_function(TokStream *ts, Program *prog){
     prog->funcs=realloc(prog->funcs,(prog->nfuncs+1)*sizeof(Function));
     prog->funcs[prog->nfuncs++]=(Function){strdup(nm->text),NULL,params,np,body,is_kernel,stage,ret,nm->line,tvar!=NULL,tvar?strdup(tvar):NULL,{0}};
 }
+static int nested_enum_eval(Expr *e, long *out){
+    if(!e) return 0;
+    if(e->kind==E_ICONST){ *out=(long)e->ival; return 1; }
+    if(e->kind==E_BOOL){ *out=e->bval?1:0; return 1; }
+    if(e->kind==E_IDENT&&g_parse_prog){
+        for(size_t i=0;i<g_parse_prog->nconsts;i++){
+            const char *nm=g_parse_prog->consts[i].name; const char *p=strstr(nm,"__"); p=p?p+2:nm;
+            if(!strcmp(nm,e->name)||!strcmp(p,e->name)){ *out=g_parse_prog->consts[i].ival; return 1; }
+        }
+        return 0;
+    }
+    if(e->kind==E_NEG||e->kind==E_COMPL){ long v; if(!nested_enum_eval(e->operand,&v)) return 0; *out=e->kind==E_NEG?-v:~v; return 1; }
+    if(e->kind==E_BIN){ long a,b; if(!nested_enum_eval(e->lhs,&a)||!nested_enum_eval(e->rhs,&b)) return 0; switch(e->bop){ case B_ADD:*out=a+b;return 1; case B_SUB:*out=a-b;return 1; case B_MUL:*out=a*b;return 1; case B_DIV:if(!b)return 0;*out=a/b;return 1; case B_MOD:if(!b)return 0;*out=a%b;return 1; case B_AND:*out=a&b;return 1; case B_OR:*out=a|b;return 1; case B_XOR:*out=a^b;return 1; case B_SHL:*out=a<<b;return 1; case B_SHR:*out=a>>b;return 1; default:return 0; } }
+    return 0;
+}
+
+static void parse_nested_enum(TokStream *ts, const char *scope){
+    advance(ts); if(peek(ts)->kind==TK_IDENT) advance(ts); if(accept(ts,TK_COLON)){ if(peek(ts)->kind==TK_KW_UINT||peek(ts)->kind==TK_KW_INT) advance(ts); }
+    expect(ts,TK_LBRACE,"{"); long prev=0; int have=0;
+    while(peek(ts)->kind!=TK_RBRACE&&peek(ts)->kind!=TK_EOF){
+        Token *nt=peek(ts); expect(ts,TK_IDENT,"enum name"); long value=have?prev+1:0;
+        if(accept(ts,TK_EQ)){ Expr *init=parse_expr(ts); if(!nested_enum_eval(init,&value)) die(nt->line,"nested enum initializer must be integral"); }
+        if(g_parse_prog){ ConstDef c={0}; char nm[256]; snprintf(nm,sizeof nm,"%s__%s",scope,nt->text); c.name=strdup(nm); c.ty.kind=T_INT32; c.is_int=1; c.ival=value; c.fval=(double)value; c.line=nt->line; c.mut=0; g_parse_prog->consts=realloc(g_parse_prog->consts,(g_parse_prog->nconsts+1)*sizeof c); g_parse_prog->consts[g_parse_prog->nconsts++]=c; }
+        prev=value; have=1; if(!accept(ts,TK_COMMA)) break;
+    }
+    expect(ts,TK_RBRACE,"}"); if(peek(ts)->kind==TK_SEMI) advance(ts);
+}
+
 void parse_struct(TokStream *ts, Program *prog){
     /* template<typename T> struct ... */
     const char *tvar=NULL;
@@ -771,6 +803,7 @@ void parse_struct(TokStream *ts, Program *prog){
     Token *tag=peek(ts); expect_name(ts,"struct tag"); expect(ts,TK_LBRACE,"{");
     Field *f=NULL; size_t n=0,cap=0;
     while(peek(ts)->kind!=TK_RBRACE){
+        if(peek(ts)->kind==TK_KW_ENUM){ parse_nested_enum(ts,tag->text); continue; }
         if(peek(ts)->kind==TK_KW_TEMPLATE){
             advance(ts); if(accept(ts,TK_LT)){ int td=1; while(td>0){ Token *tt=peek(ts); if(tt->kind==TK_LT)td++; else if(tt->kind==TK_GT)td--; if(tt->kind==TK_EOF) die(tt->line,"unterminated method template"); advance(ts); } }
             continue;
@@ -796,7 +829,7 @@ void parse_struct(TokStream *ts, Program *prog){
         }
         int skip_static_member=0;
         while((peek(ts)->kind==TK_IDENT&&(!strcmp(peek(ts)->text,"row_major")||!strcmp(peek(ts)->text,"column_major")||
-                                         !strcmp(peek(ts)->text,"precise")||!strcmp(peek(ts)->text,"shared")))||
+                                         !strcmp(peek(ts)->text,"precise")||!strcmp(peek(ts)->text,"shared")||!strcmp(peek(ts)->text,"nointerpolation")))||
               peek(ts)->kind==TK_KW_LINEAR||peek(ts)->kind==TK_KW_NOPERSPECTIVE||
               peek(ts)->kind==TK_KW_CENTROID||peek(ts)->kind==TK_KW_SAMPLE||peek(ts)->kind==TK_KW_STATIC||peek(ts)->kind==TK_KW_CONSTANT){
             if(peek(ts)->kind==TK_KW_STATIC||peek(ts)->kind==TK_KW_CONSTANT) skip_static_member=1;

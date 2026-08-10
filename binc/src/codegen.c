@@ -2209,6 +2209,18 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         *k=VK_F32; c->rvw=4; return v;
                     }
                     die(0,"unknown texture method .%s (use read, write, sample)",e->name);
+                } else if(tr==R_PTR&&e->name&&(!strcmp(e->name,"InterlockedAnd")||!strcmp(e->name,"InterlockedOr"))){
+                    if(e->nargs!=2) die(0,"%s expects (byteAddress, value)",e->name);
+                    Param *bp=&c->fn->params[ti]; ValKind ok; const char *ov=gen_rval(c,e->args[0],&ok);
+                    if(c->rvw||(ok!=VK_I32&&ok!=VK_U32)) die(0,"%s address must be scalar integer",e->name);
+                    const char *o64=ov; if(ok==VK_I32){ o64=newtmp(c); emit(c,"  %s = sext i32 %s to i64\n",o64,ov); } else if(ok==VK_U32){ o64=newtmp(c); emit(c,"  %s = zext i32 %s to i64\n",o64,ov); }
+                    ValKind vk; const char *vv=gen_rval(c,e->args[1],&vk); if(c->rvw) die(0,"%s value must be scalar",e->name); vv=coerce(c,vv,vk,VK_U32);
+                    char *basep=newtmp(c); emit(c,"  %s = bitcast %s addrspace(%d)* %%_%s to i8 addrspace(%d)*\n",basep,scalar_ll(bp->ty.kind),bp->ty.as,bp->name,bp->ty.as);
+                    char *gp=newtmp(c); emit(c,"  %s = getelementptr inbounds i8, i8 addrspace(%d)* %s, i64 %s\n",gp,bp->ty.as,basep,o64);
+                    char *p32=newtmp(c); emit(c,"  %s = bitcast i8 addrspace(%d)* %s to i32 addrspace(%d)*\n",p32,bp->ty.as,gp,bp->ty.as);
+                    const char *intr=!strcmp(e->name,"InterlockedAnd")?"air.atomic.global.and.i32":"air.atomic.global.or.i32"; char *r=newtmp(c);
+                    emit(c,"  %s = call i32 @%s(i32 addrspace(%d)* %s, i32 %s, i32 0, i32 2, i32 0, i1 false)\n",r,intr,bp->ty.as,p32,vv);
+                    c->read[ti]=1; c->written[ti]=1; *k=VK_U32; c->rvw=0; return r;
                 } else if(tr==R_PTR&&e->name&&(!strncmp(e->name,"Load",4)||!strncmp(e->name,"Store",5))){
                     /* ByteAddressBuffer.Load(byteOff) / Load2..4 / Store(v, off)
                      * — the buffer is an i32 device pointer; view it as i8*,
@@ -2274,19 +2286,22 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             }
             if(strcmp(e->name,"add")) die(0,"unsupported atomic method %s",e->name);
             if(e->nargs!=1&&e->nargs!=2) die(0,"atomic add expects one value and optional out result");
-            Expr *base=e->callee->operand; if(base->kind!=E_DEREF||base->operand->kind!=E_IDENT) die(0,"atomic methods require an atomic buffer");
-            int api; if(resolve(c,base->operand->name,&api)!=R_PTR) die(0,".add() target is not an atomic buffer");
-            Param *aparam=&c->fn->params[api];
-            TypeKind ak=aparam->ty.kind==T_ATOMIC?aparam->ty.atomic_base:aparam->ty.kind;
-            if(aparam->ty.kind!=T_ATOMIC&&(!aparam->ty.is_ptr||(ak!=T_FLOAT&&ak!=T_INT32&&ak!=T_UINT32))) die(0,".add() target is not an atomic buffer");
-            LInfo ali; fill_param_li(c,api,&ali); ali.pi=api; c->read[api]=1; c->written[api]=1;
-            char *ap=element_ptr_idx(c,api,"0");
+            Expr *base=e->callee->operand; int api=-1; int is_atomic_target=0; TypeKind ak=T_UINT32; LInfo ali={0}; char *ap=NULL;
+            if(base->kind==E_DEREF&&base->operand->kind==E_IDENT){
+                if(resolve(c,base->operand->name,&api)!=R_PTR) die(0,".add() target is not an atomic buffer");
+                Param *aparam=&c->fn->params[api]; is_atomic_target=aparam->ty.kind==T_ATOMIC; ak=aparam->ty.kind==T_ATOMIC?aparam->ty.atomic_base:aparam->ty.kind;
+                if(aparam->ty.kind!=T_ATOMIC&&(!aparam->ty.is_ptr||(ak!=T_FLOAT&&ak!=T_INT32&&ak!=T_UINT32))) die(0,".add() target is not an atomic buffer");
+                fill_param_li(c,api,&ali); ali.pi=api; c->read[api]=1; c->written[api]=1; ap=element_ptr_idx(c,api,"0");
+            } else {
+                ap=gen_lval(c,base,&ali,1); ak=ali.tk;
+                if(ali.vecn||ali.matn||(ak!=T_FLOAT&&ak!=T_INT32&&ak!=T_UINT32)) die(0,".add() target is not a scalar lvalue");
+            }
             ValKind vk; const char *v=gen_rval(c,e->args[0],&vk);
             if(c->rvw) die(0,"atomic add does not accept vectors");
             ValKind want=scalar_vk(ak); v=coerce(c,v,vk,want);
             const char *intr=ak==T_FLOAT?"air.atomic.global.add.f32":"air.atomic.global.add.i32";
             char *pp=ap;
-            if(aparam->ty.kind==T_ATOMIC){ pp=newtmp(c); emit(c,"  %s = getelementptr inbounds %%\"struct.metal::_atomic\", %%\"struct.metal::_atomic\" addrspace(1)* %s, i64 0, i32 0\n",pp,ap); }
+            if(is_atomic_target){ pp=newtmp(c); emit(c,"  %s = getelementptr inbounds %%\"struct.metal::_atomic\", %%\"struct.metal::_atomic\" addrspace(1)* %s, i64 0, i32 0\n",pp,ap); }
             const char *r=newtmp(c); emit(c,"  %s = call %s @%s(%s addrspace(1)* %s, %s %s, i32 0, i32 2, i32 0, i1 false)\n",r,scalar_ll(ak),intr,scalar_ll(ak),pp,scalar_ll(ak),v);
             if(e->nargs==2){
                 LInfo oi; char *op=gen_lval(c,e->args[1],&oi,1);
@@ -3591,7 +3606,7 @@ void emit_air(FILE *out, Program *prog){
     }
     int atomic_base=-1;
     for(size_t fi=0;fi<prog->nfuncs;fi++) for(size_t pi=0;pi<prog->funcs[fi].nparams;pi++) if(prog->funcs[fi].params[pi].ty.kind==T_ATOMIC){
-        int b=prog->funcs[fi].params[pi].ty.atomic_base; if(atomic_base<0)atomic_base=b; else if(atomic_base!=b) die(0,"atomic buffers in one module must have the same payload type"); }
+        int b=prog->funcs[fi].params[pi].ty.atomic_base; if(atomic_base<0)atomic_base=b; else if(atomic_base!=b){ if(prog->hlsl&&(b==T_INT32||b==T_UINT32)&&(atomic_base==T_INT32||atomic_base==T_UINT32)) atomic_base=T_INT32; else die(0,"atomic buffers in one module must have the same payload type"); } }
     if(atomic_base>=0) fprintf(out,"%%\"struct.metal::_atomic\" = type { %s }\n",scalar_ll((TypeKind)atomic_base));
     fprintf(out,"\n");
 
