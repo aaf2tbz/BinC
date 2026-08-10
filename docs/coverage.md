@@ -165,7 +165,10 @@ HLSL resource-bearing struct fields are flattened to separate texture/sampler
 parameters using the receiving function's formal resource types; the
 `resource_field_sample.hlsl` regression verifies AIR resource metadata and
 `air.sample_texture_2d` forwarding without placing opaque resources in a value
-struct. The generated `ViewState` stub also carries UE's `float4
+struct. The UE audit force-includes
+`Engine/Generated/GeneratedUniformBuffers.ush` for standalone common-shader
+rows and records that include in report provenance. The generated `ViewState`
+stub also carries UE's `float4
 InvDeviceZToWorldZTransform` field for indexed depth conversion helpers. It
 also exposes `float3 TranslatedWorldCameraOrigin`, required by the
 `GetCameraVector` overloads and translated-world wrappers. Matrix-aware HLSL

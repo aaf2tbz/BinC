@@ -16,6 +16,7 @@ static const char *usage_text =
     "  -h, --help           show this help and exit\n"
     "  --version            show the compiler version and exit\n"
     "  -I <dir>             add an include search path\n"
+    "  -include <file>      force-include an HLSL header before the source\n"
     "  -no-prelude          disable the automatic prelude include\n"
     "  -i                   interpret on the CPU (scalar/vector subset, no GPU)\n"
     "  -fsyntax-only        parse and type-check only; no AIR, metal, or output\n"
@@ -612,11 +613,12 @@ int main(int argc, char **argv) {
         binc_set_air(triple,sdk,sdk-18);
     }
     const char *infile = NULL; const char *outfile = NULL; int emit_ll_only = 0; int no_prelude = 0; int interpret = 0; int syntax_only = 0; int stage_all = 0; int reflect = 0;
-    const char *hlsl_entry = NULL; const char *hlsl_profile = NULL;
+    const char *hlsl_entry = NULL; const char *hlsl_profile = NULL; const char *force_include = NULL;
     char *ddefs[32]; size_t nddefs=0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i+1 < argc) outfile = argv[++i];
         else if (!strcmp(argv[i], "-I") && i+1 < argc) add_inc_dir(argv[++i]);
+        else if (!strcmp(argv[i], "-include") && i+1 < argc) force_include = argv[++i];
         else if (!strcmp(argv[i], "-D") && i+1 < argc && nddefs < 32) ddefs[nddefs++] = argv[++i];
         else if (!strcmp(argv[i], "--emit-ll")) emit_ll_only = 1;
         else if (!strcmp(argv[i], "-no-prelude")) no_prelude = 1;
@@ -684,6 +686,11 @@ int main(int argc, char **argv) {
             memcpy(nm,dv,nl); nm[nl]=0;
             defs[ndefs].name=strdup(nm); defs[ndefs].val=strdup(eq?eq+1:"1"); defs[ndefs].nparams=0;
             ndefs++;
+        }
+        if(force_include){
+            char *pre_spl=splice_file(force_include);
+            if(!pre_spl){ fprintf(stderr,"binc: error: forced include %s failed to load\n",force_include); return 1; }
+            pp_process(force_include,pre_spl,&all,defs,&ndefs); free(pre_spl);
         }
         pp_process(infile,main_spl,&all,defs,&ndefs);
         free(main_spl);

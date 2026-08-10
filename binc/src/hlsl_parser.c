@@ -492,6 +492,7 @@ HLSLProg hlsl_parse(TokStream *ts){
             g_parse_prog=&tmp;
             parse_struct(ts,&tmp);
             g_parse_prog=NULL;
+            for(size_t ci=0;ci<tmp.nconsts;ci++){ ConstDef *cc=&tmp.consts[ci]; HLSLGlobal eg={0}; eg.name=strdup(cc->name); eg.ty=cc->ty; eg.is_const=1; eg.is_int=1; eg.ival=cc->ival; eg.fval=cc->fval; eg.has_init=1; eg.line=cc->line; hpush((void**)&hp.globals,&hp.nglobals,&gcap,&eg,sizeof eg); }
             if(tmp.nstructs){
                 HLSLStruct hs={0};
                 hs.tag=strdup(tmp.structs[0].tag);
