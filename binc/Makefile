@@ -63,6 +63,10 @@ test-ue: binc test-ue-recovery harness
 	./harness /tmp/view-state-preexposure.metallib tests/hlsl/view_state_preexposure.spec; \
 	./binc -E main -T cs_5_0 tests/hlsl/logical_not_integer.hlsl -o /tmp/logical-not-integer.metallib; \
 	./harness /tmp/logical-not-integer.metallib tests/hlsl/logical_not_integer.spec; \
+	./binc -E main -T cs_5_0 tests/hlsl/global_array_index.hlsl -o /tmp/global-array-index.metallib; \
+	./harness /tmp/global-array-index.metallib tests/hlsl/global_array_index.spec; \
+	./binc -E main -T cs_5_0 tests/hlsl/vector_index_lvalue.hlsl -o /tmp/vector-index-lvalue.metallib; \
+	./harness /tmp/vector-index-lvalue.metallib tests/hlsl/vector_index_lvalue.spec; \
 	echo "UE FRONTEND REGRESSIONS PASS"
 
 # Mutation fuzz smoke: the compiler must never crash or hang on malformed input

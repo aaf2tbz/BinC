@@ -55,6 +55,15 @@ static void type_ll(char *buf,size_t n,TypeKind k,char *sname,int vecn){
     else if(k==T_ATOMIC) snprintf(buf,n,"%%\"struct.metal::_atomic\"");
     else ll_of(buf,n,k,vecn);
 }
+static void aggregate_ll(char *buf,size_t n,const Type *t){
+    char elem[128];
+    if(t->matn) mll_of(elem,sizeof elem,t->matn,t->matm);
+    else type_ll(elem,sizeof elem,t->kind,t->struct_name,t->vecn);
+    if(t->array_n){
+        if(t->array_m) snprintf(buf,n,"[%d x [%d x %s]]",t->array_n,t->array_m,elem);
+        else snprintf(buf,n,"[%d x %s]",t->array_n,elem);
+    } else snprintf(buf,n,"%s",elem);
+}
 static void tn_of(char *buf,size_t n,TypeKind k,int vecn){
     if(vecn>1) snprintf(buf,n,"%s%d",type_name(k),vecn); else snprintf(buf,n,"%s",type_name(k)); }
 static void ptn_of(char *buf,size_t n,TypeKind k,int vecn,int matn){
@@ -1215,6 +1224,12 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         if(r==R_TEXTURE||r==R_SAMPLER){ *k=VK_I32; c->rvw=0; char *nm=malloc(strlen(e->name)+3);
             snprintf(nm,strlen(e->name)+3,"%%_%s",e->name); return nm; }
         if(r==R_CONST){ ConstDef *cd=&c->prog->consts[idx];
+            if(cd->ty.matn){
+                char ll[64]; mll_of(ll,sizeof ll,cd->ty.matn,cd->ty.matm);
+                const char *v=newtmp(c);
+                emit(c,"  %s = load %s, %s addrspace(%d)* @_binc_%s_%s, align %d\n",v,ll,ll,cd->mut?1:2,cd->mut?"mut":"const",cd->name,tal(cd->ty.kind,cd->ty.vecn,cd->ty.matn,cd->ty.matm));
+                *k=VK_F32; c->rvw=0; c->rmat=cd->ty.matn; c->rmatm=cd->ty.matm; return v;
+            }
             *k = cd->ty.kind==T_BOOL?VK_I1:(cd->ty.kind==T_FLOAT||cd->ty.kind==T_HALF)?VK_F32:(cd->ty.kind==T_UINT32?VK_U32:VK_I32);
             c->rvw=cd->ty.vecn>1?cd->ty.vecn:0;
             c->rstruct=cd->ty.kind==T_STRUCT?cd->ty.struct_name:NULL;
@@ -2856,14 +2871,14 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             li->an=c->locs[idx].an; li->am=c->locs[idx].am;
             if(mark && c->locs[idx].is_const) die(0,"cannot write to const local %s",e->name);
             return c->locs[idx].slot; }
-        if(r==R_CONST){ /* mutable static global (SPIRV-Cross pattern): a store
-            to @_binc_mut_<name>; a write to a true const stays an error */
+        if(r==R_CONST){ /* module constant globals live in address space 2;
+            mutable static globals use address space 1 and remain writable */
             ConstDef *cd=&c->prog->consts[idx];
-            if(!cd->mut) die(0,"cannot write to const %s",e->name);
-            li->tk=cd->ty.kind; li->sname=cd->ty.struct_name; li->as=1; li->pi=-1;
+            if(mark&&!cd->mut) die(0,"cannot write to const %s",e->name);
+            li->tk=cd->ty.kind; li->sname=cd->ty.struct_name; li->as=cd->mut?1:AS_CONSTANT; li->pi=-1;
             li->is_local=0; li->vecn=cd->ty.vecn; li->matn=cd->ty.matn; li->matm=cd->ty.matm;
             li->an=cd->ty.array_n; li->am=cd->ty.array_m;
-            char gn[160]; snprintf(gn,sizeof gn,"@_binc_mut_%s",cd->name);
+            char gn[160]; snprintf(gn,sizeof gn,"@_binc_%s_%s",cd->mut?"mut":"const",cd->name);
             return strdup(gn); }
         if(r==R_SCALAR){ /* plain scalar/vector parameter as an lvalue (e.g. the
             base of a scalar swizzle like `bool a` with a.x, or a by-value
@@ -2921,6 +2936,50 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
                 emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 0, i64 %s\n",colptr,mty,mty,base,iv);
                 li->tk=T_FLOAT; li->sname=NULL; li->vecn=mrows; li->matn=0; li->matm=0;
                 return colptr;
+            }
+        }
+        /* vector lvalue element: HLSL permits dynamic writes such as
+         * `inout int4 Data; Data[Index] |= Value`. */
+        {
+            Type base_ty; expr_type_of(c,e->operand,&base_ty);
+            if(base_ty.vecn>1&&!base_ty.is_ptr&&!base_ty.array_n&&!base_ty.array_m){
+                ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
+                if(ik!=VK_I32&&ik!=VK_U32) die(0,"vector index must be scalar");
+                iv=coerce(c,iv,ik,VK_I32);
+                const char *i64=newtmp(c);
+                emit(c,"  %s = sext i32 %s to i64\n",i64,iv);
+                LInfo li2={0}; char *base=gen_lval(c,e->operand,&li2,mark);
+                char vty[32], pty[64]; ll_of(vty,sizeof vty,li2.tk,li2.vecn);
+                if(li2.as) snprintf(pty,sizeof pty,"%s addrspace(%d)*",vty,li2.as);
+                else snprintf(pty,sizeof pty,"%s*",vty);
+                char *p=newtmp(c);
+                emit(c,"  %s = getelementptr inbounds %s, %s %s, i64 0, i64 %s\n",p,vty,pty,base,i64);
+                li->tk=li2.tk; li->sname=li2.sname; li->as=li2.as; li->pi=li2.pi; li->is_local=li2.is_local;
+                li->vecn=0; li->matn=0; li->matm=0; li->an=0; li->am=0;
+                return p;
+            }
+        }
+        /* module constant/static arrays: index the address-space global and
+         * leave the resulting element (or remaining row) as an lvalue. */
+        if(e->operand->kind==E_IDENT){
+            int ci;
+            if(resolve(c,e->operand->name,&ci)==R_CONST){
+                ConstDef *cd=&c->prog->consts[ci];
+                if(cd->ty.array_n){
+                    ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
+                    if(ik!=VK_I32&&ik!=VK_U32) die(0,"array index must be an integer");
+                    const char *ix=newtmp(c);
+                    emit(c,"  %s = sext i32 %s to i64\n",ix,iv);
+                    char aty[128], asp[32], gn[160], *p=newtmp(c);
+                    aggregate_ll(aty,sizeof aty,&cd->ty);
+                    snprintf(asp,sizeof asp,"addrspace(%d)",cd->mut?1:AS_CONSTANT);
+                    snprintf(gn,sizeof gn,"@_binc_%s_%s",cd->mut?"mut":"const",cd->name);
+                    emit(c,"  %s = getelementptr inbounds %s, %s %s* %s, i64 0, i64 %s\n",p,aty,aty,asp,gn,ix);
+                    li->tk=cd->ty.kind; li->sname=cd->ty.struct_name; li->as=cd->mut?1:AS_CONSTANT; li->pi=-1; li->is_local=0;
+                    li->vecn=cd->ty.vecn; li->matn=cd->ty.matn; li->matm=cd->ty.matm;
+                    li->an=cd->ty.array_m; li->am=0;
+                    return p;
+                }
             }
         }
         /* local and struct-field arrays: a[i], s.v[i], buf[i].v[j] */
@@ -3517,11 +3576,14 @@ void emit_air(FILE *out, Program *prog){
             for(size_t j=0;j<prog->nstructs;j++) if(!strcmp(prog->structs[j].tag,cd->ty.struct_name)){ known=1; break; }
             if(!known) continue;
         }
-        char ll[64];
-        if(cd->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",cd->ty.struct_name);
+        char ll[128];
+        if(cd->ty.array_n) aggregate_ll(ll,sizeof ll,&cd->ty);
+        else if(cd->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",cd->ty.struct_name);
+        else if(cd->ty.matn) mll_of(ll,sizeof ll,cd->ty.matn,cd->ty.matm);
         else ll_of(ll,sizeof ll,cd->ty.kind,cd->ty.vecn);
         char val[512];
-        if(cd->ty.kind==T_STRUCT) snprintf(val,sizeof val,"zeroinitializer");
+        if(cd->ty.array_n) snprintf(val,sizeof val,"zeroinitializer");
+        else if(cd->ty.kind==T_STRUCT||cd->ty.matn) snprintf(val,sizeof val,"zeroinitializer");
         else if(cd->ty.vecn>1&&cd->init_n==cd->ty.vecn){
             size_t vo=0;
             vo+=(size_t)snprintf(val+vo,sizeof val-vo,"<");
@@ -3542,7 +3604,7 @@ void emit_air(FILE *out, Program *prog){
         }
         else snprintf(val,sizeof val,"%ld",cd->ival);
         fprintf(out,"@_binc_%s_%s = internal unnamed_addr addrspace(%d) global %s %s, align %d\n",
-                cd->mut?"mut":"const",cd->name,cd->mut?1:2,ll,val,type_align(cd->ty.kind,cd->ty.vecn));
+                cd->mut?"mut":"const",cd->name,cd->mut?1:2,ll,val,tal(cd->ty.kind,cd->ty.vecn,cd->ty.matn,cd->ty.matm));
     }
     if(prog->nconsts) fprintf(out,"\n");
     /* struct usage: emit only structs reachable from the emitted functions +

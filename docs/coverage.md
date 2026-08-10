@@ -181,6 +181,12 @@ overloads; `ScreenToTranslatedWorld` is covered in the View stub.
 Integer and scalar-float HLSL logical-not now lower through zero comparisons
 (including UE's `!(uintMask & bit)` idiom), with a Metallib/GPU regression in
 `logical_not_integer.hlsl`.
+Dynamic indexing of mutable static global arrays now emits typed address-space
+GEPs; `global_array_index.hlsl` verifies an indexed store/read at `15.0` on the
+GPU. Vector-valued lvalue indexing uses a typed vector-element GEP;
+`vector_index_lvalue.hlsl` verifies dynamic assignment/readback at `7.0`.
+Global brace-initializer preservation remains a separate parser/data-model
+follow-up.
 Implicit compiler-forwarded pointer/texture/sampler parameters are accepted by
 HLSL overload resolution without changing ordinary value-argument arity;
 `implicit_uniform_overload.hlsl` locks the zero-argument cbuffer-forwarding
