@@ -591,9 +591,17 @@ static int eval_ptr(CG *c, Expr *e, const char **ix){
         *ix=r; return pi; }
     die(0,"unsupported pointer expression");
 }
+static char *element_ptr_payload(CG *c,int pi,const char *ix){
+    char *p=element_ptr_idx(c,pi,ix); Param *pr=&c->fn->params[pi];
+    if(pr->ty.kind!=T_ATOMIC) return p;
+    char at[64]; type_ll(at,sizeof at,T_ATOMIC,NULL,0);
+    char *q=newtmp(c);
+    emit(c,"  %s = getelementptr inbounds %s, %s addrspace(%d)* %s, i64 0, i32 0\n",q,at,at,pr->ty.as,p);
+    return q;
+}
 static void fill_param_li(CG *c,int pi,LInfo *li){
     Param *pr=&c->fn->params[pi];
-    li->tk=pr->ty.kind; li->sname=pr->ty.struct_name; li->as=pr->ty.as; li->pi=pi; li->is_local=0; li->vecn=pr->ty.vecn; li->matn=pr->ty.matn; li->matm=pr->ty.matm; }
+    li->tk=pr->ty.kind==T_ATOMIC?pr->ty.atomic_base:pr->ty.kind; li->sname=pr->ty.struct_name; li->as=pr->ty.as; li->pi=pi; li->is_local=0; li->vecn=pr->ty.vecn; li->matn=pr->ty.matn; li->matm=pr->ty.matm; }
 
 /* promote a half-typed value to f32 (vector-aware); compute is done in f32 */
 static const char *swizzle_read(CG *c, const char *vec, const char *vty, const char *ety, const int *idxs, int nc);
@@ -749,6 +757,7 @@ static int builtin_used[sizeof builtins/sizeof *builtins];
 static void mark_builtin(const char *name){ for(size_t i=0;i<sizeof builtins/sizeof *builtins;i++) if(!strcmp(builtins[i].name,name)){ builtin_used[i]=1; return; } }
 static int reversebits_used;
 static int atomic_add_used[3];
+static int atomic_logic_used[2];
 static int tex_read_used[4], tex_write_used[4], tex_sample_used[4], tex_sample_cube_used[4], tex_sample_cube_array_used[4], tex_sample_1d_used[4], tex_sample_3d_used[4], tex_sample_2d_array_used[4], tex_sample_grad_used[4], tex_sample_grad_cube_used[4], tex_sample_grad_cube_array_used[4], tex_sample_grad_3d_used[4], tex_sample_grad_2d_array_used[4], tex_gather_used[4], tex_gather_cube_used[4], tex_gather_cube_array_used[4], tex_gather_2d_array_used[4], get_samp_used;
 static const char *tex_air_type(const Type *ty){
     if(ty->tex_cube && ty->tex_array) return "%struct._texture_cube_array_t";
@@ -2255,6 +2264,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     char *p32=newtmp(c); emit(c,"  %s = bitcast i8 addrspace(%d)* %s to i32 addrspace(%d)*\n",p32,bp->ty.as,gp,bp->ty.as);
                     const char *intr=!strcmp(e->name,"InterlockedAnd")?"air.atomic.global.and.i32":"air.atomic.global.or.i32"; char *r=newtmp(c);
                     emit(c,"  %s = call i32 @%s(i32 addrspace(%d)* %s, i32 %s, i32 0, i32 2, i32 0, i1 false)\n",r,intr,bp->ty.as,p32,vv);
+                    atomic_logic_used[!strcmp(e->name,"InterlockedAnd")?0:1]=1;
                     c->read[ti]=1; c->written[ti]=1; *k=VK_U32; c->rvw=0; return r;
                 } else if(tr==R_PTR&&e->name&&(!strncmp(e->name,"Load",4)||!strncmp(e->name,"Store",5))){
                     /* ByteAddressBuffer.Load(byteOff) / Load2..4 / Store(v, off)
@@ -2319,22 +2329,25 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     *k=VK_U32; c->rvw=0; return r;
                 }
             }
-            if(strcmp(e->name,"add")) die(0,"unsupported atomic method %s",e->name);
-            if(e->nargs!=1&&e->nargs!=2) die(0,"atomic add expects one value and optional out result");
+            int atomic_op = !strcmp(e->name,"add") ? 0 : !strcmp(e->name,"and") ? 1 : !strcmp(e->name,"or") ? 2 : -1;
+            if(atomic_op<0) die(0,"unsupported atomic method %s",e->name);
+            if(e->nargs!=1&&e->nargs!=2) die(0,"atomic %s expects one value and optional out result",e->name);
             Expr *base=e->callee->operand; int api=-1; int is_atomic_target=0; TypeKind ak=T_UINT32; LInfo ali={0}; char *ap=NULL;
             if(base->kind==E_DEREF&&base->operand->kind==E_IDENT){
                 if(resolve(c,base->operand->name,&api)!=R_PTR) die(0,".add() target is not an atomic buffer");
                 Param *aparam=&c->fn->params[api]; is_atomic_target=aparam->ty.kind==T_ATOMIC; ak=aparam->ty.kind==T_ATOMIC?aparam->ty.atomic_base:aparam->ty.kind;
-                if(aparam->ty.kind!=T_ATOMIC&&(!aparam->ty.is_ptr||(ak!=T_FLOAT&&ak!=T_INT32&&ak!=T_UINT32))) die(0,".add() target is not an atomic buffer");
+            if(aparam->ty.kind!=T_ATOMIC&&(!aparam->ty.is_ptr||(ak!=T_FLOAT&&ak!=T_INT32&&ak!=T_UINT32))) die(0,".%s() target is not an atomic buffer",e->name);
+            if(atomic_op!=0&&(ak!=T_INT32&&ak!=T_UINT32)) die(0,".%s() target must be an integer atomic buffer",e->name);
                 fill_param_li(c,api,&ali); ali.pi=api; c->read[api]=1; c->written[api]=1; ap=element_ptr_idx(c,api,"0");
             } else {
                 ap=gen_lval(c,base,&ali,1); ak=ali.tk;
-                if(ali.vecn||ali.matn||(ak!=T_FLOAT&&ak!=T_INT32&&ak!=T_UINT32)) die(0,".add() target is not a scalar lvalue");
+                if(ali.vecn||ali.matn||(ak!=T_FLOAT&&ak!=T_INT32&&ak!=T_UINT32)) die(0,".%s() target is not a scalar lvalue",e->name);
+                if(atomic_op!=0&&(ak!=T_INT32&&ak!=T_UINT32)) die(0,".%s() target must be an integer atomic buffer",e->name);
             }
             ValKind vk; const char *v=gen_rval(c,e->args[0],&vk);
             if(c->rvw) die(0,"atomic add does not accept vectors");
             ValKind want=scalar_vk(ak); v=coerce(c,v,vk,want);
-            const char *intr=ak==T_FLOAT?"air.atomic.global.add.f32":"air.atomic.global.add.i32";
+            const char *intr=atomic_op==0 ? (ak==T_FLOAT?"air.atomic.global.add.f32":"air.atomic.global.add.i32") : atomic_op==1 ? "air.atomic.global.and.i32" : "air.atomic.global.or.i32";
             char *pp=ap;
             if(is_atomic_target){ pp=newtmp(c); emit(c,"  %s = getelementptr inbounds %%\"struct.metal::_atomic\", %%\"struct.metal::_atomic\" addrspace(1)* %s, i64 0, i32 0\n",pp,ap); }
             const char *r=newtmp(c); emit(c,"  %s = call %s @%s(%s addrspace(1)* %s, %s %s, i32 0, i32 2, i32 0, i1 false)\n",r,scalar_ll(ak),intr,scalar_ll(ak),pp,scalar_ll(ak),v);
@@ -2343,7 +2356,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 if(oi.vecn||oi.matn||oi.tk!=ak) die(0,"atomic add out result type mismatch");
                 emit(c,"  store %s %s, %s* %s, align %d\n",scalar_ll(ak),r,scalar_ll(ak),op,type_align(ak,0));
             }
-            atomic_add_used[ak==T_FLOAT?0:1]=1; *k=want; c->rvw=0; return r;
+            if(atomic_op==0) atomic_add_used[ak==T_FLOAT?0:1]=1;
+            else atomic_logic_used[atomic_op-1]=1;
+            *k=want; c->rvw=0; return r;
         }
         /* matrix constructor mat2/3/4(...) / float2x2..float4x4(...) */
         {
@@ -2906,7 +2921,7 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
         die(0, mark ? "%s is not a mutable local" : "undefined name %s", e->name);
     }
     if(e->kind==E_DEREF){ const char *ix; int pi=eval_ptr(c,e->operand,&ix);
-        if(mark)c->written[pi]=1; fill_param_li(c,pi,li); return element_ptr_idx(c,pi,ix); }
+        if(mark)c->written[pi]=1; fill_param_li(c,pi,li); return element_ptr_payload(c,pi,ix); }
     if(e->kind==E_INDEX){
         /* matrix element m[row][col] (two-level on a matrix base) */
         int mrows=0, mcols=0;
@@ -3066,7 +3081,7 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
         if(ik!=VK_I32&&ik!=VK_U32) die(0,"subscript must be an integer");
         const char *i64=newtmp(c); emit(c,"  %s = sext i32 %s to i64\n",i64,iv);
         if(base){ char *s=newtmp(c); emit(c,"  %s = add i64 %s, %s\n",s,base,i64); i64=s; }
-        if(mark)c->written[pi]=1; fill_param_li(c,pi,li); return element_ptr_idx(c,pi,i64);
+        if(mark)c->written[pi]=1; fill_param_li(c,pi,li); return element_ptr_payload(c,pi,i64);
     }
     if(e->kind==E_FIELD){
         /* struct-pointer base: ptr.field (cbuffers, device struct buffers) */
@@ -3574,7 +3589,7 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
 
 void emit_air(FILE *out, Program *prog){
     g_curprog=prog;
-    memset(builtin_used,0,sizeof builtin_used); memset(atomic_add_used,0,sizeof atomic_add_used); reversebits_used=0;
+    memset(builtin_used,0,sizeof builtin_used); memset(atomic_add_used,0,sizeof atomic_add_used); memset(atomic_logic_used,0,sizeof atomic_logic_used); reversebits_used=0;
     fprintf(out,"; generated by binc — works as C, acts as Metal\n");
     fprintf(out,"target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32\"\n");
     fprintf(out,"target triple = \"%s\"\n\n",g_air_triple);
@@ -3849,6 +3864,8 @@ void emit_air(FILE *out, Program *prog){
     if(reversebits_used) fprintf(out,"declare i32 @llvm.bitreverse.i32(i32) local_unnamed_addr\n");
     if(atomic_add_used[0]) fprintf(out,"declare float @air.atomic.global.add.f32(float addrspace(1)*, float, i32, i32, i32, i1) local_unnamed_addr\n");
     if(atomic_add_used[1]) fprintf(out,"declare i32 @air.atomic.global.add.i32(i32 addrspace(1)*, i32, i32, i32, i32, i1) local_unnamed_addr\n");
+    if(atomic_logic_used[0]) fprintf(out,"declare i32 @air.atomic.global.and.i32(i32 addrspace(1)*, i32, i32, i32, i32, i1) local_unnamed_addr\n");
+    if(atomic_logic_used[1]) fprintf(out,"declare i32 @air.atomic.global.or.i32(i32 addrspace(1)*, i32, i32, i32, i32, i1) local_unnamed_addr\n");
     /* texture intrinsics + the opaque texture/sampler types */
     {
         int any_tex_param=0;

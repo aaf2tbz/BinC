@@ -187,7 +187,10 @@ GPU. Vector-valued lvalue indexing uses a typed vector-element GEP;
 `vector_index_lvalue.hlsl` verifies dynamic assignment/readback at `7.0`.
 Groupshared array resources remain synthetic address-space-3 storage rather
 than AIR call arguments; `groupshared_index.hlsl` verifies store/readback at
-`7.0`. Global brace-initializer preservation remains a separate
+`7.0`. Integer `InterlockedAnd/Or` methods emit typed AIR declarations and a
+Metallib compile regression in `atomic_logic.hlsl`; this host GPU reports those
+bitwise AIR calls as unlowered at runtime, so this fixture makes no runtime
+claim. Global brace-initializer preservation remains a separate
 parser/data-model follow-up.
 Implicit compiler-forwarded pointer/texture/sampler parameters are accepted by
 HLSL overload resolution without changing ordinary value-argument arity;
