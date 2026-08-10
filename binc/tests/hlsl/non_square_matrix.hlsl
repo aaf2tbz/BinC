@@ -11,9 +11,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float3 v = mul(float4(1.0, 2.0, 3.0, 1.0), m);
     float3 first_row = m[0];
     m[0] = first_row;
-    float4x3 mats[2];
+    float4x3 mats[2], mat_single;
     mats[0] = m;
+    mat_single = m;
     float3 array_row = mats[0][0];
+    float3 comma_row = mat_single[0];
     mats[0][0] = array_row;
     float array_scalar = mats[0][0][1];
     MatrixHolder h;
@@ -22,4 +24,5 @@ void main(uint3 tid : SV_DispatchThreadID) {
     Output[1] = h.M[0].x;
     Output[2] = first_row.y;
     Output[3] = array_row.z + array_scalar;
+    Output[4] = comma_row.x;
 }

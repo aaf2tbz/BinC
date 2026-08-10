@@ -674,7 +674,7 @@ Stmt parse_stmt(TokStream *ts){
             Block b={0}; b.stmts=calloc(2,sizeof(Stmt)); b.stmts[0]=st; b.n=1;
             do{
                 Token *nm2=peek(ts); expect_name(ts,"name");
-                Type ty2=ty;
+                Type ty2=ty; ty2.array_n=0; ty2.array_m=0;
                 if(accept(ts,TK_LBRACK)){ ty2.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
                     if(accept(ts,TK_LBRACK)){ ty2.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); } }
                 Expr *init2=NULL;
