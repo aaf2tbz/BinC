@@ -255,7 +255,8 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
     case E_IDENT:{ int idx; RKind r=resolve(c,e->name,&idx);
         if(getenv("BINC_DEBUG_IW")&&!strcmp(e->name,"__uniforms")) fprintf(stderr,"DBG etypu: r=%d idx=%d fn=%s nparams=%zu\n",r,idx,c->fn->name,c->fn->nparams);
         if(r==R_LOCAL){ out->kind=c->locs[idx].kind; out->struct_name=c->locs[idx].sname;
-            out->vecn=c->locs[idx].vecn; out->matn=c->locs[idx].matn; }
+            out->vecn=c->locs[idx].vecn; out->matn=c->locs[idx].matn; out->matm=c->locs[idx].matm;
+            out->array_n=c->locs[idx].an; out->array_m=c->locs[idx].am; }
         else if(r==R_CONST){ out->kind=c->prog->consts[idx].ty.kind; }
         else if(r==R_PTR||r==R_SCALAR||r==R_TEXTURE||r==R_SAMPLER){ Type t=c->fn->params[idx].ty; t.tvar=NULL; *out=t; }
         else if(r==R_COORD||r==R_EXTENT){ Type t=c->fn->params[idx].ty; t.tvar=NULL; *out=t; }
@@ -423,6 +424,14 @@ static int matrix_n(CG *c, Expr *e){
 }
 static void matrix_dims(CG *c, Expr *e, int *rows, int *cols){
     *rows=*cols=0;
+    if(e->kind==E_IDENT||e->kind==E_FIELD){
+        Type t=expr_type(c,e);
+        if(t.matn&&t.array_n==0){ *rows=t.matn; *cols=mat_cols(t.matn,t.matm); return; }
+    }
+    if(e->kind==E_INDEX&&(e->operand->kind==E_IDENT||e->operand->kind==E_FIELD)){
+        Type t=expr_type(c,e->operand);
+        if(t.matn&&t.array_n>0){ *rows=t.matn; *cols=mat_cols(t.matn,t.matm); return; }
+    }
     if(e->kind==E_INDEX && (e->operand->kind==E_IDENT||e->operand->kind==E_FIELD)){
         if(e->operand->kind==E_IDENT){
             int i; RKind r=resolve(c,e->operand->name,&i);
@@ -432,8 +441,15 @@ static void matrix_dims(CG *c, Expr *e, int *rows, int *cols){
             }
         }
         if(e->operand->kind==E_FIELD){
-            int i; if(resolve(c,e->operand->operand->kind==E_IDENT?e->operand->operand->name:"",&i)==R_LOCAL && c->locs[i].kind==T_STRUCT){
+            int i; const char *nm=e->operand->operand->kind==E_IDENT?e->operand->operand->name:"";
+            RKind br=resolve(c,nm,&i);
+            if(br==R_LOCAL&&c->locs[i].kind==T_STRUCT){
                 StructDef *s=find_struct(c->prog,c->locs[i].sname);
+                if(s) for(size_t f=0;f<s->nfields;f++) if(!strcmp(s->fields[f].name,e->operand->field)&&s->fields[f].ty.array_n&&s->fields[f].ty.matn){
+                    *rows=s->fields[f].ty.matn; *cols=mat_cols(*rows,s->fields[f].ty.matm); return;
+                }
+            } else if(br==R_PTR&&c->fn->params[i].ty.kind==T_STRUCT){
+                StructDef *s=find_struct(c->prog,c->fn->params[i].ty.struct_name);
                 if(s) for(size_t f=0;f<s->nfields;f++) if(!strcmp(s->fields[f].name,e->operand->field)&&s->fields[f].ty.array_n&&s->fields[f].ty.matn){
                     *rows=s->fields[f].ty.matn; *cols=mat_cols(*rows,s->fields[f].ty.matm); return;
                 }
@@ -448,8 +464,14 @@ static void matrix_dims(CG *c, Expr *e, int *rows, int *cols){
         }
     }
     if(e->kind==E_FIELD && e->operand->kind==E_IDENT){
-        int i; if(resolve(c,e->operand->name,&i)==R_LOCAL && c->locs[i].kind==T_STRUCT){
+        int i; RKind br=resolve(c,e->operand->name,&i);
+        if(br==R_LOCAL&&c->locs[i].kind==T_STRUCT){
             StructDef *s=find_struct(c->prog,c->locs[i].sname);
+            if(s) for(size_t f=0;f<s->nfields;f++) if(!strcmp(s->fields[f].name,e->field)){
+                *rows=s->fields[f].ty.matn; *cols=mat_cols(*rows,s->fields[f].ty.matm); return;
+            }
+        } else if(br==R_PTR&&c->fn->params[i].ty.kind==T_STRUCT){
+            StructDef *s=find_struct(c->prog,c->fn->params[i].ty.struct_name);
             if(s) for(size_t f=0;f<s->nfields;f++) if(!strcmp(s->fields[f].name,e->field)){
                 *rows=s->fields[f].ty.matn; *cols=mat_cols(*rows,s->fields[f].ty.matm); return;
             }

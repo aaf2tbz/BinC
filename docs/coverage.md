@@ -157,8 +157,9 @@ The same fixture now proves distinct cube-array `Sample`, `SampleLevel`, and
 Non-square HLSL matrix lowering now preserves row/column dimensions in the AIR
 aggregate ABI, including constructors, transpose, matrix/vector multiplication,
 field/index access (including HLSL row reads/writes, row/column element
-indexing, and arrays of rectangular matrices), by-value calls/returns, and
-top-left narrowing casts; the persistent `non_square_matrix.hlsl` fixture
+indexing, and arrays of rectangular matrices), by-value calls/returns, nested
+struct-pointer fields, and top-left narrowing casts; the persistent
+`non_square_matrix.hlsl` fixture
 produces a Metallib.
 HLSL resource-bearing struct fields are flattened to separate texture/sampler
 parameters using the receiving function's formal resource types; the
