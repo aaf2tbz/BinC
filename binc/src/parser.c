@@ -64,11 +64,12 @@ Type parse_type(TokStream *ts){
     else if(accept(ts,TK_KW_INT)){t.kind=T_INT32;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_UINT)){t.kind=T_UINT32;t.vecn=(int)pt->ival;}
     else if(accept(ts,TK_KW_BOOL)){t.kind=T_BOOL;t.vecn=(int)pt->ival;} else if(accept(ts,TK_KW_VOID))t.kind=T_VOID;
     else if(accept(ts,TK_KW_MAT)){ t.kind=T_FLOAT; t.matn=(int)pt->ival;
-        /* non-square spellings (float2x3) parse into (matn=rows, matm=cols);
-         * codegen rejects them at emission (no silent squash) */
+        /* non-square spellings (float2x3) parse into (matn=rows, matm=cols); */
         const char *mt=pt->text; char *x=mt?strchr(mt,'x'):NULL;
-        if(x&&x[1]&&mt&&strncmp(mt,"float",5)==0)
+        if(x&&x[1]&&mt&&strncmp(mt,"float",5)==0){
             t.matm=atoi(x+1);
+            if(t.matm==t.matn) t.matm=0;
+        }
     }
     else if(peek(ts)->kind==TK_IDENT){
         /* HLSL template-style type spellings + template-arg struct fallback */
@@ -80,8 +81,7 @@ Type parse_type(TokStream *ts){
             expect(ts,TK_COMMA,","); Token *rn=peek(ts); expect(ts,TK_ICONST,"matrix rows");
             expect(ts,TK_COMMA,","); Token *cn=peek(ts); expect(ts,TK_ICONST,"matrix cols");
             expect(ts,TK_GT,">");
-            t.kind=T_FLOAT; t.matn=(int)(rn->ival>cn->ival?rn->ival:cn->ival);
-            if(rn->ival!=cn->ival) die(rn->line,"non-square matrix matrix<T,%ld,%ld> not supported yet (Phase 6)",rn->ival,cn->ival);
+            t.kind=T_FLOAT; t.matn=(int)rn->ival; t.matm=rn->ival==cn->ival?0:(int)cn->ival;
             return t;
         }
         if(has_lt&&!strcmp(txt,"vector")){
@@ -243,9 +243,10 @@ static Expr *parse_primary(TokStream *ts){
     if(t->kind==TK_KW_TRUE){ advance(ts); Expr *e=E(E_BOOL,t->line,t->col); e->bval=1; return e; }
     if(t->kind==TK_KW_FALSE){ advance(ts); Expr *e=E(E_BOOL,t->line,t->col); e->bval=0; return e; }
     if(t->kind==TK_KW_MAT){
-        advance(ts); Expr *e=E(E_IDENT,t->line,t->col); char nm[16];
-        snprintf(nm,sizeof nm,"mat%d",(int)t->ival);
-        e->name=strdup(nm); return e; }
+        advance(ts); Expr *e=E(E_IDENT,t->line,t->col);
+        if(t->text&&strstr(t->text,"x")) e->name=strdup(t->text);
+        else { char nm[16]; snprintf(nm,sizeof nm,"mat%d",(int)t->ival); e->name=strdup(nm); }
+        return e; }
     if((t->kind==TK_KW_FLOAT||t->kind==TK_KW_INT||t->kind==TK_KW_UINT||t->kind==TK_KW_BOOL)&&t->ival>1){
         /* vector constructor: float4(...) / bool3(...) etc. — synthesize the type name as the callee */
         advance(ts); Expr *e=E(E_IDENT,t->line,t->col); char nm[16];
@@ -713,7 +714,7 @@ void parse_function(TokStream *ts, Program *prog){
     if(is_kernel&&ret.kind!=T_VOID) die(peek(ts)->line,"kernel functions must return void");
     if(is_kernel&&tvar) die(peek(ts)->line,"kernels cannot be templates");
     if(ret.kind==T_STRUCT) { /* struct-by-value returns: plain + stage functions; kernels keep void */ }
-    if(ret.matn) die(peek(ts)->line,"matrix-by-value return not supported");
+
     Token *nm=peek(ts); expect_name(ts,"function name"); expect(ts,TK_LPAREN,"(");
     Param *params=NULL; size_t np=0,cap=0;
     while(peek(ts)->kind!=TK_RPAREN){
@@ -728,7 +729,7 @@ void parse_function(TokStream *ts, Program *prog){
             if(is_kernel) die(pn->line,"kernel struct-by-value parameters not supported");
             if(stage!=ST_NONE&&stage!=ST_FRAGMENT) die(pn->line,"vertex struct parameters must be pointers");
         }
-        if(ty.matn&&!ty.is_ptr) die(pn->line,"matrix-by-value parameter not supported");
+
         if(ty.kind==T_COORD&&ty.is_ptr) die(pn->line,"coordinates cannot be pointers");
         if(np==cap){cap=cap?cap*2:4;params=realloc(params,cap*sizeof(Param));}
         params[np++]=(Param){strdup(pn->text),ty,un};

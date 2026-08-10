@@ -154,6 +154,10 @@ component selection, 2D integer offsets, and the UE cube residency-status
 out-parameter ABI; its persistent Metallib fixture covers each resource shape.
 The same fixture now proves distinct cube-array `Sample`, `SampleLevel`, and
 `SampleGrad` AIR ABI lowering from `float4(direction, layer)` coordinates.
+Non-square HLSL matrix lowering now preserves row/column dimensions in the AIR
+aggregate ABI, including constructors, transpose, matrix/vector multiplication,
+field/index access, by-value calls/returns, and top-left narrowing casts; the
+persistent `non_square_matrix.hlsl` fixture produces a Metallib.
 The same investigation added C99
 pre-expansion and whitespace-correct `##` token pasting; canonical
 `ASTCCompressionCommon.ush` now advances beyond its historical `expected ;`
