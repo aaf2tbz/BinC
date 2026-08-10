@@ -54,6 +54,7 @@ struct ViewState
     FDFVector3 PrevWorldCameraOrigin;
     FDFVector3 PrevWorldViewOrigin;
     float3 ViewForward;
+    float3 TranslatedWorldCameraOrigin;
     float3 AtmosphereLightDirection[2];
     float2 ViewRectMin;
     float2 TemporalAAJitter;
