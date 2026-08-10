@@ -152,7 +152,8 @@ to a Metallib for all four forms. The next texture-method wave adds
 AIR-probed 2D, 2D-array, cube, and cube-array `Gather` lowering, including
 component selection, 2D integer offsets, and the UE cube residency-status
 out-parameter ABI; its persistent Metallib fixture covers each resource shape.
-Cube-array Sample/SampleLevel/SampleGrad remain separately measured follow-ups.
+The same fixture now proves distinct cube-array `Sample`, `SampleLevel`, and
+`SampleGrad` AIR ABI lowering from `float4(direction, layer)` coordinates.
 The same investigation added C99
 pre-expansion and whitespace-correct `##` token pasting; canonical
 `ASTCCompressionCommon.ush` now advances beyond its historical `expected ;`

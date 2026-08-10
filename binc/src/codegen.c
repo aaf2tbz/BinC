@@ -631,7 +631,7 @@ static const char *swizzle_read(CG *c, const char *vec, const char *vty, const c
 static int builtin_used[sizeof builtins/sizeof *builtins];
 static void mark_builtin(const char *name){ for(size_t i=0;i<sizeof builtins/sizeof *builtins;i++) if(!strcmp(builtins[i].name,name)){ builtin_used[i]=1; return; } }
 static int atomic_add_used[3];
-static int tex_read_used[4], tex_write_used[4], tex_sample_used[4], tex_sample_cube_used[4], tex_sample_1d_used[4], tex_sample_3d_used[4], tex_sample_2d_array_used[4], tex_sample_grad_used[4], tex_sample_grad_cube_used[4], tex_sample_grad_3d_used[4], tex_sample_grad_2d_array_used[4], tex_gather_used[4], tex_gather_cube_used[4], tex_gather_cube_array_used[4], tex_gather_2d_array_used[4], get_samp_used;
+static int tex_read_used[4], tex_write_used[4], tex_sample_used[4], tex_sample_cube_used[4], tex_sample_cube_array_used[4], tex_sample_1d_used[4], tex_sample_3d_used[4], tex_sample_2d_array_used[4], tex_sample_grad_used[4], tex_sample_grad_cube_used[4], tex_sample_grad_cube_array_used[4], tex_sample_grad_3d_used[4], tex_sample_grad_2d_array_used[4], tex_gather_used[4], tex_gather_cube_used[4], tex_gather_cube_array_used[4], tex_gather_2d_array_used[4], get_samp_used;
 static const char *tex_air_type(const Type *ty){
     if(ty->tex_cube && ty->tex_array) return "%struct._texture_cube_array_t";
     if(ty->tex_cube) return "%struct._texture_cube_t";
@@ -1859,11 +1859,19 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         ValKind dxk; const char *dx=gen_rval(c,e->args[2],&dxk); int dxw=c->rvw;
                         ValKind dyk; const char *dy=gen_rval(c,e->args[3],&dyk); int dyw=c->rvw;
                         if(uk!=VK_F32||dxk!=VK_F32||dyk!=VK_F32||
-                           (tp->ty.tex_array&&tp->ty.tex_dim==2 ? (dxw!=2||dyw!=2) : (dxw!=uvw||dyw!=uvw)))
+                           (tp->ty.tex_cube&&tp->ty.tex_array ? (dxw!=3||dyw!=3) :
+                            (tp->ty.tex_array&&tp->ty.tex_dim==2 ? (dxw!=2||dyw!=2) : (dxw!=uvw))))
                             die(0,"SampleGrad coordinates and gradients must be equally-sized floats");
                         int ti_kind=tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0;
                         const char *r=newtmp(c); char sname[64]; snprintf(sname,sizeof sname,"%%_%s",e->args[0]->name);
-                        if(tp->ty.tex_cube){
+                        if(tp->ty.tex_cube&&tp->ty.tex_array){
+                            if(uvw!=4) die(0,"cube-array SampleGrad coordinate must be a float4");
+                            const char *dir=newtmp(c); emit(c,"  %s = shufflevector <4 x float> %s, <4 x float> undef, <3 x i32> <i32 0, i32 1, i32 2>\n",dir,uv);
+                            const char *layerf=newtmp(c); emit(c,"  %s = extractelement <4 x float> %s, i32 3\n",layerf,uv);
+                            const char *layer=newtmp(c); emit(c,"  %s = fptosi float %s to i32\n",layer,layerf);
+                            tex_sample_grad_cube_array_used[ti_kind]=1;
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_cube_array_grad.%s(%%struct._texture_cube_array_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, i32 %s, <3 x float> %s, <3 x float> %s, float 0.0, i32 0)\n",r,vec,suf,tname,sname,dir,layer,dx,dy);
+                        } else if(tp->ty.tex_cube){
                             if(uvw!=3) die(0,"cube SampleGrad direction must be a float3");
                             tex_sample_grad_cube_used[ti_kind]=1;
                             emit(c,"  %s = call { %s, i8 } @air.sample_texture_cube_grad.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, <3 x float> %s, <3 x float> %s, float 0.0, i32 0)\n",r,vec,suf,tex_air_type(&tp->ty),tname,sname,uv,dx,dy);
@@ -1906,7 +1914,14 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         int ti_kind=tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0;
                         const char *r=newtmp(c);
                         char sname[64]; snprintf(sname,sizeof sname,"%%_%s",e->args[0]->name);
-                        if(tp->ty.tex_cube){
+                        if(tp->ty.tex_cube&&tp->ty.tex_array){
+                            if(uvw!=4) die(0,"cube-array sample coordinate must be a float4");
+                            const char *dir=newtmp(c); emit(c,"  %s = shufflevector <4 x float> %s, <4 x float> undef, <3 x i32> <i32 0, i32 1, i32 2>\n",dir,uv);
+                            const char *layerf=newtmp(c); emit(c,"  %s = extractelement <4 x float> %s, i32 3\n",layerf,uv);
+                            const char *layer=newtmp(c); emit(c,"  %s = fptosi float %s to i32\n",layer,layerf);
+                            tex_sample_cube_array_used[ti_kind]=1;
+                            emit(c,"  %s = call { %s, i8 } @air.sample_texture_cube_array.%s(%%struct._texture_cube_array_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x float> %s, i32 %s, i1 %s, float %s, float %s, i32 0)\n",r,vec,suf,tname,sname,dir,layer,lod_flag,lod,fconst(c,0.0));
+                        } else if(tp->ty.tex_cube){
                             if(uvw!=3) die(0,"cube sample direction must be a float3");
                             tex_sample_cube_used[ti_kind]=1;
                             /* probed: air.sample_texture_cube.<suf>(tex, samp, <3 x float>, i1, lod, grad, i32) */
@@ -3404,10 +3419,12 @@ void emit_air(FILE *out, Program *prog){
             if(tex_sample_1d_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_1d.%s(%%struct._texture_1d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, float, i1, i32, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_sample_3d_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_3d.%s(%%struct._texture_3d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, i1, <3 x i32>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_sample_2d_array_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_2d_array.%s(%%struct._texture_2d_array_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, i32, i1, <2 x i32>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
+            if(tex_sample_cube_array_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_cube_array.%s(%%struct._texture_cube_array_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, i32, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_sample_grad_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_2d_grad.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, <2 x float>, <2 x float>, float, i1, <2 x i32>, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_sample_grad_3d_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_3d_grad.%s(%%struct._texture_3d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, <3 x float>, <3 x float>, float, i1, <3 x i32>, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_sample_grad_2d_array_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_2d_array_grad.%s(%%struct._texture_2d_array_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, i32, <2 x float>, <2 x float>, float, i1, <2 x i32>, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_sample_grad_cube_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_cube_grad.%s(%%struct._texture_cube_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, <3 x float>, <3 x float>, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
+            if(tex_sample_grad_cube_array_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_cube_array_grad.%s(%%struct._texture_cube_array_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, i32, <3 x float>, <3 x float>, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_gather_used[i]) fprintf(out,"declare { %s, i8 } @air.gather_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, i1, <2 x i32>, i32, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_gather_cube_used[i]) fprintf(out,"declare { %s, i8 } @air.gather_texture_cube.%s(%%struct._texture_cube_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, i32, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_gather_cube_array_used[i]) fprintf(out,"declare { %s, i8 } @air.gather_texture_cube_array.%s(%%struct._texture_cube_array_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <3 x float>, i32, i32, i32) local_unnamed_addr\n",vecs[i],sufs[i]);

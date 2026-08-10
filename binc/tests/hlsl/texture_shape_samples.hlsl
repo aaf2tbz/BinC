@@ -3,6 +3,7 @@ Texture1D<float4> OneD : register(t0);
 Texture3D<float4> ThreeD : register(t1);
 Texture2DArray<float4> Array2D : register(t2);
 TextureCube<float4> Cube : register(t3);
+TextureCubeArray<float4> CubeArray : register(t5);
 Texture2D<float4> TwoD : register(t4);
 SamplerState LinearSampler : register(s0);
 RWStructuredBuffer<float4> Output : register(u0);
@@ -19,5 +20,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     Output[8] = TwoD.SampleGrad(LinearSampler, float2(0.5, 0.5), float2(0.1, 0.0), float2(0.0, 0.1));
     Output[9] = ThreeD.SampleGrad(LinearSampler, float3(0.5, 0.5, 0.5), float3(0.1, 0.0, 0.0), float3(0.0, 0.1, 0.0));
     Output[10] = Array2D.SampleGrad(LinearSampler, float3(0.5, 0.5, 0.0), float2(0.1, 0.0), float2(0.0, 0.1));
-    Output[11] = Cube.SampleGrad(LinearSampler, float3(0.0, 0.0, 1.0), float3(0.1, 0.0, 0.0), float3(0.0, 0.1, 0.0));
+    Output[11] = CubeArray.Sample(LinearSampler, float4(0.0, 0.0, 1.0, 0.0));
+    Output[12] = CubeArray.SampleLevel(LinearSampler, float4(0.0, 0.0, 1.0, 0.0), 1.0);
+    Output[13] = CubeArray.SampleGrad(LinearSampler, float4(0.0, 0.0, 1.0, 0.0), float3(0.1, 0.0, 0.0), float3(0.0, 0.1, 0.0));
+    Output[14] = Cube.SampleGrad(LinearSampler, float3(0.0, 0.0, 1.0), float3(0.1, 0.0, 0.0), float3(0.0, 0.1, 0.0));
 }
