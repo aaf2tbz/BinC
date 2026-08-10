@@ -46,9 +46,9 @@ test-ue-recovery: binc
 # UE-frontend regression: the preprocessor constructs that fixed real bugs
 # must keep compiling to a metallib (tab directives, #ifndef, #define/#undef
 # scoping, function-like macro chains, precise, typedef, _Static_assert, ::)
-test-ue: binc test-ue-recovery
+test-ue: binc test-ue-recovery harness
 	@set -e; \
-	for t in tests/hlsl/pp_regress.hlsl tests/hlsl/ue_standalone_directive.hlsl tests/hlsl/vector_logical_ops.hlsl tests/hlsl/texture_shape_samples.hlsl tests/hlsl/texture_gather_methods.hlsl tests/hlsl/non_square_matrix.hlsl tests/hlsl/resource_field_sample.hlsl tests/hlsl/implicit_uniform_overload.hlsl tests/hlsl/reversebits_regress.hlsl tests/hlsl/texture_load_atomic_regress.hlsl tests/hlsl/static_struct_method.hlsl tests/hlsl/nested_enum_regress.hlsl tests/hlsl/enum_regress.hlsl tests/hlsl/inout_resource_regress.hlsl tests/hlsl/norm_path_regress.hlsl tests/hlsl/macro_token_paste.hlsl tests/hlsl/texture_byvalue_helper.hlsl ../third_party/UnrealEngine/Engine/Shaders/Private/NullPixelShader.usf ../third_party/UnrealEngine/Engine/Shaders/Private/LateZDummyPS.usf; do \
+	for t in tests/hlsl/pp_regress.hlsl tests/hlsl/ue_standalone_directive.hlsl tests/hlsl/vector_logical_ops.hlsl tests/hlsl/texture_shape_samples.hlsl tests/hlsl/texture_gather_methods.hlsl tests/hlsl/non_square_matrix.hlsl tests/hlsl/resource_field_sample.hlsl tests/hlsl/implicit_uniform_overload.hlsl tests/hlsl/reversebits_regress.hlsl tests/hlsl/texture_load_atomic_regress.hlsl tests/hlsl/static_struct_method.hlsl tests/hlsl/nested_enum_regress.hlsl tests/hlsl/enum_regress.hlsl tests/hlsl/inout_resource_regress.hlsl tests/hlsl/norm_path_regress.hlsl tests/hlsl/macro_token_paste.hlsl tests/hlsl/texture_byvalue_helper.hlsl tests/hlsl/const_vector_field.hlsl ../third_party/UnrealEngine/Engine/Shaders/Private/NullPixelShader.usf ../third_party/UnrealEngine/Engine/Shaders/Private/LateZDummyPS.usf; do \
 		case "$$t" in \
 		*.hlsl) entry=main; prof=cs_5_0; defs="-D SM6_PROFILE";; \
 		*NullPixelShader.usf) entry=Main; prof=ps_5_0; defs="-D COMPILER_DXC -D PLATFORM_WINDOWS -D SM6_PROFILE -D COMPILER_SUPPORTS_ATTRIBUTES -D A8_SAMPLE_MASK=.r";; \
@@ -57,6 +57,8 @@ test-ue: binc test-ue-recovery
 		echo "test-ue: $$t"; \
 		./binc -E $$entry -T $$prof -I ../third_party/UnrealEngine $$defs "$$t" -o build/ue-test.metallib; \
 	done; \
+	./binc -E main -T cs_5_0 tests/hlsl/const_vector_field.hlsl -o /tmp/const-vector-field.metallib; \
+	./harness /tmp/const-vector-field.metallib tests/hlsl/const_vector_field.spec; \
 	echo "UE FRONTEND REGRESSIONS PASS"
 
 # Mutation fuzz smoke: the compiler must never crash or hang on malformed input

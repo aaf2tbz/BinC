@@ -897,6 +897,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         ConstDef cd={0};
         cd.name=strdup(gg->name); cd.ty=gg->ty; cd.line=gg->line;
         cd.is_int=gg->is_int; cd.ival=gg->ival; cd.fval=gg->fval;
+        cd.init_n=gg->init_n; memcpy(cd.init_vals,gg->init_vals,sizeof cd.init_vals);
         cd.mut = !gg->is_const; /* mutable: written by functions */
         g_prog.consts=realloc(g_prog.consts,(g_prog.nconsts+1)*sizeof(ConstDef));
         g_prog.consts[g_prog.nconsts++]=cd;

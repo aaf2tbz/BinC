@@ -171,6 +171,21 @@ static double fold_init(Expr *e, int *is_int, long *ival, HLSLGlobal *gs, size_t
     default: *is_int=1; *ival=0; return 0;
     }
 }
+static int is_vector_ctor(const char *name){
+    if(!name) return 0;
+    return !strncmp(name,"float",5)||!strncmp(name,"half",4)||
+           !strncmp(name,"int",3)||!strncmp(name,"uint",4)||!strncmp(name,"bool",4);
+}
+static void capture_vector_init(Expr *e, const Type *ty, HLSLGlobal *g, HLSLGlobal *gs, size_t ngs){
+    if(!e||ty->vecn<2||ty->vecn>4||e->kind!=E_CALL||!is_vector_ctor(e->name)) return;
+    if(e->nargs!=1&&e->nargs!=(size_t)ty->vecn) return;
+    for(int i=0;i<ty->vecn;i++){
+        Expr *a=e->args[e->nargs==1?0:(size_t)i]; int ai=0; long av=0;
+        if(!a) return;
+        g->init_vals[i]=fold_init(a,&ai,&av,gs,ngs);
+    }
+    g->init_n=ty->vecn;
+}
 static void hpush(void **arr, size_t *n, size_t *cap, void *item, size_t sz){    if(*n==*cap){*cap=*cap?*cap*2:8; *arr=realloc(*arr,*cap*sz);} 
     memcpy((char*)*arr+(*n)*sz,item,sz); (*n)++;
 }
@@ -626,6 +641,7 @@ HLSLProg hlsl_parse(TokStream *ts){
                 else if(e&&e->kind==E_FCONST){ gg.fval=e->fval; }
                 else if(e&&e->kind==E_BOOL){ gg.is_int=1; gg.ival=e->bval; }
                 else if(e) gg.fval=fold_init(e,&gg.is_int,&gg.ival,hp.globals,hp.nglobals);
+                capture_vector_init(e,&gg.ty,&gg,hp.globals,hp.nglobals);
             }
             gg.reg=skip_register_suffix(ts);
             if(peek(ts)->kind==TK_LT){ /* D3D9 effect annotation: < ... > */
@@ -712,6 +728,7 @@ HLSLProg hlsl_parse(TokStream *ts){
                 else if(e&&e->kind==E_FCONST){ gg.fval=e->fval; }
                 else if(e&&e->kind==E_BOOL){ gg.is_int=1; gg.ival=e->bval; }
                 else if(e) gg.fval=fold_init(e,&gg.is_int,&gg.ival,hp.globals,hp.nglobals);
+                capture_vector_init(e,&gg.ty,&gg,hp.globals,hp.nglobals);
             }
             gg.reg=skip_register_suffix(ts);
             if(peek(ts)->kind==TK_LT){ /* D3D9 effect annotation: < ... > */

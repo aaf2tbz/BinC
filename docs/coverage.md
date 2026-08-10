@@ -188,8 +188,14 @@ UE's virtual-texture feedback fields, depth-radius/projection helpers,
 `NUM_VIRTUALTEXTURE_SAMPLES=1` default.
 HLSL struct parsing retains device pointer fields for `Buffer`,
 `StructuredBuffer`, and byte-address resource members, feeding the existing
-resource-field flattening ABI.
-`static_struct_method.hlsl` verifies static struct methods. Struct parsing also
+resource-field flattening ABI. Static const vector globals now retain their
+vector AIR type and literal constructor values; `const_vector_field.hlsl`
+verifies vector loads/extracts in AIR and a native GPU readback of `6.0`.
+The UE audit's explicit identity working-color-space contract includes the
+forward, inverse, and sRGB transform matrices plus
+`WORKING_COLOR_SPACE_IS_SRGB=0`, matching the generated SCW context needed by
+`ColorSpace.ush`/`TonemapCommon.ush`. `static_struct_method.hlsl` verifies static
+struct methods. Struct parsing also
 accepts symbolic vector/matrix template dimensions, nested template headers,
 operator[] method signatures, and static/const compile-time member initializers;
 uninstantiated template function bodies are skipped rather than misclassified

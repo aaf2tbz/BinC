@@ -82,7 +82,7 @@ typedef struct { char *name; char *link_name; Param *params; size_t nparams; Blo
     int is_template; char *tvar; Type tvar_ty; } Function;
 typedef struct { char *name; Type ty; int attr; int attr_idx; char *sem; } Field; /* attr: 0 none, 1 position, 2 flat, 3 color(N), 4 depth, 5 user(locnN); sem: raw HLSL semantic */
 typedef struct { char *tag; Field *fields; size_t nfields; int is_template; char *tvar; } StructDef;
-typedef struct { char *name; Type ty; int is_int; long ival; double fval; int line; int mut; } ConstDef;
+typedef struct { char *name; Type ty; int is_int; long ival; double fval; double init_vals[4]; int init_n; int line; int mut; } ConstDef;
 typedef struct { StructDef *structs; size_t nstructs; Function *funcs; size_t nfuncs; ConstDef *consts; size_t nconsts; int hlsl; } Program;
 
 /* ---- lexer ---- */
@@ -139,7 +139,7 @@ typedef struct { char *name; HLSLParam *params; size_t np; Type ret; char *ret_s
 typedef struct { char *tag; Field *fields; size_t nfields; } HLSLStruct;
 typedef struct { char *name; Field *fields; size_t nfields; int reg; } HLCBuf;
 typedef struct { char *name; Type ty; int is_groupshared; int is_const; int is_static; int is_int;
-    long ival; double fval; int has_init; int line; int reg;
+    long ival; double fval; double init_vals[4]; int init_n; int has_init; int line; int reg;
     char *tex_name; /* sampler_state { Texture = <X>; } — the bound texture */ } HLSLGlobal;
 typedef struct { HLSLFunc *funcs; size_t nfuncs; HLSLStruct *structs; size_t nstructs;
     HLCBuf *cbufs; size_t ncbufs; HLSLGlobal *globals; size_t nglobals; } HLSLProg;

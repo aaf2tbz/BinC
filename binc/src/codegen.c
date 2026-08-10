@@ -1220,10 +1220,10 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             c->rstruct=cd->ty.kind==T_STRUCT?cd->ty.struct_name:NULL;
             char ll[64];
             if(cd->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",cd->ty.struct_name);
-            else ll_of(ll,sizeof ll,cd->ty.kind,cd->mut?cd->ty.vecn:0);
+            else ll_of(ll,sizeof ll,cd->ty.kind,cd->ty.vecn);
             const char *v=newtmp(c);
-            emit(c,"  %s = load %s, %s addrspace(%d)* @_binc_%s_%s, align %d\n",v,ll,ll,cd->mut?1:2,cd->mut?"mut":"const",cd->name,type_align(cd->ty.kind,0));
-            if(cd->ty.kind==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext half %s to float\n",w,v); v=w; }
+            emit(c,"  %s = load %s, %s addrspace(%d)* @_binc_%s_%s, align %d\n",v,ll,ll,cd->mut?1:2,cd->mut?"mut":"const",cd->name,type_align(cd->ty.kind,cd->ty.vecn));
+            if(cd->ty.kind==T_HALF) v=h2f(c,v,cd->ty.vecn);
             return v; }
         if(r==R_SCALAR){ Param *p=&c->fn->params[idx]; *k=scalar_vk(p->ty.kind); c->rvw=p->ty.vecn>1?p->ty.vecn:0;
             if(p->ty.matn){ /* matrix by-value param: the AIR value is the aggregate */
@@ -1418,6 +1418,16 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 int ci; if(resolve(c,e->operand->name,&ci)==R_CONST){
                     ConstDef *cd=&c->prog->consts[ci]; int idxs[4];
                     int nc=swizzle_idx(e->field,idxs);
+                    if(nc>0&&cd->ty.vecn>1){
+                        for(int i=0;i<nc;i++) if(idxs[i]>=cd->ty.vecn) die(0,"invalid vector component .%s",e->field);
+                        ValKind ck; const char *cv=gen_rval(c,e->operand,&ck);
+                        char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",cd->ty.vecn,cd->ty.kind==T_HALF?"float":scalar_ll(cd->ty.kind));
+                        const char *elt=cd->ty.kind==T_HALF?"float":scalar_ll(cd->ty.kind);
+                        *k=ck;
+                        if(nc==1){ const char *r=newtmp(c); c->rvw=0;
+                            emit(c,"  %s = extractelement %s %s, i32 %d\n",r,vty,cv,idxs[0]); return r; }
+                        c->rvw=nc; return swizzle_read(c,cv,vty,elt,idxs,nc);
+                    }
                     if(nc>0&&cd->ty.vecn==0){
                         for(int i=0;i<nc;i++) if(idxs[i]!=0) die(0,"invalid scalar component .%s",e->field);
                         ValKind ck; const char *cv=gen_rval(c,e->operand,&ck);
@@ -3499,9 +3509,20 @@ void emit_air(FILE *out, Program *prog){
         }
         char ll[64];
         if(cd->ty.kind==T_STRUCT) snprintf(ll,sizeof ll,"%%struct.%s",cd->ty.struct_name);
-        else ll_of(ll,sizeof ll,cd->ty.kind,cd->mut?cd->ty.vecn:0);
-        char val[64];
+        else ll_of(ll,sizeof ll,cd->ty.kind,cd->ty.vecn);
+        char val[512];
         if(cd->ty.kind==T_STRUCT) snprintf(val,sizeof val,"zeroinitializer");
+        else if(cd->ty.vecn>1&&cd->init_n==cd->ty.vecn){
+            size_t vo=0;
+            vo+=(size_t)snprintf(val+vo,sizeof val-vo,"<");
+            for(int vi=0;vi<cd->ty.vecn;vi++){
+                if(vi) vo+=(size_t)snprintf(val+vo,sizeof val-vo,", ");
+                if(cd->ty.kind==T_FLOAT){ float fv=(float)cd->init_vals[vi]; unsigned bits; memcpy(&bits,&fv,4); vo+=(size_t)snprintf(val+vo,sizeof val-vo,"float bitcast (i32 %u to float)",bits); }
+                else if(cd->ty.kind==T_HALF){ float fv=(float)cd->init_vals[vi]; unsigned bits; memcpy(&bits,&fv,4); vo+=(size_t)snprintf(val+vo,sizeof val-vo,"half fptrunc (float bitcast (i32 %u to float) to half)",bits); }
+                else vo+=(size_t)snprintf(val+vo,sizeof val-vo,"i32 %ld",(long)cd->init_vals[vi]);
+            }
+            snprintf(val+vo,sizeof val-vo,">");
+        }
         else if(cd->ty.vecn>1) snprintf(val,sizeof val,"zeroinitializer");
         else if(cd->ty.kind==T_BOOL) snprintf(val,sizeof val,"%s",cd->ival?"true":"false");
         else if(cd->ty.kind==T_FLOAT||cd->ty.kind==T_HALF){
@@ -3511,7 +3532,7 @@ void emit_air(FILE *out, Program *prog){
         }
         else snprintf(val,sizeof val,"%ld",cd->ival);
         fprintf(out,"@_binc_%s_%s = internal unnamed_addr addrspace(%d) global %s %s, align %d\n",
-                cd->mut?"mut":"const",cd->name,cd->mut?1:2,ll,val,type_align(cd->ty.kind,0));
+                cd->mut?"mut":"const",cd->name,cd->mut?1:2,ll,val,type_align(cd->ty.kind,cd->ty.vecn));
     }
     if(prog->nconsts) fprintf(out,"\n");
     /* struct usage: emit only structs reachable from the emitted functions +
