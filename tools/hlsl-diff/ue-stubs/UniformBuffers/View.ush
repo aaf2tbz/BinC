@@ -79,6 +79,7 @@ struct ViewState
     uint bSubsurfacePostprocessEnabled;
     float4 TemporalAAParams;
     float PreExposure;
+    float OneOverPreExposure;
     float MaterialMaxEmissiveValue;
 };
 

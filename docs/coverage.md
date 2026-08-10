@@ -169,9 +169,11 @@ struct. The UE audit force-includes
 `Engine/Shaders/Private/Common.ush` for standalone common-shader
 rows and records that include in report provenance. The generated `ViewState`
 stub also carries UE's `float4
-InvDeviceZToWorldZTransform` field for indexed depth conversion helpers. It
-also exposes `float3 TranslatedWorldCameraOrigin`, required by the
-`GetCameraVector` overloads and translated-world wrappers. Matrix-aware HLSL
+InvDeviceZToWorldZTransform` field for indexed depth conversion helpers. It also
+carries scalar `PreExposure` and `OneOverPreExposure` fields used by postprocess
+and lighting shaders. It also exposes `float3 TranslatedWorldCameraOrigin`,
+required by the `GetCameraVector` overloads and translated-world wrappers.
+Matrix-aware HLSL
 `mul` result typing preserves vector widths for generated `select_internal`
 overloads; `ScreenToTranslatedWorld` is covered in the View stub.
 Implicit compiler-forwarded pointer/texture/sampler parameters are accepted by
