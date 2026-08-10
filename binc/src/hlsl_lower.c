@@ -109,6 +109,110 @@ static void rw_block(Block *b, const Rewrite *rw){
     for(size_t i=0;i<b->n;i++) rw_stmt(&b->stmts[i],rw);
 }
 
+/* HLSL uniform-buffer structs may expose resource members (for example
+ * View.PerlinNoiseGradientTexture) even though Metal requires those opaque
+ * resources to remain separate function parameters. Infer the resource kind
+ * from the formal parameter of the call receiving the field, flatten the
+ * path, and keep the value-struct ABI free of opaque members. */
+typedef struct { char *path; char *flat; Type ty; } HLSLResourceField;
+
+static int resource_field_path(Expr *e, char *out, size_t cap){
+    if(!e) return 0;
+    if(e->kind==E_IDENT&&e->name){ snprintf(out,cap,"%s",e->name); return 1; }
+    if(e->kind==E_FIELD&&e->field){
+        char base[256];
+        if(!resource_field_path(e->operand,base,sizeof base)) return 0;
+        snprintf(out,cap,"%s.%s",base,e->field);
+        return 1;
+    }
+    return 0;
+}
+
+static HLSLFunc *hlsl_find_func(HLSLProg *hp, const char *name){
+    if(!name) return NULL;
+    for(size_t i=0;i<hp->nfuncs;i++) if(!strcmp(hp->funcs[i].name,name)) return &hp->funcs[i];
+    return NULL;
+}
+
+static void resource_field_add(HLSLResourceField **out, size_t *n, Expr *actual, Type ty){
+    char path[256]; if(!resource_field_path(actual,path,sizeof path)||!strchr(path,'.')) return;
+    for(size_t i=0;i<*n;i++) if(!strcmp((*out)[i].path,path)) return;
+    HLSLResourceField *v=realloc(*out,(*n+1)*sizeof **out); if(!v) return;
+    *out=v;
+    HLSLResourceField *r=&v[(*n)++]; r->path=strdup(path); r->ty=ty;
+    char flat[256]; size_t j=0;
+    for(size_t k=0;path[k]&&j+1<sizeof flat;k++) flat[j++]=path[k]=='.'?'_':path[k];
+    flat[j]=0; r->flat=strdup(flat);
+}
+
+static void resource_field_collect_expr(Expr *e, HLSLProg *hp, HLSLResourceField **out, size_t *n){
+    if(!e) return;
+    if(e->kind==E_CALL&&e->name&&!e->callee){
+        HLSLFunc *hf=hlsl_find_func(hp,e->name);
+        if(hf) for(size_t i=0;i<e->nargs&&i<hf->np;i++){
+            TypeKind k=hf->params[i].ty.kind;
+            if(k==T_TEXTURE||k==T_SAMPLER) resource_field_add(out,n,e->args[i],hf->params[i].ty);
+        }
+    }
+    resource_field_collect_expr(e->operand,hp,out,n);
+    resource_field_collect_expr(e->lhs,hp,out,n);
+    resource_field_collect_expr(e->rhs,hp,out,n);
+    resource_field_collect_expr(e->callee,hp,out,n);
+    for(size_t i=0;i<e->nargs;i++) resource_field_collect_expr(e->args[i],hp,out,n);
+}
+
+static void resource_field_collect_block(Block *b, HLSLProg *hp, HLSLResourceField **out, size_t *n){
+    for(size_t i=0;i<b->n;i++){
+        Stmt *st=&b->stmts[i];
+        resource_field_collect_expr(st->expr,hp,out,n);
+        resource_field_collect_expr(st->init,hp,out,n);
+        resource_field_collect_expr(st->cond,hp,out,n);
+        resource_field_collect_expr(st->for_incr,hp,out,n);
+        if(st->for_init) resource_field_collect_expr(st->for_init->expr,hp,out,n);
+        resource_field_collect_block(&st->then_b,hp,out,n);
+        resource_field_collect_block(&st->else_b,hp,out,n);
+        for(size_t c=0;c<st->ncases;c++){
+            resource_field_collect_expr(st->cases[c].val,hp,out,n);
+            resource_field_collect_block(&st->cases[c].body,hp,out,n);
+        }
+        resource_field_collect_block(&st->def_body,hp,out,n);
+    }
+}
+
+static Expr *resource_field_rewrite_expr(Expr *e, HLSLResourceField *rf, size_t nrf){
+    if(!e) return NULL;
+    e->operand=resource_field_rewrite_expr(e->operand,rf,nrf);
+    e->lhs=resource_field_rewrite_expr(e->lhs,rf,nrf);
+    e->rhs=resource_field_rewrite_expr(e->rhs,rf,nrf);
+    e->callee=resource_field_rewrite_expr(e->callee,rf,nrf);
+    for(size_t i=0;i<e->nargs;i++) e->args[i]=resource_field_rewrite_expr(e->args[i],rf,nrf);
+    if(e->kind==E_FIELD){
+        char path[256];
+        if(resource_field_path(e,path,sizeof path)) for(size_t i=0;i<nrf;i++) if(!strcmp(path,rf[i].path)){
+            Expr *n=E(E_IDENT,e->line,e->col); n->name=strdup(rf[i].flat); return n;
+        }
+    }
+    return e;
+}
+
+static void resource_field_rewrite_block(Block *b, HLSLResourceField *rf, size_t nrf){
+    for(size_t i=0;i<b->n;i++){
+        Stmt *st=&b->stmts[i];
+        st->expr=resource_field_rewrite_expr(st->expr,rf,nrf);
+        st->init=resource_field_rewrite_expr(st->init,rf,nrf);
+        st->cond=resource_field_rewrite_expr(st->cond,rf,nrf);
+        st->for_incr=resource_field_rewrite_expr(st->for_incr,rf,nrf);
+        if(st->for_init) st->for_init->expr=resource_field_rewrite_expr(st->for_init->expr,rf,nrf);
+        resource_field_rewrite_block(&st->then_b,rf,nrf);
+        resource_field_rewrite_block(&st->else_b,rf,nrf);
+        for(size_t c=0;c<st->ncases;c++){
+            st->cases[c].val=resource_field_rewrite_expr(st->cases[c].val,rf,nrf);
+            resource_field_rewrite_block(&st->cases[c].body,rf,nrf);
+        }
+        resource_field_rewrite_block(&st->def_body,rf,nrf);
+    }
+}
+
 /* ---- D3D9 sm3 tex2D family: `tex2D(s, uv)` -> `s.tex.Sample(s, uv)` ----
  * The sampler global records the texture it was bound to in sampler_state
  * (Texture = <name>) or by register convention; rewrite the intrinsic call
@@ -858,6 +962,18 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
         }
         res[nres++]=(HRes){gg->name,rt,gg->reg>=0?gg->reg:0};
     }
+    HLSLResourceField *resource_fields=NULL; size_t nresource_fields=0;
+    for(size_t fi=0;fi<hp->nfuncs;fi++)
+        resource_field_collect_block(&hp->funcs[fi].body,hp,&resource_fields,&nresource_fields);
+    int next_resource_reg=0;
+    for(size_t ri=0;ri<nres;ri++) if(res[ri].reg>=next_resource_reg) next_resource_reg=res[ri].reg+1;
+    for(size_t ri=0;ri<nresource_fields&&nres<64;ri++){
+        int duplicate=0;
+        for(size_t q=0;q<nres;q++) if(!strcmp(res[q].name,resource_fields[ri].flat)){ duplicate=1; break; }
+        if(!duplicate) res[nres++]=(HRes){resource_fields[ri].flat,resource_fields[ri].ty,next_resource_reg++};
+    }
+    for(size_t fi=0;fi<hp->nfuncs;fi++)
+        resource_field_rewrite_block(&hp->funcs[fi].body,resource_fields,nresource_fields);
     Rewrite unif_rw[64]; size_t nu=0; /* D3D9 uniform rewrites (built below) */
     /* D3D9 uniforms: non-const scalar/vector globals pack into one const
      * struct (like a cbuffer); the harness binds it at the register index

@@ -160,6 +160,11 @@ field/index access (including HLSL row reads/writes, row/column element
 indexing, and arrays of rectangular matrices), by-value calls/returns, and
 top-left narrowing casts; the persistent `non_square_matrix.hlsl` fixture
 produces a Metallib.
+HLSL resource-bearing struct fields are flattened to separate texture/sampler
+parameters using the receiving function's formal resource types; the
+`resource_field_sample.hlsl` regression verifies AIR resource metadata and
+`air.sample_texture_2d` forwarding without placing opaque resources in a value
+struct.
 The HLSL frontend now parses fixed-underlying unscoped enum declarations as
 strict immutable integral module constants, including declaration-order
 initializers, previous-enumerator references, implicit increments, and
