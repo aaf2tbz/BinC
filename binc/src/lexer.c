@@ -133,7 +133,7 @@ numcase:
             KW("template",TK_KW_TEMPLATE) KW("typename",TK_KW_TYPENAME)
             /* HLSL-only surface (mode-gated: `out`/`in` are legal BinC identifiers) */
             #define HLSLKW(w,k) if(hlsl&&strlen(w)==len&&!memcmp(w,s,len)){Token x=tk(k,ln,col);x.text=dup_n(s,len);PUSH(x);goto done;}
-            HLSLKW("cbuffer",TK_KW_CBUFFER) HLSLKW("tbuffer",TK_KW_TBUFFER) HLSLKW("groupshared",TK_KW_GROUPSHARED)
+            HLSLKW("cbuffer",TK_KW_CBUFFER) HLSLKW("tbuffer",TK_KW_TBUFFER) HLSLKW("enum",TK_KW_ENUM) HLSLKW("groupshared",TK_KW_GROUPSHARED)
             HLSLKW("in",TK_KW_IN) HLSLKW("out",TK_KW_OUT) HLSLKW("inout",TK_KW_INOUT) HLSLKW("static",TK_KW_STATIC) HLSLKW("precise",TK_KW_CONSTANT)
             HLSLKW("register",TK_KW_REGISTER) HLSLKW("packoffset",TK_KW_PACKOFFSET)
             HLSLKW("linear",TK_KW_LINEAR) HLSLKW("noperspective",TK_KW_NOPERSPECTIVE)

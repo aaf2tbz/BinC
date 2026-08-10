@@ -11,6 +11,7 @@
 #include "binc.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 /* HLSL resource/typed-buffer spellings; everything else uses parse_type */
 static Type hlsl_type(TokStream *ts){
@@ -172,6 +173,86 @@ static double fold_init(Expr *e, int *is_int, long *ival, HLSLGlobal *gs, size_t
 }
 static void hpush(void **arr, size_t *n, size_t *cap, void *item, size_t sz){    if(*n==*cap){*cap=*cap?*cap*2:8; *arr=realloc(*arr,*cap*sz);} 
     memcpy((char*)*arr+(*n)*sz,item,sz); (*n)++;
+}
+
+static int enum_name_used(HLSLProg *hp, const char *name){
+    for(size_t i=0;i<hp->nglobals;i++) if(!strcmp(hp->globals[i].name,name)) return 1;
+    return 0;
+}
+
+/* Strict integral constant evaluation for enum initializers.  The ordinary
+ * global folder intentionally has a permissive unknown-name -> zero fallback;
+ * using that here would silently corrupt UE's payload bitmasks. */
+static int enum_eval(Expr *e, HLSLProg *hp, int64_t *out){
+    if(!e) return 0;
+    switch(e->kind){
+    case E_ICONST: *out=(int64_t)e->ival; return 1;
+    case E_BOOL: *out=e->bval?1:0; return 1;
+    case E_IDENT:
+        for(size_t i=0;i<hp->nglobals;i++){
+            HLSLGlobal *g=&hp->globals[i];
+            if(!strcmp(g->name,e->name)&&g->has_init&&g->is_int){ *out=(int64_t)g->ival; return 1; }
+        }
+        return 0;
+    case E_NEG:{ int64_t v; if(!enum_eval(e->operand,hp,&v)||v==INT64_MIN) return 0; *out=-v; return 1; }
+    case E_COMPL:{ int64_t v; if(!enum_eval(e->operand,hp,&v)) return 0; *out=~v; return 1; }
+    case E_BIN:{
+        int64_t a,b; if(!enum_eval(e->lhs,hp,&a)||!enum_eval(e->rhs,hp,&b)) return 0;
+        __int128 z=0;
+        switch(e->bop){
+        case B_ADD: z=(__int128)a+b; break;
+        case B_SUB: z=(__int128)a-b; break;
+        case B_MUL: z=(__int128)a*b; break;
+        case B_DIV: if(!b) return 0; z=a/b; break;
+        case B_MOD: if(!b) return 0; z=a%b; break;
+        case B_AND: *out=a&b; return 1;
+        case B_OR:  *out=a|b; return 1;
+        case B_XOR: *out=a^b; return 1;
+        case B_SHL: if(b<0||b>=32) return 0; z=(__int128)a<<b; break;
+        case B_SHR: if(b<0||b>=32) return 0; *out=a>>b; return 1;
+        }
+        if(z<INT64_MIN||z>INT64_MAX) return 0;
+        *out=(int64_t)z; return 1;
+    }
+    default: return 0;
+    }
+}
+
+static void parse_hlsl_enum(TokStream *ts, HLSLProg *hp, size_t *gcap){
+    Token *et=advance(ts); /* enum */
+    if(peek(ts)->kind==TK_IDENT) advance(ts); /* optional tag: metadata only */
+    int is_uint=0;
+    if(accept(ts,TK_COLON)){
+        if(accept(ts,TK_KW_UINT)) is_uint=1;
+        else if(!accept(ts,TK_KW_INT)) die(peek(ts)->line,"enum underlying type must be int or uint");
+    }
+    expect(ts,TK_LBRACE,"{");
+    int64_t previous=0; int have_previous=0;
+    if(peek(ts)->kind==TK_RBRACE) die(et->line,"enum must contain an enumerator");
+    for(;;){
+        Token *nt=peek(ts); expect(ts,TK_IDENT,"enum name");
+        if(enum_name_used(hp,nt->text)) die(nt->line,"duplicate enum name %s",nt->text);
+        int64_t value;
+        if(accept(ts,TK_EQ)){
+            Expr *init=parse_expr(ts);
+            if(!enum_eval(init,hp,&value)) die(nt->line,"enum initializer for %s must be an integral constant expression",nt->text);
+        } else {
+            if(!have_previous) value=0;
+            else if(previous==INT64_MAX) die(nt->line,"enum value overflow");
+            else value=previous+1;
+        }
+        if(is_uint){ if(value<0||value>UINT32_MAX) die(nt->line,"enum value for %s is outside uint range",nt->text); }
+        else if(value<INT32_MIN||value>INT32_MAX) die(nt->line,"enum value for %s is outside int range",nt->text);
+        HLSLGlobal g={0};
+        g.name=strdup(nt->text); g.ty.kind=is_uint?T_UINT32:T_INT32;
+        g.is_const=1; g.is_int=1; g.ival=(long)value; g.fval=(double)value;
+        g.has_init=1; g.line=nt->line;
+        hpush((void**)&hp->globals,&hp->nglobals,gcap,&g,sizeof g);
+        previous=value; have_previous=1;
+        if(!accept(ts,TK_COMMA)) break;
+        if(peek(ts)->kind==TK_RBRACE) break; /* trailing comma */
+    }
+    expect(ts,TK_RBRACE,"}"); expect(ts,TK_SEMI,";");
 }
 
 /* skip a `technique ... { ... }` block (the .fx effect system: pass blocks,
@@ -361,6 +442,10 @@ HLSLProg hlsl_parse(TokStream *ts){
             continue;
         }
 
+        if(kt->kind==TK_KW_ENUM){
+            parse_hlsl_enum(ts,&hp,&gcap);
+            continue;
+        }
         if(kt->kind==TK_KW_STRUCT){
             /* anonymous `struct { ... }` (with a `{...}` initializer) — parse
              * the shared way only for named structs; anonymous ones are

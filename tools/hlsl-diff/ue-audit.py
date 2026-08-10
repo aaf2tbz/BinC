@@ -96,6 +96,16 @@ def bucket_error(err):
     return ("other: " + first[:80]) if first else "other"
 
 
+def is_crash_returncode(rc):
+    """Recognize subprocess signal returns on POSIX and shell-style 128+N.
+
+    ``subprocess.run`` reports a process terminated by SIGSEGV as ``-11`` on
+    macOS/Linux, while a shell wrapper commonly exposes the same failure as
+    139.  Both must remain hard audit failures rather than ``other`` gaps.
+    """
+    return rc < 0 or rc in (134, 139)
+
+
 # Buckets that mean the PARSER itself failed (vs codegen-stage gaps after a
 # successful parse). Parse acceptance = COMPILES + codegen-stage gaps.
 PARSE_BUCKETS = {
@@ -175,7 +185,7 @@ def main():
         # parse-acceptance measurement (permutation-gated entries can't fail it)
         rc, _, err = run([BINC, "--stage-all", "-T", prof, "-I", UE_DIR] + UE_DEFS +
                          [resolve(rel), "-o", "/tmp/ue-audit.metallib"], 180)
-        if rc in (134, 139):
+        if is_crash_returncode(rc):
             result = "CRASH"
             n_crash += 1
         elif rc == 124:
