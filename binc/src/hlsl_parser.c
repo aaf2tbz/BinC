@@ -640,6 +640,7 @@ HLSLProg hlsl_parse(TokStream *ts){
             hpush((void**)&hp.globals,&hp.nglobals,&gcap,&gg,sizeof gg);
             continue;
         }
+        if(kt->kind==TK_IDENT&&(!strcmp(kt->text,"ISOLATE")||!strcmp(kt->text,"NOINLINE"))){ advance(ts); goto fn_path; }
         /* function definition, or an unqualified module global
          * (StructuredBuffer<>, SamplerState, plain typed vars, ...) */
         fn_path:

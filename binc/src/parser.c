@@ -45,6 +45,14 @@ static StructDef *inst_struct(Program *prog, StructDef *tpl, const Type *concret
 }
 
 Type parse_type(TokStream *ts){
+    TokKind rk=peek(ts)->kind;
+    if(rk==TK_KW_STRUCTURED||rk==TK_KW_RWSTRUCTURED){
+        advance(ts); Type et={0}; if(accept(ts,TK_LT)){ et=parse_type(ts); expect(ts,TK_GT,">"); } else et.kind=T_FLOAT;
+        et.is_ptr=1; et.as=AS_DEVICE; et.array_n=0; et.array_m=0; return et;
+    }
+    if(rk==TK_KW_BYTEADDR||rk==TK_KW_RWBYTEADDR){
+        advance(ts); Type et={0}; et.kind=T_UINT32; et.is_ptr=1; et.as=AS_DEVICE; et.struct_name=strdup("$byteaddr"); return et;
+    }
     Type t={0};
     if(accept(ts,TK_KW_DEVICE))t.as=AS_DEVICE; else if(accept(ts,TK_KW_CONSTANT))t.as=AS_CONSTANT;
     else if(accept(ts,TK_KW_THREADGROUP))t.as=AS_THREADGROUP; else if(accept(ts,TK_KW_THREAD))t.as=AS_THREAD;
@@ -807,7 +815,7 @@ void parse_struct(TokStream *ts, Program *prog){
             if(peek(ts)->kind==TK_LBRACE){ int bd=0; do{ Token *t=peek(ts); if(t->kind==TK_LBRACE)bd++; else if(t->kind==TK_RBRACE)bd--; if(t->kind==TK_EOF) die(t->line,"unterminated method body"); advance(ts); }while(bd>0); }
             continue;
         }
-        Type ty=parse_type(ts); if(ty.is_ptr) die(peek(ts)->line,"pointer fields unsupported");
+        Type ty=parse_type(ts);
         int was_method=0;
         do{ Token *fn=peek(ts); expect_name(ts,"field name");
             if(skip_static_member&&accept(ts,TK_EQ)){ int d=0; while(peek(ts)->kind!=TK_EOF){ Token *it=peek(ts); if(it->kind==TK_LPAREN||it->kind==TK_LBRACK||it->kind==TK_LBRACE)d++; else if(it->kind==TK_RPAREN||it->kind==TK_RBRACK||it->kind==TK_RBRACE){ if(d>0)d--; } if(it->kind==TK_SEMI&&d==0){ advance(ts); break; } advance(ts); } was_method=1; break; }
