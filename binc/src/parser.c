@@ -78,18 +78,23 @@ Type parse_type(TokStream *ts){
         if(has_lt&&(!strcmp(txt,"matrix")||!strcmp(txt,"Matrix"))){
             advance(ts); expect(ts,TK_LT,"<");
             parse_type(ts); /* element type ignored */
-            expect(ts,TK_COMMA,","); Token *rn=peek(ts); expect(ts,TK_ICONST,"matrix rows");
-            expect(ts,TK_COMMA,","); Token *cn=peek(ts); expect(ts,TK_ICONST,"matrix cols");
+            expect(ts,TK_COMMA,","); Token *rn=peek(ts); int rows=0,cols=0;
+            if(rn->kind==TK_ICONST){ rows=(int)rn->ival; advance(ts); } else if(rn->kind==TK_IDENT){ advance(ts); } else die(rn->line,"expected matrix rows");
+            expect(ts,TK_COMMA,","); Token *cn=peek(ts);
+            if(cn->kind==TK_ICONST){ cols=(int)cn->ival; advance(ts); } else if(cn->kind==TK_IDENT){ advance(ts); } else die(cn->line,"expected matrix cols");
             expect(ts,TK_GT,">");
-            t.kind=T_FLOAT; t.matn=(int)rn->ival; t.matm=rn->ival==cn->ival?0:(int)cn->ival;
+            t.kind=T_FLOAT; t.matn=rows; t.matm=rows&&cols&&rows==cols?0:cols;
             return t;
         }
         if(has_lt&&!strcmp(txt,"vector")){
             advance(ts); expect(ts,TK_LT,"<");
             Type et=parse_type(ts);
-            expect(ts,TK_COMMA,","); Token *vn=peek(ts); expect(ts,TK_ICONST,"vector size");
+            expect(ts,TK_COMMA,","); Token *vn=peek(ts); int vsize=0;
+            if(vn->kind==TK_ICONST){ vsize=(int)vn->ival; advance(ts); }
+            else if(vn->kind==TK_IDENT){ advance(ts); }
+            else die(vn->line,"expected vector size");
             expect(ts,TK_GT,">");
-            et.vecn=(int)vn->ival; if(et.vecn<2)et.vecn=1; return et;
+            et.vecn=vsize; if(et.vecn<2&&vsize>0)et.vecn=1; return et;
         }
         if(has_lt&&(!strcmp(txt,"ConstantBuffer")||!strcmp(txt,"TextureBuffer"))){
             advance(ts); expect(ts,TK_LT,"<");
@@ -112,11 +117,10 @@ Type parse_type(TokStream *ts){
                 t.kind=T_STRUCT; t.struct_name=strdup(sd->tag);
                 return t;
             }
-            /* generic templated type: consume <...> and treat as a struct */
-            advance(ts); expect(ts,TK_LT,"<");
-            parse_type(ts);
-            while(accept(ts,TK_COMMA)){ if(peek(ts)->kind==TK_ICONST) advance(ts); else parse_type(ts); }
-            expect(ts,TK_GT,">");
+            /* generic templated type: consume a balanced <...> span. The
+             * arguments may be symbolic expressions, not type/constant tokens. */
+            advance(ts); expect(ts,TK_LT,"<"); int td=1;
+            while(td>0){ Token *gt=peek(ts); if(gt->kind==TK_LT)td++; else if(gt->kind==TK_GT)td--; if(gt->kind==TK_EOF) die(gt->line,"unterminated template type"); advance(ts); }
             t.kind=T_STRUCT; t.struct_name=strdup(txt); t.is_ptr=0; return t;
         }
         if(!strcmp(txt,"min16float")||!strcmp(txt,"min10float")){ advance(ts); t.kind=T_FLOAT; return t; }
@@ -759,6 +763,10 @@ void parse_struct(TokStream *ts, Program *prog){
     Token *tag=peek(ts); expect_name(ts,"struct tag"); expect(ts,TK_LBRACE,"{");
     Field *f=NULL; size_t n=0,cap=0;
     while(peek(ts)->kind!=TK_RBRACE){
+        if(peek(ts)->kind==TK_KW_TEMPLATE){
+            advance(ts); if(accept(ts,TK_LT)){ int td=1; while(td>0){ Token *tt=peek(ts); if(tt->kind==TK_LT)td++; else if(tt->kind==TK_GT)td--; if(tt->kind==TK_EOF) die(tt->line,"unterminated method template"); advance(ts); } }
+            continue;
+        }
         /* HLSL struct method? `type name ( ... ) { ... }` — skip the body */
         if((ts->i+2<ts->n)&&ts->toks[ts->i+1].kind==TK_IDENT&&ts->toks[ts->i+2].kind==TK_LPAREN){
             advance(ts); advance(ts); /* type + method name */
@@ -778,21 +786,38 @@ void parse_struct(TokStream *ts, Program *prog){
             } else if(peek(ts)->kind==TK_SEMI) advance(ts);
             continue;
         }
+        int skip_static_member=0;
         while((peek(ts)->kind==TK_IDENT&&(!strcmp(peek(ts)->text,"row_major")||!strcmp(peek(ts)->text,"column_major")||
                                          !strcmp(peek(ts)->text,"precise")||!strcmp(peek(ts)->text,"shared")))||
               peek(ts)->kind==TK_KW_LINEAR||peek(ts)->kind==TK_KW_NOPERSPECTIVE||
-              peek(ts)->kind==TK_KW_CENTROID||peek(ts)->kind==TK_KW_SAMPLE)
-            advance(ts); /* HLSL field storage/interpolation modifiers */
+              peek(ts)->kind==TK_KW_CENTROID||peek(ts)->kind==TK_KW_SAMPLE||peek(ts)->kind==TK_KW_STATIC||peek(ts)->kind==TK_KW_CONSTANT){
+            if(peek(ts)->kind==TK_KW_STATIC||peek(ts)->kind==TK_KW_CONSTANT) skip_static_member=1;
+            advance(ts);
+        }
+        if(peek(ts)->kind==TK_IDENT&&ts->i+1<ts->n&&ts->toks[ts->i+1].kind==TK_LT){
+            size_t j=ts->i+1; int d=0; for(;j<ts->n;j++){ if(ts->toks[j].kind==TK_LT)d++; else if(ts->toks[j].kind==TK_GT&&!--d) break; }
+            if(j+2<ts->n&&((ts->toks[j+1].kind==TK_IDENT)||(ts->toks[j+1].kind==TK_KW_CONSTANT))&&(ts->toks[j+2].kind==TK_LPAREN||(ts->toks[j+1].kind==TK_IDENT&&ts->toks[j+1].text&&!strcmp(ts->toks[j+1].text,"operator")&&ts->toks[j+2].kind==TK_LBRACK))){
+                while(ts->i<=j+1) advance(ts); if(accept(ts,TK_LBRACK)) expect(ts,TK_RBRACK,"]"); int md=0; do{ Token *t=peek(ts); if(t->kind==TK_LPAREN)md++; else if(t->kind==TK_RPAREN)md--; if(t->kind==TK_EOF) die(t->line,"unterminated method signature"); advance(ts); }while(md>0);
+                if(peek(ts)->kind==TK_LBRACE){ int bd=0; do{ Token *t=peek(ts); if(t->kind==TK_LBRACE)bd++; else if(t->kind==TK_RBRACE)bd--; if(t->kind==TK_EOF) die(t->line,"unterminated method body"); advance(ts); }while(bd>0); }
+                continue;
+            }
+        }
+        if(peek(ts)->kind==TK_KW_CONSTANT&&ts->i+1<ts->n&&ts->toks[ts->i+1].kind==TK_LPAREN){
+            advance(ts); int md=0; do{ Token *t=peek(ts); if(t->kind==TK_LPAREN)md++; else if(t->kind==TK_RPAREN)md--; if(t->kind==TK_EOF) die(t->line,"unterminated method signature"); advance(ts); }while(md>0);
+            if(peek(ts)->kind==TK_LBRACE){ int bd=0; do{ Token *t=peek(ts); if(t->kind==TK_LBRACE)bd++; else if(t->kind==TK_RBRACE)bd--; if(t->kind==TK_EOF) die(t->line,"unterminated method body"); advance(ts); }while(bd>0); }
+            continue;
+        }
         Type ty=parse_type(ts); if(ty.is_ptr) die(peek(ts)->line,"pointer fields unsupported");
         int was_method=0;
         do{ Token *fn=peek(ts); expect_name(ts,"field name");
+            if(skip_static_member&&accept(ts,TK_EQ)){ int d=0; while(peek(ts)->kind!=TK_EOF){ Token *it=peek(ts); if(it->kind==TK_LPAREN||it->kind==TK_LBRACK||it->kind==TK_LBRACE)d++; else if(it->kind==TK_RPAREN||it->kind==TK_RBRACK||it->kind==TK_RBRACE){ if(d>0)d--; } if(it->kind==TK_SEMI&&d==0){ advance(ts); break; } advance(ts); } was_method=1; break; }
             int is_oper = fn && !strcmp(fn->text,"operator") && (ts->i+1<ts->n) && ts->toks[ts->i+1].kind!=TK_IDENT;
             if(peek(ts)->kind==TK_LPAREN || is_oper){
                 /* struct method with a complex (template-instantiation) return
                  * type — the (i+1)==IDENT heuristic misses `TDual<T> f(...)`;
                  * `operator+`/`operator-` lex as IDENT PLUS/MINUS (skip the
                  * operator token, then the signature follows) */
-                if(is_oper) advance(ts);
+                if(is_oper){ advance(ts); if(accept(ts,TK_LBRACK)) expect(ts,TK_RBRACK,"]"); }
                 int mdepth=0;
                 do{ Token *t=peek(ts);
                     if(t->kind==TK_LPAREN)mdepth++;

@@ -183,7 +183,12 @@ validated by the canonical UE Metallib path. Generated uniform stubs provide
 UE's virtual-texture feedback fields, depth-radius/projection helpers,
 `DrawRectangleParameters`, and a guarded standalone
 `NUM_VIRTUALTEXTURE_SAMPLES=1` default.
-The HLSL frontend now parses fixed-underlying unscoped enum declarations as
+`static_struct_method.hlsl` verifies static struct methods. Struct parsing also
+accepts symbolic vector/matrix template dimensions, nested template headers,
+operator[] method signatures, and static/const compile-time member initializers;
+uninstantiated template function bodies are skipped rather than misclassified
+as ordinary concrete HLSL functions.
+unscoped enum declarations as
 strict immutable integral module constants, including declaration-order
 initializers, previous-enumerator references, implicit increments, and
 trailing commas; `enum_regress.hlsl` covers the resulting AIR/Metallib path.

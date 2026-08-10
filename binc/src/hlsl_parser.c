@@ -339,6 +339,19 @@ HLSLProg hlsl_parse(TokStream *ts){
                 else if(t->kind==TK_GT) tdepth--;
                 advance(ts);
             }
+            if(peek(ts)->kind==TK_KW_STRUCT) continue;
+            /* Template functions are not instantiated by this frontend; skip
+             * the complete declaration so their symbolic parameters do not
+             * become ordinary parse/type errors. */
+            int par=0;
+            while(peek(ts)->kind!=TK_EOF){
+                Token *t=peek(ts);
+                if(t->kind==TK_LPAREN) par++;
+                else if(t->kind==TK_RPAREN&&par>0) par--;
+                else if(t->kind==TK_LBRACE&&par==0){ int bd=0; do{ Token *b=peek(ts); if(b->kind==TK_LBRACE)bd++; else if(b->kind==TK_RBRACE)bd--; if(b->kind==TK_EOF) break; advance(ts); }while(bd>0); break; }
+                else if(t->kind==TK_SEMI&&par==0){ advance(ts); break; }
+                advance(ts);
+            }
             continue;
         }
 
