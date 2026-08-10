@@ -284,6 +284,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
             }
             if(out->kind) break;
         }
+        if(!strcmp(e->name,"reversebits")&&e->nargs==1){ expr_type_of(c,e->args[0],out); break; }
         if(!strcmp(e->name,"mul")&&e->nargs==2){
             Type a={0},b={0}; expr_type_of(c,e->args[0],&a); expr_type_of(c,e->args[1],&b);
             if(a.matn&&b.matn){ out->kind=(a.kind==T_HALF||b.kind==T_HALF)?T_HALF:T_FLOAT; out->matn=a.matn; out->matm=mat_cols(b.matn,b.matm); break; }
@@ -370,7 +371,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
         if(!strcmp(e->name,"uint")){ out->kind=T_UINT32; break; }
         if(!strcmp(e->name,"bool")){ out->kind=T_BOOL; break; }
         out->kind=T_INT32; break; }
-    case E_INDEX:{ Type base; expr_type_of(c,e->operand,&base); base.vecn=0; base.matn=0; base.array_n=0; base.array_m=0; *out=base; break; }
+    case E_INDEX:{ Type base; expr_type_of(c,e->operand,&base); int array_element=base.array_n>0; base.matn=0; base.matm=0; base.array_n=0; base.array_m=0; if(!array_element) base.vecn=0; *out=base; break; }
     case E_DEREF:{ Type base; expr_type_of(c,e->operand,&base); base.is_ptr=0; *out=base; break; }
     case E_ASSIGN: expr_type_of(c,e->rhs,out); break;
     case E_TERNARY: expr_type_of(c,e->rhs,out); break;
@@ -667,6 +668,7 @@ static const char *splat(CG *c, const char *v, const char *elt, int n){
 }
 /* element conversion between <n x i32> and <n x float> */
 static const char *vconv(CG *c, const char *v, int n, ValKind from, ValKind to){
+    if(from==to||(from==VK_I32&&to==VK_U32)||(from==VK_U32&&to==VK_I32)) return v;
     const char *op=to==VK_F32?(from==VK_U32?"uitofp":"sitofp"):(to==VK_U32?"fptoui":"fptosi");
     const char *r=newtmp(c);
     emit(c,"  %s = %s <%d x %s> %s to <%d x %s>\n",r,op,n,from==VK_F32?"float":"i32",v,n,to==VK_F32?"float":"i32");
@@ -720,6 +722,7 @@ static int swizzle_idx(const char *f, int *out){
 }
 /* build <nc x elt> from component indices of a vector register */
 static const char *swizzle_read(CG *c, const char *vec, const char *vty, const char *ety, const int *idxs, int nc){
+    if(nc==1){ const char *x=newtmp(c); emit(c,"  %s = extractelement %s %s, i32 %d\n",x,vty,vec,idxs[0]); return x; }
     const char *acc="undef";
     for(int i=0;i<nc;i++){
         const char *x=newtmp(c);
@@ -735,6 +738,7 @@ static const char *swizzle_read(CG *c, const char *vec, const char *vty, const c
 /* builtins table defined above expr_type_of (shared with the type checker) */
 static int builtin_used[sizeof builtins/sizeof *builtins];
 static void mark_builtin(const char *name){ for(size_t i=0;i<sizeof builtins/sizeof *builtins;i++) if(!strcmp(builtins[i].name,name)){ builtin_used[i]=1; return; } }
+static int reversebits_used;
 static int atomic_add_used[3];
 static int tex_read_used[4], tex_write_used[4], tex_sample_used[4], tex_sample_cube_used[4], tex_sample_cube_array_used[4], tex_sample_1d_used[4], tex_sample_3d_used[4], tex_sample_2d_array_used[4], tex_sample_grad_used[4], tex_sample_grad_cube_used[4], tex_sample_grad_cube_array_used[4], tex_sample_grad_3d_used[4], tex_sample_grad_2d_array_used[4], tex_gather_used[4], tex_gather_cube_used[4], tex_gather_cube_array_used[4], tex_gather_2d_array_used[4], get_samp_used;
 static const char *tex_air_type(const Type *ty){
@@ -1284,6 +1288,20 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
          * coordinate itself is the global position; local/group values are appended as
          * hidden built-in arguments when referenced. */
         if(e->kind==E_FIELD){
+            /* HLSL matrix rows are values, so `M[row].w` must swizzle the
+             * materialized row rather than address the AIR column vector. */
+            if(c->prog->hlsl&&e->operand->kind==E_INDEX){
+                int mr=0,mc=0; matrix_dims(c,e->operand,&mr,&mc);
+                if(!mr) matrix_dims(c,e->operand->operand,&mr,&mc);
+                if(mc){
+                    ValKind vk; const char *v=gen_rval(c,e->operand,&vk);
+                    int idxs[4]; int nc=swizzle_idx(e->field,idxs);
+                    if(nc<0) die(0,"invalid vector component .%s",e->field);
+                    for(int si=0;si<nc;si++) if(idxs[si]>=mc) die(0,"no component .%s on <%d x float>",e->field,mc);
+                    char vty[32]; snprintf(vty,sizeof vty,"<%d x float>",mc);
+                    *k=vk; c->rvw=nc>1?nc:0; return swizzle_read(c,v,vty,"float",idxs,nc);
+                }
+            }
             if(getenv("BINC_DEBUG_D3D9")){ int dvi; RKind dvr=e->operand->kind==E_IDENT?resolve(c,e->operand->name,&dvi):R_NONE; const char *iname=e->operand->kind==E_FIELD?(e->operand->operand&&e->operand->operand->kind==E_IDENT?e->operand->operand->name:"(nested)"):""; fprintf(stderr,"DBG fld: opk=%d fld=%s vr=%d inner=%s iname=%s\n",e->operand->kind,e->field,dvr,e->operand->kind==E_FIELD?(e->operand->field?e->operand->field:"?"):"",iname); }
             /* field access on a VALUE (computed vector/struct result): vector
              * swizzle for vector results, extractvalue for struct results */
@@ -1324,7 +1342,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     /* vector call result: asfloat(...).x — swizzle */
                     int idxs[4]; int nc=swizzle_idx(e->field,idxs);
                     if(nc<0) die(0,"invalid vector component .%s",e->field);
-                    const char *elt=ck==VK_I32?"i32":"float";
+                    const char *elt=(ck==VK_I32||ck==VK_U32)?"i32":"float";
                     char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",c->rvw,elt);
                     *k=ck;
                     if(nc==1){ const char *r=newtmp(c); c->rvw=0;
@@ -1336,7 +1354,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     /* scalar call-result swizzle: f().xxx — splat to the swizzle width */
                     int idxs[4]; int nc=swizzle_idx(e->field,idxs);
                     if(nc>0){
-                        const char *elt=ck==VK_I32?"i32":"float";
+                        const char *elt=(ck==VK_I32||ck==VK_U32)?"i32":"float";
                         if(nc==1){ *k=ck; c->rvw=0; return cv; }
                         const char *sp=splat(c,cv,elt,nc);
                         *k=ck; c->rvw=nc;
@@ -1349,9 +1367,10 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 if(fi<0) die(0,"no field .%s on %s",e->field,c->rstruct);
                 Field *fd=&sd->fields[fi];
                 const char *ev=newtmp(c);
-                char fl[32]; type_ll(fl,sizeof fl,fd->ty.kind,fd->ty.struct_name,fd->ty.vecn);
+                char fl[96]; if(fd->ty.matn) mll_of(fl,sizeof fl,fd->ty.matn,fd->ty.matm); else type_ll(fl,sizeof fl,fd->ty.kind,fd->ty.struct_name,fd->ty.vecn);
                 emit(c,"  %s = extractvalue %%struct.%s %s, %d\n",ev,c->rstruct,cv,fi);
                 if(fd->ty.kind==T_HALF) ev=h2f(c,ev,fd->ty.vecn);
+                if(fd->ty.matn){ *k=VK_F32; c->rvw=0; c->rmat=fd->ty.matn; c->rmatm=fd->ty.matm; c->rstruct=NULL; return ev; }
                 *k=scalar_vk(fd->ty.kind); c->rvw=fd->ty.vecn>1?fd->ty.vecn:0;
                 c->rstruct = fd->ty.kind==T_STRUCT?fd->ty.struct_name:NULL;
                 return ev;
@@ -1532,7 +1551,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         if(tv){ /* to vector: same-width conversion, or scalar splat */
             if(vw&&vw!=tv) die(0,"vector width mismatch in cast");
             if(!vw){ const char *s=coerce(c,v,lk,want); *k=want; c->rvw=tv; return splat(c,s,scalar_ll(tk),tv); }
-            if(lk!=want) return vconv(c,v,tv,lk,want);
+            if(lk!=want){ *k=want; c->rvw=tv; return vconv(c,v,tv,lk,want); }
             *k=want; c->rvw=tv; return v;
         }
         if(vw) die(0,"cannot cast a vector to a scalar");
@@ -1956,7 +1975,6 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         else { if(rw) die(0,"cannot store a vector into a scalar"); sv=store_val(c,rhs,rk,li.tk,&ev); }
         char pty[96]; pty_str(pty,sizeof pty,li.tk,li.sname,li.as,li.is_local,vw,li.matn,li.matm);
         char ll[32]; ll_of(ll,sizeof ll,li.tk,vw);
-        if(getenv("BINC_DEBUG_ASSIGN")) fprintf(stderr,"DBG assign: rhs=%s rk=%d rw=%d vw=%d tk=%d\n",rhs,rk,rw,vw,li.tk);
         emit(c,"  store %s %s, %s %s, align %d\n",ll,sv,pty,addr,type_align(li.tk,vw));
         *k=scalar_vk(li.tk); c->rvw=vw; return ev;
     }
@@ -1979,6 +1997,14 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         else emit(c,"  %s = select i1 %s, %s %s, %s %s\n",r,cv,elt,av,elt,bv);
         return r; }
     case E_CALL:{
+        if(!strcmp(e->name,"reversebits")){
+            if(e->nargs!=1) die(e->line,"reversebits expects one argument");
+            ValKind ak; const char *av=gen_rval(c,e->args[0],&ak);
+            if(c->rvw) die(e->line,"reversebits expects a scalar uint");
+            reversebits_used=1;
+            const char *r=newtmp(c); emit(c,"  %s = call i32 @llvm.bitreverse.i32(i32 %s)\n",r,av);
+            *k=VK_U32; c->rvw=0; return r;
+        }
         if(getenv("BINC_DEBUG_IW")&&!strcmp(e->name,"CondMask")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")) fprintf(stderr,"DBG cm-call: nargs=%zu line=%d\n",e->nargs,e->line);
         if(e->callee && e->callee->kind==E_FIELD){
             /* texture methods: tex.read(c), tex.write(v, c), tex.sample(smp, uv) */
@@ -1993,17 +2019,29 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     if(!strcmp(e->name,"read")||!strcmp(e->name,"Load")){
                         /* HLSL Load: int2 (or int3 with a mip) coordinate */
                         if(e->nargs!=1) die(0,"texture read expects 1 argument (the coordinate)");
-                        ValKind ck; const char *cv=gen_rval(c,e->args[0],&ck);
-                        if(c->rvw!=2) die(0,"texture read coordinate must be an int2");
+                        ValKind ck; const char *cv=gen_rval(c,e->args[0],&ck); int cn=c->rvw;
+                        if(cn!=2&&cn!=3) die(0,"texture read coordinate must be an int2 or int3");
+                        const char *coord=cv; const char *mip="0";
+                        if(cn==3){
+                            const char *x=newtmp(c),*y=newtmp(c),*z=newtmp(c),*xy=newtmp(c),*xy2=newtmp(c);
+                            emit(c,"  %s = extractelement <3 x i32> %s, i32 0\n",x,cv);
+                            emit(c,"  %s = extractelement <3 x i32> %s, i32 1\n",y,cv);
+                            emit(c,"  %s = extractelement <3 x i32> %s, i32 2\n",z,cv);
+                            emit(c,"  %s = insertelement <2 x i32> zeroinitializer, i32 %s, i32 0\n",xy,x);
+                            emit(c,"  %s = insertelement <2 x i32> %s, i32 %s, i32 1\n",xy2,xy,y);
+                            coord=xy2; mip=z;
+                        }
                         get_samp_used=1; tex_read_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
                         const char *samp=newtmp(c);
                         emit(c,"  %s = call %%struct._sampler_t addrspace(2)* @air.get_read_sampler()\n",samp);
                         const char *r=newtmp(c);
-                        emit(c,"  %s = call { %s, i8 } @air.read_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x i32> %s, <2 x i32> zeroinitializer, i32 0, i32 0)\n",r,vec,suf,tname,samp,cv);
+                        emit(c,"  %s = call { %s, i8 } @air.read_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x i32> %s, <2 x i32> zeroinitializer, i32 %s, i32 0)\n",r,vec,suf,tname,samp,coord,mip);
                         const char *v=newtmp(c);
                         emit(c,"  %s = extractvalue { %s, i8 } %s, 0\n",v,vec,r);
                         if(tp->ty.tex_elt==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext <4 x half> %s to <4 x float>\n",w,v); v=w; }
-                        *k=VK_F32; c->rvw=4; return v;
+                        int outw=(c->prog->hlsl&&tp->ty.vecn<=1)?1:4;
+                        if(outw==1){ const char *s=newtmp(c); emit(c,"  %s = extractelement %s %s, i32 0\n",s,vec,v); v=s; }
+                        *k=tp->ty.tex_elt==T_INT32?VK_I32:tp->ty.tex_elt==T_UINT32?VK_U32:VK_F32; c->rvw=outw>1?outw:0; return v;
                     }
                     if(!strcmp(e->name,"write")){
                         if(e->nargs!=2) die(0,"texture write expects 2 arguments (value, coordinate)");
@@ -2127,7 +2165,8 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         if(uk!=VK_F32) die(0,"texture sample coordinate must be float");
                         const char *lod=fconst(c,0.0);
                         if(is_level){ ValKind lk; lod=gen_rval(c,e->args[2],&lk);
-                            if(c->rvw) die(0,"texture sample lod must be a scalar"); }
+                            if(c->rvw) die(0,"texture sample lod must be a scalar");
+                            if(lk!=VK_F32) lod=coerce(c,lod,lk,VK_F32); }
                         const char *lod_flag=is_level?"true":"false";
                         int ti_kind=tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0;
                         const char *r=newtmp(c);
@@ -2234,16 +2273,26 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 }
             }
             if(strcmp(e->name,"add")) die(0,"unsupported atomic method %s",e->name);
-            if(e->nargs!=1) die(0,"atomic add expects one argument");
+            if(e->nargs!=1&&e->nargs!=2) die(0,"atomic add expects one value and optional out result");
             Expr *base=e->callee->operand; if(base->kind!=E_DEREF||base->operand->kind!=E_IDENT) die(0,"atomic methods require an atomic buffer");
-            int api; if(resolve(c,base->operand->name,&api)!=R_PTR||c->fn->params[api].ty.kind!=T_ATOMIC) die(0,".add() target is not atomic");
+            int api; if(resolve(c,base->operand->name,&api)!=R_PTR) die(0,".add() target is not an atomic buffer");
+            Param *aparam=&c->fn->params[api];
+            TypeKind ak=aparam->ty.kind==T_ATOMIC?aparam->ty.atomic_base:aparam->ty.kind;
+            if(aparam->ty.kind!=T_ATOMIC&&(!aparam->ty.is_ptr||(ak!=T_FLOAT&&ak!=T_INT32&&ak!=T_UINT32))) die(0,".add() target is not an atomic buffer");
             LInfo ali; fill_param_li(c,api,&ali); ali.pi=api; c->read[api]=1; c->written[api]=1;
-            char *ap=element_ptr_idx(c,api,"0"); TypeKind ak=c->fn->params[api].ty.atomic_base; ValKind vk; const char *v=gen_rval(c,e->args[0],&vk);
+            char *ap=element_ptr_idx(c,api,"0");
+            ValKind vk; const char *v=gen_rval(c,e->args[0],&vk);
             if(c->rvw) die(0,"atomic add does not accept vectors");
             ValKind want=scalar_vk(ak); v=coerce(c,v,vk,want);
             const char *intr=ak==T_FLOAT?"air.atomic.global.add.f32":"air.atomic.global.add.i32";
-            char *pp=newtmp(c); emit(c,"  %s = getelementptr inbounds %%\"struct.metal::_atomic\", %%\"struct.metal::_atomic\" addrspace(1)* %s, i64 0, i32 0\n",pp,ap);
+            char *pp=ap;
+            if(aparam->ty.kind==T_ATOMIC){ pp=newtmp(c); emit(c,"  %s = getelementptr inbounds %%\"struct.metal::_atomic\", %%\"struct.metal::_atomic\" addrspace(1)* %s, i64 0, i32 0\n",pp,ap); }
             const char *r=newtmp(c); emit(c,"  %s = call %s @%s(%s addrspace(1)* %s, %s %s, i32 0, i32 2, i32 0, i1 false)\n",r,scalar_ll(ak),intr,scalar_ll(ak),pp,scalar_ll(ak),v);
+            if(e->nargs==2){
+                LInfo oi; char *op=gen_lval(c,e->args[1],&oi,1);
+                if(oi.vecn||oi.matn||oi.tk!=ak) die(0,"atomic add out result type mismatch");
+                emit(c,"  store %s %s, %s* %s, align %d\n",scalar_ll(ak),r,scalar_ll(ak),op,type_align(ak,0));
+            }
             atomic_add_used[ak==T_FLOAT?0:1]=1; *k=want; c->rvw=0; return r;
         }
         /* matrix constructor mat2/3/4(...) / float2x2..float4x4(...) */
@@ -2816,10 +2865,12 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             const char *colv=c->prog->hlsl?bv:av;
             char *base=gen_lval(c,matrix_base,li,mark);
             char mty[32]; mll_of(mty,sizeof mty,mrows,mcols);
+            char mpty[64]; if(li->as) snprintf(mpty,sizeof mpty,"%s addrspace(%d)*",mty,li->as); else snprintf(mpty,sizeof mpty,"%s*",mty);
             char *colptr=newtmp(c);
-            emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 0, i64 %s\n",colptr,mty,mty,base,colv);
+            emit(c,"  %s = getelementptr inbounds %s, %s %s, i64 0, i64 %s\n",colptr,mty,mpty,base,colv);
             char *elt=newtmp(c);
-            emit(c,"  %s = getelementptr inbounds <%d x float>, <%d x float>* %s, i64 0, i64 %s\n",elt,mrows,mrows,colptr,rowv);
+            if(li->as) emit(c,"  %s = getelementptr inbounds <%d x float>, <%d x float> addrspace(%d)* %s, i64 0, i64 %s\n",elt,mrows,mrows,li->as,colptr,rowv);
+            else emit(c,"  %s = getelementptr inbounds <%d x float>, <%d x float>* %s, i64 0, i64 %s\n",elt,mrows,mrows,colptr,rowv);
             li->tk=T_FLOAT; li->sname=NULL; li->vecn=0; li->matn=0; li->matm=0;
             return elt;
         }
@@ -2842,9 +2893,9 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             int is_arr = (e->operand->kind==E_FIELD||e->operand->kind==E_INDEX);
             if(e->operand->kind==E_IDENT){ int oi; is_arr = resolve(c,e->operand->name,&oi)==R_LOCAL; }
             if(is_arr){
-                LInfo li2; char *base2=gen_lval(c,e->operand,&li2,mark);
-                if(li2.an>0){
-                    ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
+                LInfo li2={0}; char *base2=gen_lval(c,e->operand,&li2,mark);
+                if(!li2.as&&e->operand->kind==E_FIELD){ Expr *root=e->operand; while(root->kind==E_FIELD) root=root->operand; if(root->kind==E_IDENT&&!strcmp(root->name,"__uniforms")) li2.as=AS_CONSTANT; }
+                if(li2.an>0){ ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
                     if(ik!=VK_I32&&ik!=VK_U32) die(0,"array index must be an integer");
                     const char *ix=newtmp(c);
                     emit(c,"  %s = sext i32 %s to i64\n",ix,iv);
@@ -3419,7 +3470,7 @@ static void emit_stage_meta(Meta *m, const Program *prog, Function *fn, StageMet
 
 void emit_air(FILE *out, Program *prog){
     g_curprog=prog;
-    memset(builtin_used,0,sizeof builtin_used); memset(atomic_add_used,0,sizeof atomic_add_used);
+    memset(builtin_used,0,sizeof builtin_used); memset(atomic_add_used,0,sizeof atomic_add_used); reversebits_used=0;
     fprintf(out,"; generated by binc — works as C, acts as Metal\n");
     fprintf(out,"target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32\"\n");
     fprintf(out,"target triple = \"%s\"\n\n",g_air_triple);
@@ -3659,7 +3710,8 @@ void emit_air(FILE *out, Program *prog){
             gen_stmt(&c,&b->stmts[si]); }
         if(!c.term){ if(c.fn->ret.kind==T_VOID) emit(&c,"  ret void\n");
             else if(c.fn->ret.kind==T_STRUCT){ StructDef *sd=find_struct(prog,c.fn->ret.struct_name);
-                char lt[256]; stage_lit_type(lt,sizeof lt,sd); emit(&c,"  ret %s undef\n",lt); }
+                if(c.fn->stage==ST_NONE) emit(&c,"  ret %%struct.%s undef\n",c.fn->ret.struct_name);
+                else { char lt[256]; stage_lit_type(lt,sizeof lt,sd); emit(&c,"  ret %s undef\n",lt); } }
             else { char rl[32]; ll_of(rl,sizeof rl,c.fn->ret.kind,c.fn->ret.vecn);
                 emit(&c,"  ret %s %s\n",rl,c.fn->ret.vecn>1?"zeroinitializer":
                     c.fn->ret.kind==T_FLOAT||c.fn->ret.kind==T_HALF?"0.000000e+00":c.fn->ret.kind==T_BOOL?"false":"0"); } }
@@ -3676,6 +3728,7 @@ void emit_air(FILE *out, Program *prog){
         fprintf(out,"declare i32 @llvm.cttz.i32(i32, i1) local_unnamed_addr\n");
         fprintf(out,"declare i32 @llvm.ctpop.i32(i32) local_unnamed_addr\n");
     }
+    if(reversebits_used) fprintf(out,"declare i32 @llvm.bitreverse.i32(i32) local_unnamed_addr\n");
     if(atomic_add_used[0]) fprintf(out,"declare float @air.atomic.global.add.f32(float addrspace(1)*, float, i32, i32, i32, i1) local_unnamed_addr\n");
     if(atomic_add_used[1]) fprintf(out,"declare i32 @air.atomic.global.add.i32(i32 addrspace(1)*, i32, i32, i32, i32, i1) local_unnamed_addr\n");
     /* texture intrinsics + the opaque texture/sampler types */

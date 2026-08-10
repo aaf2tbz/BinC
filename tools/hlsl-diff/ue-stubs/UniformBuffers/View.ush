@@ -21,6 +21,16 @@ struct ViewState
     float4 ViewSizeAndInvSize;
     float4 BufferSizeAndInvSize;
     float4 InvDeviceZToWorldZTransform;
+    float2 WorldDepthToPixelWorldRadius;
+    float4 ScreenRayLengthMultiplier;
+    float4 ScreenToViewSpace;
+    uint VirtualTextureFeedbackSampleOffset;
+    uint VirtualTextureFeedbackMask;
+    uint VirtualTextureFeedbackShift;
+    uint VirtualTextureFeedbackJitterOffset;
+    uint VirtualTextureFeedbackBufferSize;
+    uint Random;
+    float GlobalVirtualTextureMipBias[4];
     // CommonViewUniformBuffer.ush uses xy as tan(FOV/2) and zw as its
     // reciprocal for current and previous views.
     float4 TanAndInvTanHalfFOV;
@@ -45,6 +55,7 @@ struct ViewState
     float4x4 PrevClipToRelativeWorld;
     FDFInverseMatrix WorldToClip;
     FDFMatrix ClipToWorld;
+    float4x4 ClipToView;
     FDFMatrix ScreenToWorld;
     float4x4 ScreenToTranslatedWorld;
     FDFMatrix PrevClipToWorld;

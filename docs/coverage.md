@@ -175,6 +175,14 @@ Implicit compiler-forwarded pointer/texture/sampler parameters are accepted by
 HLSL overload resolution without changing ordinary value-argument arity;
 `implicit_uniform_overload.hlsl` locks the zero-argument cbuffer-forwarding
 case.
+The VT lowering regression suite also covers `reversebits(uint)`, typed
+`Texture2D.Load(int3)` scalar/vector results, and
+`InterlockedAdd(target, value, out oldValue)`; nested vector-array indexing,
+integer bit-preserving casts, and constant-buffer matrix address spaces are
+validated by the canonical UE Metallib path. Generated uniform stubs provide
+UE's virtual-texture feedback fields, depth-radius/projection helpers,
+`DrawRectangleParameters`, and a guarded standalone
+`NUM_VIRTUALTEXTURE_SAMPLES=1` default.
 The HLSL frontend now parses fixed-underlying unscoped enum declarations as
 strict immutable integral module constants, including declaration-order
 initializers, previous-enumerator references, implicit increments, and

@@ -1166,11 +1166,10 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                 continue;
             }
             if(getenv("BINC_DEBUG_IW")&&!strcmp(res[r].name,"Primitive")) fprintf(stderr,"DBG ref: %s nstmts=%zu\n",hf->name,hf->body.n);
-            /* insert the resource param BEFORE any trailing defaulted params:
-             * HLSL defaults are trailing, and the RA-appended resource args
-             * fill the non-defaulted tail — resources must precede defaults */
+            /* implicit resource arguments are appended after the complete
+             * source parameter list, including trailing HLSL defaults; RA
+             * appends the corresponding actuals in exactly this order. */
             size_t ip=fn.nparams;
-            while(ip>0&&fn.params[ip-1].def) ip--;
             fn.params=realloc(fn.params,(fn.nparams+1)*sizeof(Param));
             memmove(&fn.params[ip+1],&fn.params[ip],(fn.nparams-ip)*sizeof(Param));
             fn.params[ip]=(Param){strdup(res[r].name),res[r].ty,UN_UNIFORM};

@@ -7,6 +7,10 @@
 #include "/Engine/Generated/UniformBuffers/Primitive.ush"
 #include "/Engine/Generated/UniformBuffers/View.ush"
 
+#ifndef NUM_VIRTUALTEXTURE_SAMPLES
+#define NUM_VIRTUALTEXTURE_SAMPLES 1
+#endif
+
 // SCW generator-placeholder substitution: MaterialTemplate.ush's
 // FPixelMaterialInputs body is `%{pixel_material_inputs}`, filled at
 // generation time. The pp substitutes a live define of that name.
@@ -59,6 +63,14 @@ struct FBasePassData
     Texture2D PreIntegratedGFTexture;
 };
 FBasePassData OpaqueBasePass;
+
+struct FDrawRectangleParameters
+{
+    float4 PosScaleBias;
+    float4 UVScaleBias;
+    float4 InvTargetSizeAndTextureSize;
+};
+FDrawRectangleParameters DrawRectangleParameters;
 
 // Vertex-factory interpolants struct: defined per-factory by the generated
 // VertexFactory.ush (missing from the audit include chain). The base-pass
