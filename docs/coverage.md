@@ -156,8 +156,10 @@ The same fixture now proves distinct cube-array `Sample`, `SampleLevel`, and
 `SampleGrad` AIR ABI lowering from `float4(direction, layer)` coordinates.
 Non-square HLSL matrix lowering now preserves row/column dimensions in the AIR
 aggregate ABI, including constructors, transpose, matrix/vector multiplication,
-field/index access, by-value calls/returns, and top-left narrowing casts; the
-persistent `non_square_matrix.hlsl` fixture produces a Metallib.
+field/index access (including HLSL row reads/writes, row/column element
+indexing, and arrays of rectangular matrices), by-value calls/returns, and
+top-left narrowing casts; the persistent `non_square_matrix.hlsl` fixture
+produces a Metallib.
 The HLSL frontend now parses fixed-underlying unscoped enum declarations as
 strict immutable integral module constants, including declaration-order
 initializers, previous-enumerator references, implicit increments, and

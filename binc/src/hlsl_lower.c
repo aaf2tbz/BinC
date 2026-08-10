@@ -775,6 +775,7 @@ static void lower_vertex(Function *fn, HLSLFunc *hf){
 static char **iw_helpers=NULL; static size_t niw=0; static int *iw_io=NULL;
 Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int stage_all){
     memset(&g_prog,0,sizeof g_prog);
+    g_prog.hlsl=1;
     fprintf(stderr,"DBG build: entry=%s nglobals=%zu\n",entry,hp->nglobals);
     int is_vs = strncmp(profile,"vs",2)==0;
     int is_ps = strncmp(profile,"ps",2)==0;

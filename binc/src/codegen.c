@@ -423,10 +423,29 @@ static int matrix_n(CG *c, Expr *e){
 }
 static void matrix_dims(CG *c, Expr *e, int *rows, int *cols){
     *rows=*cols=0;
+    if(e->kind==E_INDEX && (e->operand->kind==E_IDENT||e->operand->kind==E_FIELD)){
+        if(e->operand->kind==E_IDENT){
+            int i; RKind r=resolve(c,e->operand->name,&i);
+            if(r==R_LOCAL && c->locs[i].an>0 && c->locs[i].matn){ *rows=c->locs[i].matn; *cols=mat_cols(*rows,c->locs[i].matm); return; }
+            if((r==R_PTR||r==R_SCALAR) && c->fn->params[i].ty.array_n && c->fn->params[i].ty.matn){
+                *rows=c->fn->params[i].ty.matn; *cols=mat_cols(*rows,c->fn->params[i].ty.matm); return;
+            }
+        }
+        if(e->operand->kind==E_FIELD){
+            int i; if(resolve(c,e->operand->operand->kind==E_IDENT?e->operand->operand->name:"",&i)==R_LOCAL && c->locs[i].kind==T_STRUCT){
+                StructDef *s=find_struct(c->prog,c->locs[i].sname);
+                if(s) for(size_t f=0;f<s->nfields;f++) if(!strcmp(s->fields[f].name,e->operand->field)&&s->fields[f].ty.array_n&&s->fields[f].ty.matn){
+                    *rows=s->fields[f].ty.matn; *cols=mat_cols(*rows,s->fields[f].ty.matm); return;
+                }
+            }
+        }
+    }
     if(e->kind==E_IDENT){
         int i; RKind r=resolve(c,e->name,&i);
-        if(r==R_LOCAL){ *rows=c->locs[i].matn; *cols=mat_cols(*rows,c->locs[i].matm); return; }
-        if(r==R_PTR||r==R_SCALAR){ *rows=c->fn->params[i].ty.matn; *cols=mat_cols(*rows,c->fn->params[i].ty.matm); return; }
+        if(r==R_LOCAL && c->locs[i].an==0 && c->locs[i].matn){ *rows=c->locs[i].matn; *cols=mat_cols(*rows,c->locs[i].matm); return; }
+        if((r==R_PTR||r==R_SCALAR) && c->fn->params[i].ty.array_n==0 && c->fn->params[i].ty.matn){
+            *rows=c->fn->params[i].ty.matn; *cols=mat_cols(*rows,c->fn->params[i].ty.matm); return;
+        }
     }
     if(e->kind==E_FIELD && e->operand->kind==E_IDENT){
         int i; if(resolve(c,e->operand->name,&i)==R_LOCAL && c->locs[i].kind==T_STRUCT){
@@ -1195,6 +1214,26 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         /* `structValue.float2Field[i]` indexes a vector value; it is not a
          * buffer-pointer expression. Evaluate the field then extract its lane. */
         if(e->kind==E_INDEX){
+            /* HLSL's single matrix subscript selects a row (M[0] on
+             * float4x3 is a float3). AIR stores the same value as C column
+             * vectors of length R, so materialize the row across columns. */
+            if(c->prog->hlsl && (e->operand->kind==E_IDENT||e->operand->kind==E_FIELD||e->operand->kind==E_INDEX)){
+                int mrows=0,mcols=0; matrix_dims(c,e->operand,&mrows,&mcols);
+                if(mrows){
+                    ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
+                    if(ik!=VK_I32&&ik!=VK_U32) die(0,"matrix row index must be an integer");
+                    ValKind mk; const char *mv=gen_rval(c,e->operand,&mk);
+                    const char *row="undef";
+                    for(int col=0;col<mcols;col++){
+                        const char *cv=mat_colx(c,mv,mrows,mcols,col), *el=newtmp(c);
+                        emit(c,"  %s = extractelement <%d x float> %s, i32 %s\n",el,mrows,cv,iv);
+                        const char *ins=newtmp(c);
+                        emit(c,"  %s = insertelement <%d x float> %s, float %s, i32 %d\n",ins,mcols,row,el,col);
+                        row=ins;
+                    }
+                    *k=VK_F32; c->rvw=mcols; c->rmat=0; c->rmatm=0; return row;
+                }
+            }
             Type base; expr_type_of(c,e->operand,&base);
             if(base.vecn>1&&!base.is_ptr&&!base.array_n&&!base.array_m){
                 ValKind vk; const char *v=gen_rval(c,e->operand,&vk); int width=c->rvw;
@@ -1756,6 +1795,31 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         emit(c,"  store %s %s, %s %s, align %d\n",ll,sv,pty,addr,type_align(li.tk,li.vecn));
         *k=ck; c->rvw=0; return cur; }
     case E_ASSIGN:{
+        /* A single matrix subscript is an HLSL row lvalue. Rebuild the
+         * column-oriented AIR aggregate one column at a time. */
+        if(c->prog->hlsl && e->aop==A_ASSIGN && e->operand->kind==E_INDEX &&
+           (e->operand->operand->kind==E_IDENT||e->operand->operand->kind==E_FIELD||e->operand->operand->kind==E_INDEX)){
+            int mrows=0,mcols=0; matrix_dims(c,e->operand->operand,&mrows,&mcols);
+            if(mrows){
+                ValKind rk; const char *rhs=gen_rval(c,e->rhs,&rk); int rw=c->rvw;
+                if(c->rmat||rk!=VK_F32||rw!=mcols) die(0,"matrix row assignment width mismatch");
+                ValKind ik; const char *iv=gen_rval(c,e->operand->rhs,&ik);
+                if(ik!=VK_I32&&ik!=VK_U32) die(0,"matrix row index must be an integer");
+                LInfo li; char *addr=gen_lval(c,e->operand->operand,&li,1);
+                ValKind mk; const char *mv=emit_load_t(c,&li,addr,&mk);
+                const char *res=mv;
+                for(int col=0;col<mcols;col++){
+                    const char *cv=mat_colx(c,res,mrows,mcols,col), *el=newtmp(c);
+                    const char *rv=newtmp(c);
+                    emit(c,"  %s = extractelement <%d x float> %s, i32 %d\n",rv,mcols,rhs,col);
+                    emit(c,"  %s = insertelement <%d x float> %s, float %s, i32 %s\n",el,mrows,cv,rv,iv);
+                    res=mat_setcolx(c,res,mrows,mcols,col,el);
+                }
+                char mty[32]; mll_of(mty,sizeof mty,mrows,mcols);
+                emit(c,"  store %s %s, %s* %s, align %d\n",mty,res,mty,addr,mat_align(mrows,mcols));
+                *k=VK_F32; c->rvw=mcols; c->rmat=0; c->rmatm=0; return rhs;
+            }
+        }
         /* v.xy += rhs -> v.xy = v.xy + rhs (compound swizzle desugar; the base
          * may itself be a lowered field like `__in.v`, so copy the operand tree) */
         if(e->aop!=A_ASSIGN && e->operand->kind==E_FIELD){
@@ -1800,15 +1864,15 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 *k=scalar_vk(lb.tk); c->rvw=nc; return rv;
             }
         }
-        ValKind rk; const char *rhs=gen_rval(c,e->rhs,&rk); int rw=c->rvw; int rm=c->rmat;
+        ValKind rk; const char *rhs=gen_rval(c,e->rhs,&rk); int rw=c->rvw; int rm=c->rmat; int rmc=c->rmatm;
         LInfo li; char *addr=gen_lval(c,e->operand,&li,1);
         if(rm){
             if(e->aop!=A_ASSIGN) die(0,"compound assignment on a matrix");
             if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG matassign: lhs=%s li.matn=%d rm=%d rstruct=%s\n",e->operand->kind==E_FIELD?e->operand->field:"?",li.matn,rm,c->rstruct?c->rstruct:"(null)");
-            if(li.matn!=rm) die(0,"matrix width mismatch in assignment");
-            char mty[32]; mll_of(mty,sizeof mty,rm,c->rmatm);
-            emit(c,"  store %s %s, %s* %s, align %d\n",mty,rhs,mty,addr,mat_align(rm,c->rmatm));
-            *k=VK_F32; c->rvw=0; c->rmat=rm; return rhs;
+            if(li.matn!=rm||mat_cols(li.matn,li.matm)!=mat_cols(rm,rmc)) die(0,"matrix dimensions mismatch in assignment");
+            char mty[32]; mll_of(mty,sizeof mty,rm,rmc);
+            emit(c,"  store %s %s, %s* %s, align %d\n",mty,rhs,mty,addr,mat_align(rm,rmc));
+            *k=VK_F32; c->rvw=0; c->rmat=rm; c->rmatm=rmc; return rhs;
         }
         if(li.tk==T_STRUCT){
             if(e->aop!=A_ASSIGN) die(0,"compound assignment on a struct");
@@ -2692,19 +2756,27 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
     if(e->kind==E_DEREF){ const char *ix; int pi=eval_ptr(c,e->operand,&ix);
         if(mark)c->written[pi]=1; fill_param_li(c,pi,li); return element_ptr_idx(c,pi,ix); }
     if(e->kind==E_INDEX){
-        /* matrix element m[c][r] (two-level on a matrix base) */
-        int mrows=0, mcols=0; if(e->operand->kind==E_INDEX) matrix_dims(c,e->operand->operand,&mrows,&mcols);
+        /* matrix element m[row][col] (two-level on a matrix base) */
+        int mrows=0, mcols=0;
+        Expr *matrix_base=NULL;
+        if(e->operand->kind==E_INDEX){
+            matrix_dims(c,e->operand,&mrows,&mcols);
+            if(mrows) matrix_base=e->operand;
+            else { matrix_dims(c,e->operand->operand,&mrows,&mcols); matrix_base=e->operand->operand; }
+        }
         if(mrows){
-            ValKind ck, rk;
-            const char *cv=gen_rval(c,e->operand->rhs,&ck);
-            const char *rv=gen_rval(c,e->rhs,&rk);
-            if((ck!=VK_I32&&ck!=VK_U32)||(rk!=VK_I32&&rk!=VK_U32)) die(0,"matrix indices must be integers");
-            char *base=gen_lval(c,e->operand->operand,li,mark);
+            ValKind ak, bk;
+            const char *av=gen_rval(c,e->operand->rhs,&ak);
+            const char *bv=gen_rval(c,e->rhs,&bk);
+            if((ak!=VK_I32&&ak!=VK_U32)||(bk!=VK_I32&&bk!=VK_U32)) die(0,"matrix indices must be integers");
+            const char *rowv=c->prog->hlsl?av:bv;
+            const char *colv=c->prog->hlsl?bv:av;
+            char *base=gen_lval(c,matrix_base,li,mark);
             char mty[32]; mll_of(mty,sizeof mty,mrows,mcols);
             char *colptr=newtmp(c);
-            emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 0, i64 %s\n",colptr,mty,mty,base,cv);
+            emit(c,"  %s = getelementptr inbounds %s, %s* %s, i64 0, i64 %s\n",colptr,mty,mty,base,colv);
             char *elt=newtmp(c);
-            emit(c,"  %s = getelementptr inbounds <%d x float>, <%d x float>* %s, i64 0, i64 %s\n",elt,mrows,mrows,colptr,rv);
+            emit(c,"  %s = getelementptr inbounds <%d x float>, <%d x float>* %s, i64 0, i64 %s\n",elt,mrows,mrows,colptr,rowv);
             li->tk=T_FLOAT; li->sname=NULL; li->vecn=0; li->matn=0; li->matm=0;
             return elt;
         }
@@ -2733,6 +2805,19 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
                     if(ik!=VK_I32&&ik!=VK_U32) die(0,"array index must be an integer");
                     const char *ix=newtmp(c);
                     emit(c,"  %s = sext i32 %s to i64\n",ix,iv);
+                    if(li2.matn>0){
+                        char mel[64]; mll_of(mel,sizeof mel,li2.matn,li2.matm);
+                        char asp[32]; if(li2.as) snprintf(asp,sizeof asp," addrspace(%d)",li2.as); else asp[0]='\0';
+                        char ty[128];
+                        if(li2.am>0) snprintf(ty,sizeof ty,"[%d x [%d x %s]]",li2.an,li2.am,mel);
+                        else snprintf(ty,sizeof ty,"[%d x %s]",li2.an,mel);
+                        char *p=newtmp(c);
+                        emit(c,"  %s = getelementptr inbounds %s, %s%s* %s, i64 0, i64 %s\n",p,ty,ty,asp,base2,ix);
+                        li->tk=T_FLOAT; li->sname=NULL; li->as=li2.as; li->pi=li2.pi; li->is_local=li2.is_local;
+                        li->vecn=0; li->matn=li2.matn; li->matm=li2.matm; li->an=li2.am; li->am=0;
+                        if(li2.pi>=0){ if(mark) c->written[li2.pi]=1; else c->read[li2.pi]=1; }
+                        return p;
+                    }
                     char elt[32]; ll_of(elt,sizeof elt,li2.tk,li2.vecn);
                     char asp[32]; if(li2.as) snprintf(asp,sizeof asp," addrspace(%d)",li2.as); else asp[0]='\0';
                     if(li2.am>0){
@@ -2909,7 +2994,7 @@ static void gen_stmt(CG *c, Stmt *s){
                 char sn[64]; snprintf(sn,sizeof sn,"%%struct.%s",bty.struct_name);
                 emit(c,"  store %s %s, %s* %s, align %d\n",sn,v,sn,slot,sal); }
             break; }
-        if(bty.matn){
+        if(bty.matn&&!bty.array_n){
             char mty[32]; mll_of(mty,sizeof mty,bty.matn,bty.matm);
             char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,mty,mat_align(bty.matn,bty.matm));
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
@@ -2919,15 +3004,18 @@ static void gen_stmt(CG *c, Stmt *s){
                 emit(c,"  store %s %s, %s* %s, align %d\n",mty,v,mty,slot,mat_align(bty.matn,bty.matm)); }
             break; }
         if(bty.array_n){
-            /* local fixed-size array: alloca [N x T] / [N x [M x T]] */
-            char elt[32]; ll_of(elt,sizeof elt,kk,bty.vecn);
-            char arrty[64];
+            /* local fixed-size array: alloca [N x T] / [N x [M x T]],
+             * including arrays whose element is a rectangular matrix. */
+            char elt[96];
+            if(bty.matn) mll_of(elt,sizeof elt,bty.matn,bty.matm);
+            else ll_of(elt,sizeof elt,kk,bty.vecn);
+            char arrty[160];
             if(bty.array_m) snprintf(arrty,sizeof arrty,"[%d x [%d x %s]]",bty.array_n,bty.array_m,elt);
             else snprintf(arrty,sizeof arrty,"[%d x %s]",bty.array_n,elt);
             if(s->init) die(0,"array initializers are not supported; assign elements instead");
-            char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,arrty,type_align(kk,bty.vecn));
+            char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,arrty,bty.matn?mat_align(bty.matn,bty.matm):type_align(kk,bty.vecn));
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
-            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,bty.vecn,0,0,s->is_const,bty.array_n,bty.array_m};
+            c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,bty.matn?0:bty.vecn,bty.matn,bty.matm,s->is_const,bty.array_n,bty.array_m};
             break; }
         char ll[32]; ll_of(ll,sizeof ll,kk,bty.vecn);
         char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,ll,type_align(kk,bty.vecn));
