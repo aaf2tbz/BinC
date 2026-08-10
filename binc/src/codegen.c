@@ -1567,11 +1567,21 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         if(vw) die(0,"cannot cast a vector to a scalar");
         const char *r=coerce(c,v,lk,want); *k=want; c->rvw=0; return r; }
     case E_NOT:{ ValKind lk; const char *v=gen_rval(c,e->operand,&lk); int vw=c->rvw;
-        if(lk!=VK_I1) die(0,"! on non-bool");
         const char *r=newtmp(c); *k=VK_I1; c->rvw=vw;
-        if(vw){ char ty[32]; ll_of(ty,sizeof ty,T_BOOL,vw); const char *ones=splat(c,"true","i1",vw);
-            emit(c,"  %s = xor %s %s, %s\n",r,ty,v,ones); }
-        else emit(c,"  %s = xor i1 %s, true\n",r,v);
+        if(lk==VK_I1){
+            if(vw){ char ty[32]; ll_of(ty,sizeof ty,T_BOOL,vw); const char *ones=splat(c,"true","i1",vw);
+                emit(c,"  %s = xor %s %s, %s\n",r,ty,v,ones); }
+            else emit(c,"  %s = xor i1 %s, true\n",r,v);
+            return r;
+        }
+        if(lk==VK_I32||lk==VK_U32){
+            if(vw){ char ty[32]; ll_of(ty,sizeof ty,T_INT32,vw); const char *zero=splat(c,"0","i32",vw);
+                emit(c,"  %s = icmp eq %s %s, %s\n",r,ty,v,zero); }
+            else emit(c,"  %s = icmp eq i32 %s, 0\n",r,v);
+            return r;
+        }
+        if(lk==VK_F32&&!vw){ emit(c,"  %s = fcmp oeq float %s, 0.000000e+00\n",r,v); return r; }
+        die(0,"! on non-bool");
         return r; }
     case E_BIN:{ ValKind lk,rk; const char *l=gen_rval(c,e->lhs,&lk); int lw=c->rvw; int lm=c->rmat; int lmc=c->rmatm;
         if(getenv("BINC_DEBUG_IW")&&!strcmp(c->fn->name,"GetPrimitive_PerObjectGBufferData_FromFlags")) fprintf(stderr,"DBG bin: bop=%d lk=%d lw=%d lh=%d\n",e->bop,lk,lw,e->lhs->kind);
