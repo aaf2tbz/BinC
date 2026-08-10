@@ -46,6 +46,7 @@ struct ViewState
     FDFInverseMatrix WorldToClip;
     FDFMatrix ClipToWorld;
     FDFMatrix ScreenToWorld;
+    float4x4 ScreenToTranslatedWorld;
     FDFMatrix PrevClipToWorld;
     FDFVector3 PreViewTranslation;
     FDFVector3 PrevPreViewTranslation;

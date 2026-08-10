@@ -168,7 +168,9 @@ parameters using the receiving function's formal resource types; the
 struct. The generated `ViewState` stub also carries UE's `float4
 InvDeviceZToWorldZTransform` field for indexed depth conversion helpers. It
 also exposes `float3 TranslatedWorldCameraOrigin`, required by the
-`GetCameraVector` overloads and translated-world wrappers.
+`GetCameraVector` overloads and translated-world wrappers. Matrix-aware HLSL
+`mul` result typing preserves vector widths for generated `select_internal`
+overloads; `ScreenToTranslatedWorld` is covered in the View stub.
 Implicit compiler-forwarded pointer/texture/sampler parameters are accepted by
 HLSL overload resolution without changing ordinary value-argument arity;
 `implicit_uniform_overload.hlsl` locks the zero-argument cbuffer-forwarding

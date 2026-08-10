@@ -284,6 +284,14 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
             }
             if(out->kind) break;
         }
+        if(!strcmp(e->name,"mul")&&e->nargs==2){
+            Type a={0},b={0}; expr_type_of(c,e->args[0],&a); expr_type_of(c,e->args[1],&b);
+            if(a.matn&&b.matn){ out->kind=(a.kind==T_HALF||b.kind==T_HALF)?T_HALF:T_FLOAT; out->matn=a.matn; out->matm=mat_cols(b.matn,b.matm); break; }
+            if(a.matn){ out->kind=a.kind; out->vecn=a.matn; break; }
+            if(b.matn){ out->kind=b.kind; out->vecn=mat_cols(b.matn,b.matm); break; }
+            out->kind=(a.kind==T_FLOAT||b.kind==T_FLOAT)?T_FLOAT:(a.kind==T_HALF||b.kind==T_HALF)?T_HALF:T_INT32;
+            out->vecn=a.vecn>b.vecn?a.vecn:b.vecn; break;
+        }
         /* user function: best-overload by arg compatibility (mirrors the codegen
          * ranker) — a plain first-name match is wrong for overloaded helpers
          * like MakePrecise(float / float2 / float3 / float4) */
@@ -293,7 +301,11 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
             if(strcmp(cf->name,e->name)) continue;
             if(e->nargs>cf->nparams) continue;
             if(e->nargs<cf->nparams){ int nd=0;
-                for(size_t q=e->nargs;q<cf->nparams;q++) if(!cf->params[q].def){ nd=1; break; }
+                for(size_t q=e->nargs;q<cf->nparams;q++){
+                    Type qt=cf->params[q].ty;
+                    if(cf->params[q].def||qt.is_ptr||qt.kind==T_TEXTURE||qt.kind==T_SAMPLER) continue;
+                    nd=1; break;
+                }
                 if(nd) continue; }
             int rk=0, ok=1;
             for(size_t ai=0;ai<e->nargs;ai++){
