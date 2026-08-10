@@ -165,7 +165,8 @@ HLSL resource-bearing struct fields are flattened to separate texture/sampler
 parameters using the receiving function's formal resource types; the
 `resource_field_sample.hlsl` regression verifies AIR resource metadata and
 `air.sample_texture_2d` forwarding without placing opaque resources in a value
-struct.
+struct. The generated `ViewState` stub also carries UE's `float4
+InvDeviceZToWorldZTransform` field for indexed depth conversion helpers.
 Implicit compiler-forwarded pointer/texture/sampler parameters are accepted by
 HLSL overload resolution without changing ordinary value-argument arity;
 `implicit_uniform_overload.hlsl` locks the zero-argument cbuffer-forwarding
