@@ -306,6 +306,10 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
             out->kind=(a.kind==T_FLOAT||b.kind==T_FLOAT)?T_FLOAT:(a.kind==T_HALF||b.kind==T_HALF)?T_HALF:T_INT32;
             out->vecn=a.vecn>b.vecn?a.vecn:b.vecn; break;
         }
+        if(!strcmp(e->name,"all")&&e->nargs==1){
+            /* HLSL all(boolN) reduces a comparison mask to one scalar bool. */
+            out->kind=T_BOOL; out->vecn=0; break;
+        }
         /* user function: best-overload by arg compatibility (mirrors the codegen
          * ranker) — a plain first-name match is wrong for overloaded helpers
          * like MakePrecise(float / float2 / float3 / float4) */
@@ -864,7 +868,7 @@ static const char *spread(CG *c, const char *v, int w, int n){
 /* returns the result register, or NULL if `e->name` is not a composite builtin */
 static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
     const char *nm=e->name;
-    static const char *names[]={"dot","cross","length","distance","normalize","rcp","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","trunc","fmod","radians","degrees","saturate","abs","min","max","mul","inverse","transpose","asfloat","asuint","asint"};
+    static const char *names[]={"dot","cross","length","distance","normalize","rcp","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","trunc","fmod","radians","degrees","saturate","abs","min","max","mul","inverse","transpose","asfloat","asuint","asint","all"};
     int hit=0; for(size_t i=0;i<sizeof names/sizeof *names;i++) if(!strcmp(names[i],nm)){ hit=1; break; }
     if(!hit) return NULL;
     if(e->nargs<1||e->nargs>3) die(0,"%s: wrong number of arguments",nm);
@@ -885,6 +889,20 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
     if(cw>n&&ck==VK_F32){ static const int t3[3]={0,1,2}, t2[2]={0,1}; char vty[24]; snprintf(vty,sizeof vty,"<%d x float>",cw);
         cv=swizzle_read(c,cv,vty,"float",n==3?t3:t2,n); cw=n; }
     if((aw&&aw!=n)||(bw&&bw!=n)||(cw&&cw!=n)) die(0,"vector width mismatch in %s",nm);
+    if(!strcmp(nm,"all")){
+        if(e->nargs!=1) die(0,"all expects 1 argument");
+        if(ak!=VK_I1) die(0,"all argument must be a bool or bool vector");
+        if(n==1){ *k=VK_I1; c->rvw=0; c->rmat=0; c->rmatm=0; c->rstruct=NULL; return av; }
+        const char *acc=newtmp(c);
+        emit(c,"  %s = extractelement <%d x i1> %s, i32 0\n",acc,n,av);
+        for(int i=1;i<n;i++){
+            const char *el=newtmp(c), *next=newtmp(c);
+            emit(c,"  %s = extractelement <%d x i1> %s, i32 %d\n",el,n,av,i);
+            emit(c,"  %s = and i1 %s, %s\n",next,acc,el);
+            acc=next;
+        }
+        *k=VK_I1; c->rvw=0; c->rmat=0; c->rmatm=0; c->rstruct=NULL; return acc;
+    }
     /* ---- HLSL intrinsics that also take integer operands ---- */
     if(!strcmp(nm,"abs")){
         if(e->nargs!=1) die(0,"abs expects 1 argument");
