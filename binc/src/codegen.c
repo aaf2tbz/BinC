@@ -875,7 +875,7 @@ static const char *spread(CG *c, const char *v, int w, int n){
 /* returns the result register, or NULL if `e->name` is not a composite builtin */
 static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
     const char *nm=e->name;
-    static const char *names[]={"dot","cross","length","distance","normalize","rcp","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","trunc","fmod","radians","degrees","saturate","abs","min","max","mul","inverse","transpose","asfloat","asuint","asint","all","any"};
+    static const char *names[]={"dot","cross","length","distance","normalize","rcp","reflect","clamp","mix","lerp","step","smoothstep","fract","frac","mod","trunc","fmod","radians","degrees","saturate","abs","min","max","mul","inverse","transpose","asfloat","asuint","asint","all","any","log10"};
     int hit=0; for(size_t i=0;i<sizeof names/sizeof *names;i++) if(!strcmp(names[i],nm)){ hit=1; break; }
     if(!hit) return NULL;
     if(e->nargs<1||e->nargs>3) die(0,"%s: wrong number of arguments",nm);
@@ -1032,6 +1032,24 @@ static const char *gen_composite_math(CG *c, Expr *e, ValKind *k){
         }
         *k=VK_F32; c->rvw=0; c->rmat=mn; c->rmatm=0;
         return res;
+    }
+    if(!strcmp(nm,"log10")){
+        if(e->nargs!=1) die(0,"log10 expects 1 argument");
+        mark_builtin("log");
+        const char *scale=fconst(c,0.4342944819032518);
+        if(aw>1){
+            const char *acc="undef";
+            char vty[32]; snprintf(vty,sizeof vty,"<%d x float>",aw);
+            for(int i=0;i<aw;i++){
+                const char *el=newtmp(c); emit(c,"  %s = extractelement %s %s, i32 %d\n",el,vty,av,i);
+                const char *lg=newtmp(c); emit(c,"  %s = call float @air.fast_log.f32(float %s)\n",lg,el);
+                const char *r=newtmp(c); emit(c,"  %s = fmul fast float %s, %s\n",r,lg,scale);
+                const char *ins=newtmp(c); emit(c,"  %s = insertelement %s %s, float %s, i32 %d\n",ins,vty,acc,r,i); acc=ins;
+            }
+            *k=VK_F32; c->rvw=aw; return acc;
+        }
+        const char *lg=newtmp(c); emit(c,"  %s = call float @air.fast_log.f32(float %s)\n",lg,av);
+        *k=VK_F32; c->rvw=0; return vbin(c,"fmul fast",lg,scale,0);
     }
     if(!strcmp(nm,"saturate")||!strcmp(nm,"abs")||!strcmp(nm,"min")||!strcmp(nm,"max")||
        !strcmp(nm,"tan")||!strcmp(nm,"asin")||!strcmp(nm,"acos")||!strcmp(nm,"atan")||!strcmp(nm,"fmod")){
