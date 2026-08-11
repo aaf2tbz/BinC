@@ -250,6 +250,12 @@ static char *pp_subst_line(const char *line, const Def *defs, size_t ndefs){
                                 bput(&b2,bq,(size_t)(bh-bq)); bput(&b2,mark[ai],strlen(mark[ai]));
                                 bq=bh+pl+2;
                             } else if(pl>=2&&(bh-bq)>=2&&bh[-2]=='#'&&bh[-1]=='#'&&bl){
+                                /* Preserve the text before this parameter before
+                                 * removing the adjacent ##.  Without this copy,
+                                 * a left-pasted parameter discards the entire
+                                 * prefix (for example `float2 StructName##_`
+                                 * becomes only the argument marker). */
+                                bput(&b2,bq,(size_t)(bh-bq));
                                 if(b2.n>=2){
                                     b2.n-=2;
                                     b2.p[b2.n]=0;
