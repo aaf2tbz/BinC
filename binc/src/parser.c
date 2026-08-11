@@ -269,7 +269,30 @@ int starts_scalar_type(TokStream *ts){ TokKind k=peek(ts)->kind;    if(k==TK_IDE
 Expr *E(ExprKind k,int line,int col){ Expr *e=calloc(1,sizeof(Expr)); e->kind=k; e->line=line; e->col=col; return e; }
 Expr *parse_expr(TokStream *ts);
 
-/* known struct tags, for disambiguating `Dog d;` local declarations */
+static Expr *parse_initializer_list(TokStream *ts){
+    Token *open=peek(ts); expect(ts,TK_LBRACE,"{");
+    Expr *e=E(E_ARRAY,open->line,open->col);
+    while(peek(ts)->kind!=TK_RBRACE&&peek(ts)->kind!=TK_EOF){
+        Expr *item=(peek(ts)->kind==TK_LBRACE)?parse_initializer_list(ts):parse_expr(ts);
+        e->args=realloc(e->args,(e->nargs+1)*sizeof *e->args);
+        e->args[e->nargs++]=item;
+        if(!accept(ts,TK_COMMA)) break;
+    }
+    expect(ts,TK_RBRACE,"}");
+    return e;
+}
+
+static void skip_initializer_list(TokStream *ts){
+    int depth=0;
+    do{ Token *t=peek(ts);
+        if(t->kind==TK_LBRACE) depth++;
+        else if(t->kind==TK_RBRACE) depth--;
+        if(t->kind==TK_EOF) die(t->line,"unterminated initializer");
+        advance(ts);
+    } while(depth>0);
+}
+
+/* known struct tags, for disambiguating `Dog d;` / `Pair<float> p;` locals */
 int is_stag(const char *s){ for(size_t i=0;i<nstags;i++) if(!strcmp(stags[i],s)) return 1; return 0; }
 
 static Expr *parse_primary(TokStream *ts){
@@ -635,18 +658,16 @@ Stmt parse_stmt(TokStream *ts){
          * any ident type (`Type name;`), incl. structs from dropped #includes */
         Type ty=parse_type(ts);
         Token *nm=peek(ts); expect_name(ts,"name");
-        if(accept(ts,TK_LBRACK)){ ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
+        int unsized_array=0;
+        if(accept(ts,TK_LBRACK)){ unsized_array=(peek(ts)->kind==TK_RBRACK); ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
             if(accept(ts,TK_LBRACK)){ ty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); } }
         Expr *init=NULL; if(accept(ts,TK_EQ)){
-            if(peek(ts)->kind==TK_LBRACE){ /* struct brace initializer: `S x = {a, b, c};` — skip */
-                int depth=0;
-                do{ Token *t=peek(ts);
-                    if(t->kind==TK_LBRACE)depth++;
-                    else if(t->kind==TK_RBRACE)depth--;
-                    if(t->kind==TK_EOF) die(t->line,"unterminated initializer");
-                    advance(ts); } while(depth>0);
+            if(peek(ts)->kind==TK_LBRACE){
+                if(unsized_array||ty.array_n) init=parse_initializer_list(ts);
+                else skip_initializer_list(ts);
             } else init=parse_expr(ts);
         }
+        if(init&&init->kind==E_ARRAY&&unsized_array) ty.array_n=(int)init->nargs;
         if(accept(ts,TK_COMMA)){ /* struct comma-decl: `S x, y, z;` */
             Block b={0}; b.stmts=calloc(2,sizeof(Stmt));
             b.stmts[0]=(Stmt){.kind=S_DECL,.line=nm->line,.col=nm->col,.ty=ty,.name=strdup(nm->text),.init=init}; b.n=1;
@@ -693,18 +714,16 @@ Stmt parse_stmt(TokStream *ts){
     if(starts_scalar_type(ts)||(peek(ts)->kind==TK_IDENT&&((g_tvar&&!strcmp(peek(ts)->text,g_tvar))||is_stag(peek(ts)->text)
         ||((ts->i+1<ts->n)&&is_name_kind(ts->toks[ts->i+1].kind))))){
         Type ty=parse_type(ts); Token *nm=peek(ts); expect_name(ts,"name");
-        if(accept(ts,TK_LBRACK)){ ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
+        int unsized_array=0;
+        if(accept(ts,TK_LBRACK)){ unsized_array=(peek(ts)->kind==TK_RBRACK); ty.array_n=parse_array_extent(ts); expect(ts,TK_RBRACK,"]");
             if(accept(ts,TK_LBRACK)){ ty.array_m=parse_array_extent(ts); expect(ts,TK_RBRACK,"]"); } }
         Expr *init=NULL; if(accept(ts,TK_EQ)){
-            if(peek(ts)->kind==TK_LBRACE){ /* HLSL brace initializer: `float4 x = {1,2,3,4};` — skip */
-                int depth=0;
-                do{ Token *t=peek(ts);
-                    if(t->kind==TK_LBRACE)depth++;
-                    else if(t->kind==TK_RBRACE)depth--;
-                    if(t->kind==TK_EOF) die(t->line,"unterminated initializer");
-                    advance(ts); } while(depth>0);
+            if(peek(ts)->kind==TK_LBRACE){
+                if(unsized_array||ty.array_n) init=parse_initializer_list(ts);
+                else skip_initializer_list(ts);
             } else init=parse_expr(ts);
         }
+        if(init&&init->kind==E_ARRAY&&unsized_array) ty.array_n=(int)init->nargs;
         if(peek(ts)->kind==TK_COLON){ /* HLSL local with : register(...) / : packoffset(...) */
             while(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_EOF) advance(ts);
         }

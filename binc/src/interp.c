@@ -89,6 +89,7 @@ static IV iexpr(ICtx *c, Expr *e){
     case E_FCONST: return iv_num(T_FLOAT,e->fval);
     case E_ICONST: return iv_i(T_INT32,e->ival);
     case E_BOOL: return iv_i(T_BOOL,e->bval);
+    case E_ARRAY: fprintf(stderr,"binc: interp: array initializer cannot be used as a value\n"); exit(1);
     case E_IDENT:{
         int li=iloc_find(c,e->name);
         if(li>=0) return c->locs[li].v;

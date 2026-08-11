@@ -1244,6 +1244,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
     case E_FCONST:{ *k=VK_F32; return fconst(c,e->fval); }
     case E_ICONST:{ *k=VK_I32; char *s=malloc(16); snprintf(s,16,"%ld",e->ival); return s; }
     case E_BOOL:{ *k=VK_I1; return e->bval?"true":"false"; }
+    case E_ARRAY: die(e->line,"array initializer cannot be used as a value");
     case E_IDENT:{
         int idx; RKind r=resolve(c,e->name,&idx);
         if(r==R_LOCAL){
@@ -3328,6 +3329,18 @@ static int is_varying(CG *c, Expr *e){
 
 static void gen_block(CG *c, Block *b);
 static void stage_lit_type(char *buf, size_t n, StructDef *sd);
+static void emit_local_array_initializer(CG *c, const char *slot, const char *arrty, const char *elt, Type bty, Expr *init){
+    if(!init||init->kind!=E_ARRAY) return;
+    if(bty.array_m) die(init->line,"nested local array initializers are not supported");
+    if(init->nargs>(size_t)bty.array_n) die(init->line,"too many local array initializers");
+    for(size_t i=0;i<init->nargs;i++){
+        ValKind k; const char *v=gen_rval(c,init->args[i],&k);
+        const char *sv=to_storage(c,v,k,c->rvw,bty.kind,bty.vecn);
+        char *ep=newtmp(c);
+        emit(c,"  %s = getelementptr inbounds %s, %s* %s, i32 0, i32 %zu\n",ep,arrty,arrty,slot,i);
+        emit(c,"  store %s %s, %s* %s, align %d\n",elt,sv,elt,ep,type_align(bty.kind,bty.vecn));
+    }
+}
 static void gen_stmt(CG *c, Stmt *s){
     g_last_line=s->line; g_last_col=s->col;
     switch(s->kind){
@@ -3365,10 +3378,11 @@ static void gen_stmt(CG *c, Stmt *s){
             char arrty[160];
             if(bty.array_m) snprintf(arrty,sizeof arrty,"[%d x [%d x %s]]",bty.array_n,bty.array_m,elt);
             else snprintf(arrty,sizeof arrty,"[%d x %s]",bty.array_n,elt);
-            if(s->init) die(0,"array initializers are not supported; assign elements instead");
+            if(s->init&&s->init->kind!=E_ARRAY) die(0,"array initializer must be a brace list");
             char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,arrty,bty.matn?mat_align(bty.matn,bty.matm):type_align(kk,bty.vecn));
             c->locs=realloc(c->locs,(c->nlocs+1)*sizeof(Loc));
             c->locs[c->nlocs++]=(Loc){s->name,slot,kk,NULL,bty.matn?0:bty.vecn,bty.matn,bty.matm,s->is_const,bty.array_n,bty.array_m};
+            emit_local_array_initializer(c,slot,arrty,elt,bty,s->init);
             break; }
         char ll[32]; ll_of(ll,sizeof ll,kk,bty.vecn);
         char *slot=newtmp(c); sb_printf(c->pre,"  %s = alloca %s, align %d\n",slot,ll,type_align(kk,bty.vecn));
