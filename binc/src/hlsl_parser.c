@@ -23,7 +23,7 @@ static Type hlsl_type(TokStream *ts){
         advance(ts); k=peek(ts)->kind;
     }
     if(k==TK_KW_RWTEXTURE2D){
-        advance(ts); Type t={0}; t.kind=T_TEXTURE; t.tex_rw=1;
+        advance(ts); Type t={0}; t.kind=T_TEXTURE; t.tex_rw=1; t.tex_dim=2;
         if(accept(ts,TK_LT)){ Type et=parse_type(ts);
             t.tex_elt=et.kind;
             if(t.tex_elt!=T_FLOAT&&t.tex_elt!=T_HALF&&t.tex_elt!=T_INT32&&t.tex_elt!=T_UINT32)

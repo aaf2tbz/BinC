@@ -1316,6 +1316,27 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         /* `structValue.float2Field[i]` indexes a vector value; it is not a
          * buffer-pointer expression. Evaluate the field then extract its lane. */
         if(e->kind==E_INDEX){
+            /* HLSL Texture2D/RWTexture2D operator[] is an integer-coordinate
+             * load. Reuse the AIR read path used by Texture2D.Load. */
+            if(c->prog->hlsl&&e->operand->kind==E_IDENT){
+                int ti; if(resolve(c,e->operand->name,&ti)==R_TEXTURE){
+                    Param *tp=&c->fn->params[ti];
+                    if(tp->ty.tex_dim!=2||tp->ty.tex_array||tp->ty.tex_cube) die(e->line,"texture indexing requires a non-array Texture2D");
+                    ValKind ck; const char *cv=gen_rval(c,e->rhs,&ck); int cn=c->rvw;
+                    if((ck!=VK_I32&&ck!=VK_U32)||cn!=2) die(e->line,"texture index coordinate must be an int2");
+                    const char *elt,*vec,*suf,*an; tex_kinds(tp->ty.tex_elt,&elt,&vec,&suf,&an); (void)elt; (void)an;
+                    char tname[64]; snprintf(tname,sizeof tname,"%%_%s",tp->name);
+                    get_samp_used=1; int ti_kind=tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0; tex_read_used[ti_kind]=1; const char *samp=newtmp(c);
+                    emit(c,"  %s = call %%struct._sampler_t addrspace(2)* @air.get_read_sampler()\n",samp);
+                    const char *r=newtmp(c);
+                    emit(c,"  %s = call { %s, i8 } @air.read_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x i32> %s, <2 x i32> zeroinitializer, i32 0, i32 0)\n",r,vec,suf,tname,samp,cv);
+                    const char *v=newtmp(c); emit(c,"  %s = extractvalue { %s, i8 } %s, 0\n",v,vec,r);
+                    if(tp->ty.tex_elt==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext <4 x half> %s to <4 x float>\n",w,v); v=w; }
+                    int outw=tp->ty.vecn>1?4:1;
+                    if(outw==1){ const char *s=newtmp(c); emit(c,"  %s = extractelement %s %s, i32 0\n",s,vec,v); v=s; }
+                    *k=tp->ty.tex_elt==T_INT32?VK_I32:tp->ty.tex_elt==T_UINT32?VK_U32:VK_F32; c->rvw=outw>1?outw:0; c->read[ti]=1; return v;
+                }
+            }
             /* HLSL's single matrix subscript selects a row (M[0] on
              * float4x3 is a float3). AIR stores the same value as C column
              * vectors of length R, so materialize the row across columns. */
@@ -1352,6 +1373,17 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
          * coordinate itself is the global position; local/group values are appended as
          * hidden built-in arguments when referenced. */
         if(e->kind==E_FIELD){
+            /* A texture operator[] result is a value; permit the usual `.x`
+             * component access without routing it through gen_lval. */
+            if(c->prog->hlsl&&e->operand->kind==E_INDEX&&e->operand->operand->kind==E_IDENT){
+                int ti; if(resolve(c,e->operand->operand->name,&ti)==R_TEXTURE){
+                    ValKind vk; const char *v=gen_rval(c,e->operand,&vk); int vw=c->rvw;
+                    int idxs[4]; int nc=swizzle_idx(e->field,idxs); if(nc<0) die(e->line,"invalid texture component .%s",e->field);
+                    if(!vw){ if(nc==1){ *k=vk; c->rvw=0; return v; } const char *sp=splat(c,v,vk==VK_F32?"float":"i32",nc); *k=vk; c->rvw=nc; return sp; }
+                    if(nc==1){ const char *r=newtmp(c); char vty[32]; ll_of(vty,sizeof vty,vk==VK_F32?T_FLOAT:T_INT32,vw); emit(c,"  %s = extractelement %s %s, i32 %d\n",r,vty,v,idxs[0]); *k=vk; c->rvw=0; return r; }
+                    *k=vk; c->rvw=nc; return swizzle_read(c,v,vk==VK_F32?"<4 x float>":"<4 x i32>",vk==VK_F32?"float":"i32",idxs,nc);
+                }
+            }
             /* HLSL matrix rows are values, so `M[row].w` must swizzle the
              * materialized row rather than address the AIR column vector. */
             if(c->prog->hlsl&&e->operand->kind==E_INDEX){
@@ -1935,6 +1967,25 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
         emit(c,"  store %s %s, %s %s, align %d\n",ll,sv,pty,addr,type_align(li.tk,li.vecn));
         *k=ck; c->rvw=0; return cur; }
     case E_ASSIGN:{
+        if(c->prog->hlsl&&e->aop==A_ASSIGN&&e->operand->kind==E_INDEX&&e->operand->operand->kind==E_IDENT){
+            int ti; if(resolve(c,e->operand->operand->name,&ti)==R_TEXTURE&&c->fn->params[ti].ty.tex_rw){
+                Param *tp=&c->fn->params[ti];
+                if(tp->ty.tex_dim!=2||tp->ty.tex_array||tp->ty.tex_cube) die(e->line,"texture indexing requires a non-array RWTexture2D");
+                ValKind vk; const char *vv=gen_rval(c,e->rhs,&vk); int vw=c->rvw;
+                ValKind ck; const char *cv=gen_rval(c,e->operand->rhs,&ck);
+                if((ck!=VK_I32&&ck!=VK_U32)||c->rvw!=2) die(e->line,"texture index coordinate must be an int2");
+                const char *elt,*vec,*suf,*an; tex_kinds(tp->ty.tex_elt,&elt,&vec,&suf,&an); (void)elt; (void)an;
+                const char *sv=vv;
+                if(!vw){ sv=splat(c,vv,tp->ty.tex_elt==T_FLOAT?"float":tp->ty.tex_elt==T_HALF?"float":"i32",4); vw=4; }
+                if(vw!=4) die(e->line,"texture write value must be scalar or float4");
+                if(tp->ty.tex_elt==T_HALF){ const char *h=newtmp(c); emit(c,"  %s = fptrunc <4 x float> %s to <4 x half>\n",h,sv); sv=h; }
+                else if(tp->ty.tex_elt==T_INT32||tp->ty.tex_elt==T_UINT32) sv=vconv(c,sv,4,vk,tp->ty.tex_elt==T_INT32?VK_I32:VK_U32);
+                char tname[64]; snprintf(tname,sizeof tname,"%%_%s",tp->name);
+                tex_write_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
+                emit(c,"  call void @air.write_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, <2 x i32> %s, %s %s, i32 0, i32 2)\n",suf,tname,cv,vec,sv);
+                c->written[ti]=1; *k=VK_I32; c->rvw=0; return "0";
+            }
+        }
         /* A single matrix subscript is an HLSL row lvalue. Rebuild the
          * column-oriented AIR aggregate one column at a time. */
         if(c->prog->hlsl && e->aop==A_ASSIGN && e->operand->kind==E_INDEX &&
