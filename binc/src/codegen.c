@@ -2488,7 +2488,8 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             const char *r=newtmp(c); emit(c,"  %s = call %s @%s(%s addrspace(1)* %s, %s %s, i32 0, i32 2, i32 0, i1 false)\n",r,scalar_ll(ak),intr,scalar_ll(ak),pp,scalar_ll(ak),v);
             if(e->nargs==2){
                 LInfo oi; char *op=gen_lval(c,e->args[1],&oi,1);
-                if(oi.vecn||oi.matn||oi.tk!=ak) die(0,"atomic add out result type mismatch");
+                int integer_alias=(ak==T_INT32||ak==T_UINT32)&&(oi.tk==T_INT32||oi.tk==T_UINT32);
+                if(oi.vecn||oi.matn||(oi.tk!=ak&&!integer_alias)) die(0,"atomic add out result type mismatch");
                 emit(c,"  store %s %s, %s* %s, align %d\n",scalar_ll(ak),r,scalar_ll(ak),op,type_align(ak,0));
             }
             if(atomic_op==0) atomic_add_used[ak==T_FLOAT?0:1]=1;
