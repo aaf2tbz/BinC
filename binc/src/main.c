@@ -676,8 +676,6 @@ int main(int argc, char **argv) {
      * otherwise the optional prelude, then the user file, splicing includes */
     char *src; int first_line = 1;
     if (is_hlsl) {
-        char *main_spl=splice_file(infile);
-        if(!main_spl) return 1;
         /* HLSL preprocessor: #if/#ifdef/#elif/#else/#endif evaluated over the
          * collected defines; #include spliced recursively (active branches
          * only); #define NAME value collected for whole-word substitution. */
@@ -698,6 +696,12 @@ int main(int argc, char **argv) {
             if(!pre_spl){ fprintf(stderr,"binc: error: forced include %s failed to load\n",force_include); return 1; }
             pp_process(force_include,pre_spl,&all,defs,&ndefs); free(pre_spl);
         }
+        /* Do not pre-splice the main file before the forced include.  A main
+         * file can itself carry #pragma once (UE's OverloadMacros.ush does),
+         * and pre-splicing it would mark that path as included before Common.ush
+         * gets a chance to import its definitions. */
+        char *main_spl=splice_file(infile);
+        if(!main_spl) return 1;
         pp_process(infile,main_spl,&all,defs,&ndefs);
         free(main_spl);
         if(getenv("BINC_DUMP_PP")){ FILE *pp0=fopen("/tmp/binc_pp0.txt","wb"); fwrite(all.p,1,strlen(all.p),pp0); fclose(pp0); }
