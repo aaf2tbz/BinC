@@ -73,7 +73,9 @@ static const Program *g_curprog; /* set by emit_air; used by stage helpers and s
 static int struct_layout_r(const Program *prog, StructDef *s, int *al){
     int off=0,m=1;
     for(size_t i=0;i<s->nfields;i++){ int fa,fs;
-        if(s->fields[i].ty.kind==T_STRUCT&&s->fields[i].ty.struct_name){
+        if(s->fields[i].ty.is_ptr){
+            fa=8; fs=8;
+        } else if(s->fields[i].ty.kind==T_STRUCT&&s->fields[i].ty.struct_name){
             StructDef *sub=prog?find_struct(prog,s->fields[i].ty.struct_name):NULL;
             if(sub){ int sa; fs=struct_layout_r(prog,sub,&sa); fa=sa; }
             else { fa=1; fs=1; }
@@ -101,6 +103,8 @@ typedef struct {
     int rvw; /* vector width of the last gen_rval result, 0 = scalar */
     int rmat; /* matrix row count of the last gen_rval result, 0 = not a matrix */
     int rmatm; /* matrix column count; 0 means square */
+    int rptr; /* last gen_rval result is an address-space pointer */
+    int rptr_as; /* address space of the pointee for rptr */
     const char *rstruct; /* struct tag of the last gen_rval result, NULL = not a struct value */
 } CG;
 static char *newtmp(CG *c){ char *s=malloc(16); snprintf(s,16,"%%t%d",c->tmp++); return s; }
@@ -166,7 +170,7 @@ static const char *coord_value(CG *c, Type *t, const char *raw){
 }
 
 /* lvalue description: element type + where the address lives */
-typedef struct { TypeKind tk; char *sname; int as; int pi; int is_local; int vecn; int matn, matm; int an, am; } LInfo;
+typedef struct { TypeKind tk; char *sname; int as; int pi; int is_local; int vecn; int matn, matm; int an, am; int is_ptr; int ptr_as; } LInfo;
 static void shared_name(CG *c, int pi, char *buf, size_t n){
     snprintf(buf,n,"@_binc_smem_%s_%s",c->fn->name,c->fn->params[pi].name);
 }
@@ -601,7 +605,7 @@ static char *element_ptr_payload(CG *c,int pi,const char *ix){
 }
 static void fill_param_li(CG *c,int pi,LInfo *li){
     Param *pr=&c->fn->params[pi];
-    li->tk=pr->ty.kind==T_ATOMIC?pr->ty.atomic_base:pr->ty.kind; li->sname=pr->ty.struct_name; li->as=pr->ty.as; li->pi=pi; li->is_local=0; li->vecn=pr->ty.vecn; li->matn=pr->ty.matn; li->matm=pr->ty.matm; }
+    li->tk=pr->ty.kind==T_ATOMIC?pr->ty.atomic_base:pr->ty.kind; li->sname=pr->ty.struct_name; li->as=pr->ty.as; li->pi=pi; li->is_local=0; li->vecn=pr->ty.vecn; li->matn=pr->ty.matn; li->matm=pr->ty.matm; li->is_ptr=0; li->ptr_as=0; }
 
 /* promote a half-typed value to f32 (vector-aware); compute is done in f32 */
 static const char *swizzle_read(CG *c, const char *vec, const char *vty, const char *ety, const int *idxs, int nc);
@@ -621,6 +625,17 @@ static const char *f2h(CG *c, const char *v, int vecn){
 
 /* load an lvalue, promoting half to float; *k gets the expression-level kind, c->rvw the vector width */
 static const char *emit_load_t(CG *c, LInfo *li, const char *addr, ValKind *k){
+    if(li->is_ptr){
+        char elt[96], vty[128], aty[160];
+        if(li->matn) mll_of(elt,sizeof elt,li->matn,li->matm);
+        else type_ll(elt,sizeof elt,li->tk,li->sname,li->vecn);
+        snprintf(vty,sizeof vty,"%s addrspace(%d)*",elt,li->ptr_as);
+        if(li->as) snprintf(aty,sizeof aty,"%s addrspace(%d)*",vty,li->as);
+        else snprintf(aty,sizeof aty,"%s*",vty);
+        const char *v=newtmp(c);
+        emit(c,"  %s = load %s, %s %s, align 8\n",v,vty,aty,addr);
+        *k=VK_I32; c->rvw=0; c->rptr=1; c->rptr_as=li->ptr_as; return v;
+    }
     if(li->tk==T_STRUCT){
         StructDef *sd=find_struct(c->prog,li->sname);
         if(!sd) die(0,"unknown struct %s",li->sname);
@@ -1206,7 +1221,7 @@ static void store_float_out(CG *c, Expr *target, const char *value, int width){
 
 static const char *gen_rval(CG *c, Expr *e, ValKind *k){
     g_last_line=e->line; g_last_col=e->col;
-    c->rvw=0; c->rmat=0; c->rmatm=0; c->rstruct=NULL; /* cases set these to the width of their result, if any */
+    c->rvw=0; c->rmat=0; c->rmatm=0; c->rptr=0; c->rptr_as=0; c->rstruct=NULL; /* cases set these to the width of their result, if any */
     switch(e->kind){
     case E_FCONST:{ *k=VK_F32; return fconst(c,e->fval); }
     case E_ICONST:{ *k=VK_I32; char *s=malloc(16); snprintf(s,16,"%ld",e->ival); return s; }
@@ -1222,7 +1237,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 emit(c,"  %s = load %s, %s* %s, align %d\n",v,mty,mty,c->locs[idx].slot,mat_align(c->locs[idx].matn,c->locs[idx].matm));
                 *k=VK_F32; c->rvw=0; c->rmat=c->locs[idx].matn; c->rmatm=c->locs[idx].matm; return v;
             }
-            LInfo li={c->locs[idx].kind,c->locs[idx].sname,0,-1,1,c->locs[idx].vecn,c->locs[idx].matn,c->locs[idx].matm,0,0};
+            LInfo li={c->locs[idx].kind,c->locs[idx].sname,0,-1,1,c->locs[idx].vecn,c->locs[idx].matn,c->locs[idx].matm,0,0,0,0};
             return emit_load_t(c,&li,c->locs[idx].slot,k); }
         if(r==R_COORD){
             Param *p=&c->fn->params[idx]; char nm[32]; snprintf(nm,sizeof nm,"%%_%s",p->name);
@@ -1232,6 +1247,13 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             snprintf(nm,strlen(e->name)+3,"%%_%s",e->name); return nm; }
         if(r==R_TEXTURE||r==R_SAMPLER){ *k=VK_I32; c->rvw=0; char *nm=malloc(strlen(e->name)+3);
             snprintf(nm,strlen(e->name)+3,"%%_%s",e->name); return nm; }
+        if(r==R_PTR){
+            Param *p=&c->fn->params[idx];
+            *k=scalar_vk(p->ty.kind); c->rvw=p->ty.vecn>1?p->ty.vecn:0; c->rptr=1; c->rptr_as=p->ty.as;
+            char *nm=malloc(strlen(e->name)+3);
+            snprintf(nm,strlen(e->name)+3,"%%_%s",e->name);
+            return nm;
+        }
         if(r==R_CONST){ ConstDef *cd=&c->prog->consts[idx];
             if(cd->ty.matn){
                 char ll[64]; mll_of(ll,sizeof ll,cd->ty.matn,cd->ty.matm);
@@ -1394,6 +1416,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 char fl[96]; if(fd->ty.matn) mll_of(fl,sizeof fl,fd->ty.matn,fd->ty.matm); else type_ll(fl,sizeof fl,fd->ty.kind,fd->ty.struct_name,fd->ty.vecn);
                 emit(c,"  %s = extractvalue %%struct.%s %s, %d\n",ev,c->rstruct,cv,fi);
                 if(fd->ty.kind==T_HALF) ev=h2f(c,ev,fd->ty.vecn);
+                if(fd->ty.is_ptr){
+                    *k=VK_I32; c->rvw=0; c->rptr=1; c->rptr_as=fd->ty.as; c->rstruct=NULL; return ev;
+                }
                 if(fd->ty.matn){ *k=VK_F32; c->rvw=0; c->rmat=fd->ty.matn; c->rmatm=fd->ty.matm; c->rstruct=NULL; return ev; }
                 *k=scalar_vk(fd->ty.kind); c->rvw=fd->ty.vecn>1?fd->ty.vecn:0;
                 c->rstruct = fd->ty.kind==T_STRUCT?fd->ty.struct_name:NULL;
@@ -1427,7 +1452,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     if(nc<0) die(0,"invalid vector component .%s",e->field);
                     for(int i=0;i<nc;i++) if(idxs[i]>=c->locs[vi].vecn) die(0,"invalid vector component .%s",e->field);
                     if(nc>1){
-                        LInfo li={c->locs[vi].kind,c->locs[vi].sname,0,-1,1,c->locs[vi].vecn,c->locs[vi].matn,c->locs[vi].matm,0,0};
+                        LInfo li={c->locs[vi].kind,c->locs[vi].sname,0,-1,1,c->locs[vi].vecn,c->locs[vi].matn,c->locs[vi].matm,0,0,0,0};
                         ValKind lk; const char *lv=emit_load_t(c,&li,c->locs[vi].slot,&lk);
                         const char *elt = c->locs[vi].kind==T_HALF?"float":scalar_ll(c->locs[vi].kind);
                         char vty[32]; snprintf(vty,sizeof vty,"<%d x %s>",c->locs[vi].vecn,elt);
@@ -1940,7 +1965,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             int idxs[4]; int nc=swizzle_idx(e->operand->field,idxs);
             if(nc>1){
                 LInfo lb; char *base;
-                if(root->kind==E_IDENT&&wr==R_LOCAL&&e->operand->operand->kind==E_IDENT){ base=c->locs[wi].slot; lb=(LInfo){c->locs[wi].kind,c->locs[wi].sname,0,-1,1,c->locs[wi].vecn,c->locs[wi].matn,c->locs[wi].matm,0,0}; }
+                if(root->kind==E_IDENT&&wr==R_LOCAL&&e->operand->operand->kind==E_IDENT){ base=c->locs[wi].slot; lb=(LInfo){c->locs[wi].kind,c->locs[wi].sname,0,-1,1,c->locs[wi].vecn,c->locs[wi].matn,c->locs[wi].matm,0,0,0,0}; }
                 else { base=gen_lval(c,e->operand->operand,&lb,0); }
                 int base_vecn = root_vecn>1 ? root_vecn : lb.vecn;
                 if(base_vecn>1){ for(int i=0;i<nc;i++) if(idxs[i]>=base_vecn) die(0,"invalid vector component .%s",e->operand->field); }
@@ -1970,6 +1995,18 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
             char mty[32]; mll_of(mty,sizeof mty,rm,rmc);
             emit(c,"  store %s %s, %s* %s, align %d\n",mty,rhs,mty,addr,mat_align(rm,rmc));
             *k=VK_F32; c->rvw=0; c->rmat=rm; c->rmatm=rmc; return rhs;
+        }
+        if(li.is_ptr){
+            if(e->aop!=A_ASSIGN) die(0,"compound assignment on a resource pointer");
+            if(!c->rptr) die(0,"resource pointer assignment requires a pointer value");
+            char elt[96], vty[128], aty[160];
+            if(li.matn) mll_of(elt,sizeof elt,li.matn,li.matm);
+            else type_ll(elt,sizeof elt,li.tk,li.sname,li.vecn);
+            snprintf(vty,sizeof vty,"%s addrspace(%d)*",elt,li.ptr_as);
+            if(li.as) snprintf(aty,sizeof aty,"%s addrspace(%d)*",vty,li.as);
+            else snprintf(aty,sizeof aty,"%s*",vty);
+            emit(c,"  store %s %s, %s %s, align 8\n",vty,rhs,aty,addr);
+            *k=VK_I32; c->rvw=0; c->rptr=1; c->rptr_as=li.ptr_as; return rhs;
         }
         if(li.tk==T_STRUCT){
             if(e->aop!=A_ASSIGN) die(0,"compound assignment on a struct");
@@ -2773,20 +2810,33 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                         o+=snprintf(args+o,sizeof args-o,"%s addrspace(1)* %%_%s",tex_air_type(&p->ty),arge->name);
                     else
                         o+=snprintf(args+o,sizeof args-o,"%%struct._sampler_t addrspace(2)* %%_%s",arge->name);
-                } else if(p->ty.is_ptr){ Expr *a=arge; int pi;
-                    if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG ptrarg: %s arg%zu name=%s fn=%s rk=%d\n",e->name,i,a->name?a->name:"(null)",c->fn->name,a->kind==E_IDENT?resolve(c,a->name,&pi):-99);
-                    if(a->kind!=E_IDENT||resolve(c,a->name,&pi)!=R_PTR)
-                        die(0,"%s: pointer argument %d must be one of the caller's buffer parameters",e->name,(int)i+1);
-                    Param *cp=&c->fn->params[pi];
-                    if(cp->ty.kind!=p->ty.kind||cp->ty.as!=p->ty.as||cp->ty.vecn!=p->ty.vecn||cp->ty.matn!=p->ty.matn||cp->ty.matm!=p->ty.matm)
-                        die(0,"%s: pointer argument %d type/address-space mismatch",e->name,(int)i+1);
-                    if(p->ty.kind==T_STRUCT && strcmp(cp->ty.struct_name,p->ty.struct_name))
-                        die(0,"%s: pointer argument %d struct type mismatch",e->name,(int)i+1);
+                } else if(p->ty.is_ptr){
+                    const char *pv=NULL; int pas=-1;
+                    if(arge->kind==E_IDENT){
+                        int pi;
+                        if(resolve(c,arge->name,&pi)==R_PTR){
+                            Param *cp=&c->fn->params[pi];
+                            if(cp->ty.kind!=p->ty.kind||cp->ty.as!=p->ty.as||cp->ty.vecn!=p->ty.vecn||cp->ty.matn!=p->ty.matn||cp->ty.matm!=p->ty.matm)
+                                die(0,"%s: pointer argument %d type/address-space mismatch",e->name,(int)i+1);
+                            if(p->ty.kind==T_STRUCT && strcmp(cp->ty.struct_name,p->ty.struct_name))
+                                die(0,"%s: pointer argument %d struct type mismatch",e->name,(int)i+1);
+                            char elt[64];
+                            if(p->ty.kind==T_STRUCT||p->ty.kind==T_ATOMIC) type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
+                            else if(p->ty.matn) mll_of(elt,sizeof elt,p->ty.matn,p->ty.matm);
+                            else ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn);
+                            char *av=malloc(128); snprintf(av,128,"%%_%s",cp->name); pv=av; pas=cp->ty.as;
+                        }
+                    }
+                    if(!pv){
+                        ValKind ak; pv=gen_rval(c,arge,&ak); pas=c->rptr?c->rptr_as:-1;
+                        if(!c->rptr) die(0,"%s: pointer argument %d must be a buffer pointer expression",e->name,(int)i+1);
+                    }
+                    if(pas!=(int)p->ty.as) die(0,"%s: pointer argument %d address-space mismatch",e->name,(int)i+1);
                     char elt[64];
                     if(p->ty.kind==T_STRUCT||p->ty.kind==T_ATOMIC) type_ll(elt,sizeof elt,p->ty.kind,p->ty.struct_name,p->ty.vecn);
                     else if(p->ty.matn) mll_of(elt,sizeof elt,p->ty.matn,p->ty.matm);
                     else ll_of(elt,sizeof elt,p->ty.kind,p->ty.vecn);
-                    o+=snprintf(args+o,sizeof args-o,"%s addrspace(%d)* %%_%s",elt,p->ty.as,cp->name);
+                    o+=snprintf(args+o,sizeof args-o,"%s addrspace(%d)* %s",elt,p->ty.as,pv);
                 } else if(p->ty.matn){ /* matrix by-value argument */
                     ValKind ak; const char *v=gen_rval(c,arge,&ak);
                     if(!c->rmat) die(0,"%s: matrix argument %d is not a matrix",e->name,(int)i+1);
@@ -2907,7 +2957,7 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
 }
 static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
     g_last_line=e->line; g_last_col=e->col;
-    li->matn=0; li->matm=0; li->an=0; li->am=0; /* every path must set vecn/matn/an/am explicitly; start clean */
+    li->matn=0; li->matm=0; li->an=0; li->am=0; li->is_ptr=0; li->ptr_as=0; /* every path must set vecn/matn/an/am explicitly; start clean */
     if(e->kind==E_IDENT){
         int idx; RKind r=resolve(c,e->name,&idx);
         if(r==R_LOCAL){ li->tk=c->locs[idx].kind; li->sname=c->locs[idx].sname; li->as=0; li->pi=-1;
@@ -3117,6 +3167,7 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
                     li->tk=s->fields[fi].ty.kind; li->sname=s->fields[fi].ty.struct_name;
                     li->vecn=s->fields[fi].ty.vecn; li->matn=s->fields[fi].ty.matn;
                     li->an=s->fields[fi].ty.array_n; li->am=s->fields[fi].ty.array_m;
+                    li->is_ptr=s->fields[fi].ty.is_ptr; li->ptr_as=s->fields[fi].ty.as;
                     li->as=pp->ty.as; li->pi=pi; li->is_local=0;
                     return fp;
                 }
@@ -3158,6 +3209,7 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             emit(c,"  %s = getelementptr inbounds %%struct.%s, %s %s, i64 0, i32 %d\n",fp,li->sname,pty,addr,fi);
             li->tk=s->fields[fi].ty.kind; li->sname=s->fields[fi].ty.struct_name; li->vecn=s->fields[fi].ty.vecn; li->matn=s->fields[fi].ty.matn; li->matm=s->fields[fi].ty.matm;
             li->an=s->fields[fi].ty.array_n; li->am=s->fields[fi].ty.array_m;
+            li->is_ptr=s->fields[fi].ty.is_ptr; li->ptr_as=s->fields[fi].ty.as;
             return fp; }
         if(li->vecn>1||(li->an>0&&li->an<=4&&!li->am)){ /* vector component (incl. packed [3 x float] fields): bitcast the vector address to element pointer + gep */
             int fv=li->vecn>1?li->vecn:li->an;
@@ -3722,7 +3774,12 @@ void emit_air(FILE *out, Program *prog){
             fprintf(out,"%%struct.%s = type { ",s->tag);
             for(size_t j=0;j<s->nfields;j++){ if(j)fprintf(out,", "); char fl[192];
                 char elt[128];
-                if(s->fields[j].ty.kind==T_STRUCT&&s->fields[j].ty.struct_name) snprintf(elt,sizeof elt,"%%struct.%s",s->fields[j].ty.struct_name);
+                if(s->fields[j].ty.is_ptr){
+                    char base[96];
+                    if(s->fields[j].ty.matn) mll_of(base,sizeof base,s->fields[j].ty.matn,s->fields[j].ty.matm);
+                    else type_ll(base,sizeof base,s->fields[j].ty.kind,s->fields[j].ty.struct_name,s->fields[j].ty.vecn);
+                    snprintf(elt,sizeof elt,"%s addrspace(%d)*",base,s->fields[j].ty.as);
+                } else if(s->fields[j].ty.kind==T_STRUCT&&s->fields[j].ty.struct_name) snprintf(elt,sizeof elt,"%%struct.%s",s->fields[j].ty.struct_name);
                 else if(s->fields[j].ty.matn) mll_of(elt,sizeof elt,s->fields[j].ty.matn,s->fields[j].ty.matm);
                 else ll_of(elt,sizeof elt,s->fields[j].ty.kind,s->fields[j].ty.vecn);
                 if(s->fields[j].ty.array_n){

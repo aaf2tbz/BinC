@@ -233,8 +233,11 @@ UE's virtual-texture feedback fields, depth-radius/projection helpers,
 `DrawRectangleParameters`, and a guarded standalone
 `NUM_VIRTUALTEXTURE_SAMPLES=1` default.
 HLSL struct parsing retains device pointer fields for `Buffer`,
-`StructuredBuffer`, and byte-address resource members, feeding the existing
-resource-field flattening ABI. Static const vector globals now retain their
+`StructuredBuffer`, and byte-address resource members. Codegen now preserves
+those pointers in value-struct AIR layouts, supports pointer-field assignment
+and extraction, and forwards pointer fields through nested helper calls;
+`resource_pointer_struct_fields.hlsl` verifies the UE bone-matrix shape through
+native Metallib compilation. Static const vector globals now retain their
 vector AIR type and literal constructor values; `const_vector_field.hlsl`
 verifies vector loads/extracts in AIR and a native GPU readback of `6.0`.
 The UE audit's explicit identity working-color-space contract includes the
