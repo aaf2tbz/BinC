@@ -1004,7 +1004,11 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
      * struct (like a cbuffer); the harness binds it at the register index
      * that follows the declared resources. */
     {
-        size_t nuf=0; Field uf[64]; int ureg=1000;
+        size_t nuf=0;
+        size_t uf_cap=hp->nglobals+1;
+        for(size_t fi=0;fi<hp->nfuncs;fi++) uf_cap+=hp->funcs[fi].np;
+        Field *uf=calloc(uf_cap,sizeof *uf);
+        int ureg=1000;
         for(size_t i=0;i<hp->nglobals;i++){
             HLSLGlobal *gg=&hp->globals[i];
             if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG unif: %s kind=%d isc=%d vecn=%d an=%d\n",gg->name,gg->ty.kind,gg->is_const,gg->ty.vecn,gg->ty.array_n);
@@ -1047,6 +1051,7 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
                 if(nu<64) unif_rw[nu++]=rw;
             }
         }
+        free(uf);
     }
     /* insertion sort by register slot */
     for(size_t i=1;i<nres;i++){ HRes t=res[i]; size_t j=i;
