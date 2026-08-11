@@ -89,6 +89,30 @@ The vendored UnrealEngine clone's `.usf/.ush` corpus is audited separately
 | post-`82d223e` const-swizzle sweep | **604/1,146 = 52.7%** (81 metallibs; texture-shape gap found) |
 | crashes/hangs | 0 |
 
+### UE audit provenance and feature ledger
+
+Every `ue-audit.py` run writes a sibling provenance sidecar next to the report
+(`ue-audit.provenance.json`). The sidecar records the source HEAD, exact
+compiler/runner/corpus/report SHA-256 identities, ordered stub and Unreal
+include roots, forced `Common.ush`, complete define list, timeout contract,
+row-manifest hash, strict Metallib/GAP totals, and separate crash/hang totals.
+This prevents replay evidence from being mixed across compiler or report
+boundaries.
+
+Generate a row-level ledger for the completed report with:
+
+```sh
+python3 tools/hlsl-diff/ue-feature-ledger.py \
+  build/hlsl-diff/ue-audit.md \
+  build/hlsl-diff/ue-feature-ledger.json \
+  build/hlsl-diff/ue-audit.provenance.json
+```
+
+The ledger preserves every first-error row and bucket count. Each bucket starts
+`open` and has explicit `evidence`, `fix`, and `native_gate` fields; those
+fields are never inferred from a lower-level compile or from an audit exit
+code.
+
 The post-`2eaef84` sweep removed the prior `firstbithigh`-class blocker and
 showed 40 additional parse/codegen-stage acceptances over the 50.6% report.
 The follow-up sweep after `61f3b9c` verified that `f32tof16`/`f16tof32` no
