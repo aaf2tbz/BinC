@@ -7,6 +7,14 @@
 #include "/Engine/Generated/UniformBuffers/Primitive.ush"
 #include "/Engine/Generated/UniformBuffers/View.ush"
 
+// SCW supplies this generated UAV for non-mobile occlusion-feedback paths.
+// The standalone corpus has no per-shader generated declaration, so keep a
+// compile-only declaration in the first include-root stub.
+#ifndef BINC_UE_STUB_DUMMY_BUFFER
+#define BINC_UE_STUB_DUMMY_BUFFER
+RWStructuredBuffer<uint> DummyBuffer;
+#endif
+
 #ifndef NUM_VIRTUALTEXTURE_SAMPLES
 #define NUM_VIRTUALTEXTURE_SAMPLES 1
 #endif
