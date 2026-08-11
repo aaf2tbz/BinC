@@ -18,7 +18,8 @@ static Type hlsl_type(TokStream *ts){
     TokKind k=peek(ts)->kind;
     /* HLSL variable modifiers: row_major / column_major / precise / shared */
     while(k==TK_IDENT&&((!strcmp(peek(ts)->text,"row_major"))||(!strcmp(peek(ts)->text,"column_major"))||
-                        (!strcmp(peek(ts)->text,"precise"))||(!strcmp(peek(ts)->text,"shared")))){
+                        (!strcmp(peek(ts)->text,"precise"))||(!strcmp(peek(ts)->text,"shared"))||
+                        (!strcmp(peek(ts)->text,"globallycoherent")))){
         advance(ts); k=peek(ts)->kind;
     }
     if(k==TK_KW_RWTEXTURE2D){
