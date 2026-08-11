@@ -583,6 +583,14 @@ Stmt parse_stmt(TokStream *ts){
         Stmt st={0}; st.kind=S_BLOCK; st.line=at->line; st.col=at->col; return st;
     }
     Token *kt=peek(ts);
+    int local_const=0;
+    if(kt->kind==TK_KW_STATIC){ advance(ts); kt=peek(ts); }
+    if(kt->kind==TK_KW_CONSTANT && ts->i+1<ts->n){
+        TokKind nk=ts->toks[ts->i+1].kind;
+        if(nk==TK_KW_FLOAT||nk==TK_KW_HALF||nk==TK_KW_INT||nk==TK_KW_UINT||nk==TK_KW_BOOL||nk==TK_KW_MAT||nk==TK_IDENT||nk==TK_KW_STRUCT){
+            advance(ts); local_const=1; kt=peek(ts);
+        }
+    }
     if(kt->kind==TK_SEMI){ advance(ts); Stmt st={0}; st.kind=S_BLOCK; st.line=kt->line; st.col=kt->col; return st; } /* empty statement `;` */
     if(kt->kind==TK_IDENT&&!strcmp(kt->text,"_Pragma")){ /* DXC _Pragma("dxc ...") inside bodies */
         while(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_RBRACE&&peek(ts)->kind!=TK_EOF) advance(ts);
@@ -670,7 +678,7 @@ Stmt parse_stmt(TokStream *ts){
         if(init&&init->kind==E_ARRAY&&unsized_array) ty.array_n=(int)init->nargs;
         if(accept(ts,TK_COMMA)){ /* struct comma-decl: `S x, y, z;` */
             Block b={0}; b.stmts=calloc(2,sizeof(Stmt));
-            b.stmts[0]=(Stmt){.kind=S_DECL,.line=nm->line,.col=nm->col,.ty=ty,.name=strdup(nm->text),.init=init}; b.n=1;
+            b.stmts[0]=(Stmt){.kind=S_DECL,.line=nm->line,.col=nm->col,.ty=ty,.name=strdup(nm->text),.init=init,.is_const=local_const}; b.n=1;
             do{
                 Token *nm2=peek(ts); expect_name(ts,"name");
                 Type ty2=ty;
@@ -683,7 +691,7 @@ Stmt parse_stmt(TokStream *ts){
             Stmt bl={0}; bl.kind=S_BLOCK; bl.line=nm->line; bl.col=nm->col; bl.then_b=b; return bl;
         }
         expect(ts,TK_SEMI,";");
-        Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init; return st;
+        Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init; st.is_const=local_const; return st;
     }
     /* HLSL struct methods: `uint getData() { ... }` inside a struct body */
     if(kt->kind==TK_IDENT && is_stag(kt->text) && (ts->i+1<ts->n) && ts->toks[ts->i+1].kind==TK_LPAREN){
@@ -699,12 +707,8 @@ Stmt parse_stmt(TokStream *ts){
         } else if(peek(ts)->kind==TK_SEMI) advance(ts);
         Stmt st={0}; st.kind=S_EXPR; st.line=kt->line; st.col=kt->col; return st;
     }
-    /* optional `const` qualifier on a local declaration */
-    if(peek(ts)->kind==TK_KW_CONSTANT && ts->i+1<ts->n){
-        TokKind nk=ts->toks[ts->i+1].kind;
-        if(nk==TK_KW_FLOAT||nk==TK_KW_HALF||nk==TK_KW_INT||nk==TK_KW_UINT||nk==TK_KW_BOOL||nk==TK_KW_MAT||nk==TK_IDENT||nk==TK_KW_STRUCT)
-            advance(ts); /* consume 'const', the type follows (incl. struct types) */
-    }
+    /* Declaration qualifiers were consumed above so both scalar and struct
+     * local declarations share the same `static`/`const` state. */
     if((peek(ts)->kind==TK_KW_FLOAT||peek(ts)->kind==TK_KW_HALF||peek(ts)->kind==TK_KW_INT||peek(ts)->kind==TK_KW_UINT||peek(ts)->kind==TK_KW_MAT)&&
        (ts->i+1<ts->n)&&ts->toks[ts->i+1].kind==TK_LPAREN){
         /* vector/matrix constructor expression statement: `float4(a,b) = rhs;` */
@@ -728,7 +732,7 @@ Stmt parse_stmt(TokStream *ts){
             while(peek(ts)->kind!=TK_SEMI&&peek(ts)->kind!=TK_EOF) advance(ts);
         }
         Stmt st={0}; st.kind=S_DECL; st.line=nm->line; st.col=nm->col; st.ty=ty; st.name=strdup(nm->text); st.init=init;
-        st.is_const = (kt->kind==TK_KW_CONSTANT);
+        st.is_const = local_const;
         if(accept(ts,TK_COMMA)){ /* float3 x1, x2, x3; — a block of declarations */
             Block b={0}; b.stmts=calloc(2,sizeof(Stmt)); b.stmts[0]=st; b.n=1;
             do{
