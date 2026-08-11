@@ -109,7 +109,13 @@ test-ue-static-local-qualifiers: binc
 	test -s "$$out"; echo "UE STATIC LOCAL QUALIFIERS PASS ($$out)"
 
 
-test-ue: binc test-ue-recovery test-ue-global-name-parse test-ue-uniform-capacity test-ue-globallycoherent test-ue-include-order test-ue-all-intrinsic test-ue-any-intrinsic test-ue-static-local-qualifiers test-ue-resource-index test-ue-array-parameters test-ue-array-index test-ue-occlusion-context harness
+test-ue-resource-field-index: binc
+	@set -e; out=/tmp/binc-ue-resource-field-index.metallib; rm -f "$$out"; \
+	./binc --stage-all -T cs_5_0 tests/hlsl/resource_field_direct_index_regress.hlsl -o "$$out"; \
+	test -s "$$out"; echo "UE RESOURCE FIELD INDEX PASS ($$out)"
+
+
+test-ue: binc test-ue-recovery test-ue-global-name-parse test-ue-uniform-capacity test-ue-globallycoherent test-ue-include-order test-ue-all-intrinsic test-ue-any-intrinsic test-ue-static-local-qualifiers test-ue-resource-field-index test-ue-resource-index test-ue-array-parameters test-ue-array-index test-ue-occlusion-context harness
 	@set -e; \
 	for t in tests/hlsl/pp_regress.hlsl tests/hlsl/ue_standalone_directive.hlsl tests/hlsl/vector_logical_ops.hlsl tests/hlsl/texture_shape_samples.hlsl tests/hlsl/texture_gather_methods.hlsl tests/hlsl/non_square_matrix.hlsl tests/hlsl/resource_field_sample.hlsl tests/hlsl/implicit_uniform_overload.hlsl tests/hlsl/reversebits_regress.hlsl tests/hlsl/texture_load_atomic_regress.hlsl tests/hlsl/static_struct_method.hlsl tests/hlsl/nested_enum_regress.hlsl tests/hlsl/enum_regress.hlsl tests/hlsl/inout_resource_regress.hlsl tests/hlsl/norm_path_regress.hlsl tests/hlsl/macro_token_paste.hlsl tests/hlsl/texture_byvalue_helper.hlsl tests/hlsl/const_vector_field.hlsl ../third_party/UnrealEngine/Engine/Shaders/Private/NullPixelShader.usf ../third_party/UnrealEngine/Engine/Shaders/Private/LateZDummyPS.usf; do \
 		case "$$t" in \
@@ -249,4 +255,4 @@ ci: binc test-negative test-fuzz test-interp examples
 clean:
 	rm -f binc harness pong_host binc_runtime.o build/*.metallib build/*.h *.ll *.air
 
-.PHONY: binc harness runtime examples pong verify test-negative test-ue-global-name-parse test-ue-uniform-capacity test-ue-globallycoherent test-ue-include-order test-ue-all-intrinsic test-ue-any-intrinsic test-ue-static-local-qualifiers test-ue-resource-index test-ue-array-parameters test-ue-array-index test-ue-occlusion-context test-ue test-ue-recovery test-fuzz ci clean golden-d3d9 golden-basepass
+.PHONY: binc harness runtime examples pong verify test-negative test-ue-global-name-parse test-ue-uniform-capacity test-ue-globallycoherent test-ue-include-order test-ue-all-intrinsic test-ue-any-intrinsic test-ue-static-local-qualifiers test-ue-resource-field-index test-ue-resource-index test-ue-array-parameters test-ue-array-index test-ue-occlusion-context test-ue test-ue-recovery test-fuzz ci clean golden-d3d9 golden-basepass

@@ -2064,8 +2064,9 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                 *k=scalar_vk(lb.tk); c->rvw=nc; return rv;
             }
         }
-        ValKind rk; const char *rhs=gen_rval(c,e->rhs,&rk); int rw=c->rvw; int rm=c->rmat; int rmc=c->rmatm;
+        ValKind rk; const char *rhs=gen_rval(c,e->rhs,&rk); int rw=c->rvw; int rm=c->rmat; int rmc=c->rmatm; const char *rhs_struct=c->rstruct;
         LInfo li; char *addr=gen_lval(c,e->operand,&li,1);
+        if(rhs_struct) c->rstruct=rhs_struct;
         if(rm){
             if(e->aop!=A_ASSIGN) die(0,"compound assignment on a matrix");
             if(getenv("BINC_DEBUG_IW")) fprintf(stderr,"DBG matassign: lhs=%s li.matn=%d rm=%d rstruct=%s\n",e->operand->kind==E_FIELD?e->operand->field:"?",li.matn,rm,c->rstruct?c->rstruct:"(null)");
@@ -3240,7 +3241,22 @@ static char *gen_lval(CG *c, Expr *e, LInfo *li, int mark){
             li->tk=sp->ty.kind; li->sname=sp->ty.struct_name; li->as=AS_THREADGROUP; li->pi=-1; li->is_local=0; li->vecn=sp->ty.vecn; return p;
         }
         if(e->operand->kind==E_IDENT){ if(resolve(c,e->operand->name,&pi)!=R_PTR) die(0,"subscript of non-pointer"); }
-        else { if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG sub: operand-kind=%d field=%s line=%d\n",e->operand->kind,e->operand->field?e->operand->field:"",e->line); pi=eval_ptr(c,e->operand,&base); } /* e.g. (p+1)[i] */
+        else {
+            Type bt; expr_type_of(c,e->operand,&bt);
+            if(bt.is_ptr && bt.kind!=T_TEXTURE && bt.kind!=T_SAMPLER){
+                ValKind bk,ik; const char *bp=gen_rval(c,e->operand,&bk), *iv=gen_rval(c,e->rhs,&ik);
+                if(ik!=VK_I32&&ik!=VK_U32) die(0,"resource field index must be an integer");
+                const char *i64=newtmp(c); emit(c,"  %s = sext i32 %s to i64\n",i64,iv);
+                char elt[128]; type_ll(elt,sizeof elt,bt.kind,bt.struct_name,bt.vecn);
+                char pty[160]; snprintf(pty,sizeof pty,"%s addrspace(%d)*",elt,bt.as);
+                char *gp=newtmp(c); emit(c,"  %s = getelementptr inbounds %s, %s %s, i64 %s\n",gp,elt,pty,bp,i64);
+                li->tk=bt.kind; li->sname=bt.struct_name; li->vecn=bt.vecn; li->matn=bt.matn; li->matm=bt.matm;
+                li->as=bt.as; li->is_ptr=0; li->ptr_as=0; li->pi=-1; li->is_local=0; li->an=0; li->am=0;
+                return gp;
+            }
+            if(getenv("BINC_DEBUG_D3D9")) fprintf(stderr,"DBG sub: operand-kind=%d field=%s line=%d\n",e->operand->kind,e->operand->field?e->operand->field:"",e->line);
+            pi=eval_ptr(c,e->operand,&base);
+        } /* e.g. (p+1)[i] */
         ValKind ik; const char *iv=gen_rval(c,e->rhs,&ik);
         if(ik!=VK_I32&&ik!=VK_U32) die(0,"subscript must be an integer");
         const char *i64=newtmp(c); emit(c,"  %s = sext i32 %s to i64\n",i64,iv);
