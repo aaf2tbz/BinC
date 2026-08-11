@@ -758,7 +758,7 @@ static void mark_builtin(const char *name){ for(size_t i=0;i<sizeof builtins/siz
 static int reversebits_used;
 static int atomic_add_used[3];
 static int atomic_logic_used[2];
-static int tex_read_used[4], tex_write_used[4], tex_sample_used[4], tex_sample_cube_used[4], tex_sample_cube_array_used[4], tex_sample_1d_used[4], tex_sample_3d_used[4], tex_sample_2d_array_used[4], tex_sample_grad_used[4], tex_sample_grad_cube_used[4], tex_sample_grad_cube_array_used[4], tex_sample_grad_3d_used[4], tex_sample_grad_2d_array_used[4], tex_gather_used[4], tex_gather_cube_used[4], tex_gather_cube_array_used[4], tex_gather_2d_array_used[4], get_samp_used;
+static int tex_read_used[4], tex_read_3d_used[4], tex_write_used[4], tex_sample_used[4], tex_sample_cube_used[4], tex_sample_cube_array_used[4], tex_sample_1d_used[4], tex_sample_3d_used[4], tex_sample_2d_array_used[4], tex_sample_grad_used[4], tex_sample_grad_cube_used[4], tex_sample_grad_cube_array_used[4], tex_sample_grad_3d_used[4], tex_sample_grad_2d_array_used[4], tex_gather_used[4], tex_gather_cube_used[4], tex_gather_cube_array_used[4], tex_gather_2d_array_used[4], get_samp_used;
 static const char *tex_air_type(const Type *ty){
     if(ty->tex_cube && ty->tex_array) return "%struct._texture_cube_array_t";
     if(ty->tex_cube) return "%struct._texture_cube_t";
@@ -2061,25 +2061,44 @@ static const char *gen_rval(CG *c, Expr *e, ValKind *k){
                     (void)elt; (void)an;
                     char tname[64]; snprintf(tname,sizeof tname,"%%_%s",tp->name);
                     if(!strcmp(e->name,"read")||!strcmp(e->name,"Load")){
-                        /* HLSL Load: int2 (or int3 with a mip) coordinate */
+                        /* HLSL Load uses int2/int3 for 2D (the last lane is
+                         * the mip) and int4 for 3D (xyz plus mip). */
                         if(e->nargs!=1) die(0,"texture read expects 1 argument (the coordinate)");
                         ValKind ck; const char *cv=gen_rval(c,e->args[0],&ck); int cn=c->rvw;
-                        if(cn!=2&&cn!=3) die(0,"texture read coordinate must be an int2 or int3");
                         const char *coord=cv; const char *mip="0";
-                        if(cn==3){
-                            const char *x=newtmp(c),*y=newtmp(c),*z=newtmp(c),*xy=newtmp(c),*xy2=newtmp(c);
-                            emit(c,"  %s = extractelement <3 x i32> %s, i32 0\n",x,cv);
-                            emit(c,"  %s = extractelement <3 x i32> %s, i32 1\n",y,cv);
-                            emit(c,"  %s = extractelement <3 x i32> %s, i32 2\n",z,cv);
-                            emit(c,"  %s = insertelement <2 x i32> zeroinitializer, i32 %s, i32 0\n",xy,x);
-                            emit(c,"  %s = insertelement <2 x i32> %s, i32 %s, i32 1\n",xy2,xy,y);
-                            coord=xy2; mip=z;
+                        int ti_kind=tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0;
+                        if(tp->ty.tex_dim==3){
+                            if(cn!=4) die(0,"texture3d read coordinate must be an int4");
+                            const char *x=newtmp(c),*y=newtmp(c),*z=newtmp(c),*xyz=newtmp(c),*xyz2=newtmp(c),*xyz3=newtmp(c),*m=newtmp(c);
+                            emit(c,"  %s = extractelement <4 x i32> %s, i32 0\n",x,cv);
+                            emit(c,"  %s = extractelement <4 x i32> %s, i32 1\n",y,cv);
+                            emit(c,"  %s = extractelement <4 x i32> %s, i32 2\n",z,cv);
+                            emit(c,"  %s = insertelement <3 x i32> zeroinitializer, i32 %s, i32 0\n",xyz,x);
+                            emit(c,"  %s = insertelement <3 x i32> %s, i32 %s, i32 1\n",xyz2,xyz,y);
+                            emit(c,"  %s = insertelement <3 x i32> %s, i32 %s, i32 2\n",xyz3,xyz2,z);
+                            emit(c,"  %s = extractelement <4 x i32> %s, i32 3\n",m,cv);
+                            coord=xyz3; mip=m; tex_read_3d_used[ti_kind]=1;
+                        } else {
+                            if(cn!=2&&cn!=3) die(0,"texture read coordinate must be an int2 or int3");
+                            if(cn==3){
+                                const char *x=newtmp(c),*y=newtmp(c),*z=newtmp(c),*xy=newtmp(c),*xy2=newtmp(c);
+                                emit(c,"  %s = extractelement <3 x i32> %s, i32 0\n",x,cv);
+                                emit(c,"  %s = extractelement <3 x i32> %s, i32 1\n",y,cv);
+                                emit(c,"  %s = extractelement <3 x i32> %s, i32 2\n",z,cv);
+                                emit(c,"  %s = insertelement <2 x i32> zeroinitializer, i32 %s, i32 0\n",xy,x);
+                                emit(c,"  %s = insertelement <2 x i32> %s, i32 %s, i32 1\n",xy2,xy,y);
+                                coord=xy2; mip=z;
+                            }
+                            tex_read_used[ti_kind]=1;
                         }
-                        get_samp_used=1; tex_read_used[tp->ty.tex_elt==T_HALF?1:tp->ty.tex_elt==T_INT32?2:tp->ty.tex_elt==T_UINT32?3:0]=1;
+                        get_samp_used=1;
                         const char *samp=newtmp(c);
                         emit(c,"  %s = call %%struct._sampler_t addrspace(2)* @air.get_read_sampler()\n",samp);
                         const char *r=newtmp(c);
-                        emit(c,"  %s = call { %s, i8 } @air.read_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x i32> %s, <2 x i32> zeroinitializer, i32 %s, i32 0)\n",r,vec,suf,tname,samp,coord,mip);
+                        if(tp->ty.tex_dim==3)
+                            emit(c,"  %s = call { %s, i8 } @air.read_texture_3d.%s(%s addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <3 x i32> %s, <3 x i32> zeroinitializer, i32 %s, i32 1)\n",r,vec,suf,tex_air_type(&tp->ty),tname,samp,coord,mip);
+                        else
+                            emit(c,"  %s = call { %s, i8 } @air.read_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* %s, %%struct._sampler_t addrspace(2)* %s, <2 x i32> %s, <2 x i32> zeroinitializer, i32 %s, i32 0)\n",r,vec,suf,tname,samp,coord,mip);
                         const char *v=newtmp(c);
                         emit(c,"  %s = extractvalue { %s, i8 } %s, 0\n",v,vec,r);
                         if(tp->ty.tex_elt==T_HALF){ const char *w=newtmp(c); emit(c,"  %s = fpext <4 x half> %s to <4 x float>\n",w,v); v=w; }
@@ -3873,6 +3892,7 @@ void emit_air(FILE *out, Program *prog){
             for(size_t pi=0;pi<prog->funcs[fi].nparams;pi++)
                 if(prog->funcs[fi].params[pi].ty.kind==T_TEXTURE||prog->funcs[fi].params[pi].ty.kind==T_SAMPLER){ any_tex_param=1; break; }
         if(get_samp_used||tex_read_used[0]||tex_read_used[1]||tex_read_used[2]||tex_read_used[3]||
+           tex_read_3d_used[0]||tex_read_3d_used[1]||tex_read_3d_used[2]||tex_read_3d_used[3]||
            tex_write_used[0]||tex_write_used[1]||tex_write_used[2]||tex_write_used[3]||
            tex_sample_used[0]||tex_sample_used[1]||tex_sample_used[2]||tex_sample_used[3]||
            tex_sample_1d_used[0]||tex_sample_1d_used[1]||tex_sample_1d_used[2]||tex_sample_1d_used[3]||
@@ -3892,6 +3912,7 @@ void emit_air(FILE *out, Program *prog){
         static const char *vecs[4]={"<4 x float>","<4 x half>","<4 x i32>","<4 x i32>"};
         for(int i=0;i<4;i++){
             if(tex_read_used[i]) fprintf(out,"declare { %s, i8 } @air.read_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)*, <2 x i32>, <2 x i32>, i32, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
+            if(tex_read_3d_used[i]) fprintf(out,"declare { %s, i8 } @air.read_texture_3d.%s(%%struct._texture_3d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)*, <3 x i32>, <3 x i32>, i32, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_write_used[i]) fprintf(out,"declare void @air.write_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture, <2 x i32>, %s, i32, i32) local_unnamed_addr\n",sufs[i],vecs[i]);
             if(tex_sample_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_2d.%s(%%struct._texture_2d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, <2 x float>, i1, <2 x i32>, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);
             if(tex_sample_1d_used[i]) fprintf(out,"declare { %s, i8 } @air.sample_texture_1d.%s(%%struct._texture_1d_t addrspace(1)* nocapture readonly, %%struct._sampler_t addrspace(2)* nocapture readonly, float, i1, i32, i1, float, float, i32) local_unnamed_addr\n",vecs[i],sufs[i]);

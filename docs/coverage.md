@@ -190,8 +190,12 @@ than AIR call arguments; `groupshared_index.hlsl` verifies store/readback at
 `7.0`. Integer `InterlockedAnd/Or` methods emit typed AIR declarations and a
 Metallib compile regression in `atomic_logic.hlsl`; this host GPU reports those
 bitwise AIR calls as unlowered at runtime, so this fixture makes no runtime
-claim. Global brace-initializer preservation remains a separate
-parser/data-model follow-up.
+claim. Global uniform-struct texture fields are flattened to resource
+parameters so `.Load` remains a real texture operation; the shared parser and
+AIR bridge also preserve 3D texture shape and lower `Texture3D.Load(int4)` to
+`air.read_texture_3d`. The `global_texture_field_load.hlsl` and
+`global_texture3d_field_load.hlsl` fixtures cover the 2D and 3D paths. Global brace-initializer
+preservation remains a separate parser/data-model follow-up.
 Implicit compiler-forwarded pointer/texture/sampler parameters are accepted by
 HLSL overload resolution without changing ordinary value-argument arity;
 `implicit_uniform_overload.hlsl` locks the zero-argument cbuffer-forwarding

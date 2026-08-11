@@ -134,8 +134,8 @@ static HLSLFunc *hlsl_find_func(HLSLProg *hp, const char *name){
     return NULL;
 }
 
-static void resource_field_add(HLSLResourceField **out, size_t *n, Expr *actual, Type ty){
-    char path[256]; if(!resource_field_path(actual,path,sizeof path)||!strchr(path,'.')) return;
+static void resource_field_add_path(HLSLResourceField **out, size_t *n, const char *path, Type ty){
+    if(!path||!strchr(path,'.')) return;
     for(size_t i=0;i<*n;i++) if(!strcmp((*out)[i].path,path)) return;
     HLSLResourceField *v=realloc(*out,(*n+1)*sizeof **out); if(!v) return;
     *out=v;
@@ -143,6 +143,11 @@ static void resource_field_add(HLSLResourceField **out, size_t *n, Expr *actual,
     char flat[256]; size_t j=0;
     for(size_t k=0;path[k]&&j+1<sizeof flat;k++) flat[j++]=path[k]=='.'?'_':path[k];
     flat[j]=0; r->flat=strdup(flat);
+}
+
+static void resource_field_add(HLSLResourceField **out, size_t *n, Expr *actual, Type ty){
+    char path[256]; if(!resource_field_path(actual,path,sizeof path)) return;
+    resource_field_add_path(out,n,path,ty);
 }
 
 static void resource_field_collect_expr(Expr *e, HLSLProg *hp, HLSLResourceField **out, size_t *n){
@@ -968,6 +973,23 @@ Program hlsl_build(HLSLProg *hp, const char *entry, const char *profile, int sta
     HLSLResourceField *resource_fields=NULL; size_t nresource_fields=0;
     for(size_t fi=0;fi<hp->nfuncs;fi++)
         resource_field_collect_block(&hp->funcs[fi].body,hp,&resource_fields,&nresource_fields);
+    /* Uniform-buffer stand-ins in the UE audit are ordinary global structs, but
+     * their generated fields may still be opaque textures/samplers.  Metal
+     * requires those members as separate resource parameters even when they
+     * are used directly (not passed through a helper). */
+    for(size_t gi=0;gi<hp->nglobals;gi++){
+        HLSLGlobal *gg=&hp->globals[gi];
+        if(gg->ty.kind!=T_STRUCT||!gg->ty.struct_name) continue;
+        StructDef *sd=NULL;
+        for(size_t si=0;si<g_prog.nstructs;si++) if(!strcmp(g_prog.structs[si].tag,gg->ty.struct_name)){ sd=&g_prog.structs[si]; break; }
+        if(!sd) continue;
+        for(size_t fi=0;fi<sd->nfields;fi++){
+            Field *f=&sd->fields[fi];
+            if(f->ty.kind!=T_TEXTURE&&f->ty.kind!=T_SAMPLER) continue;
+            char path[256]; snprintf(path,sizeof path,"%s.%s",gg->name,f->name);
+            resource_field_add_path(&resource_fields,&nresource_fields,path,f->ty);
+        }
+    }
     int next_resource_reg=0;
     for(size_t ri=0;ri<nres;ri++) if(res[ri].reg>=next_resource_reg) next_resource_reg=res[ri].reg+1;
     for(size_t ri=0;ri<nresource_fields&&nres<64;ri++){

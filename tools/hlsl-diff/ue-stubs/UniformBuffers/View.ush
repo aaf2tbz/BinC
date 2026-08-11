@@ -67,6 +67,11 @@ struct ViewState
     FDFVector3 PrevWorldViewOrigin;
     float3 ViewForward;
     float3 TranslatedWorldCameraOrigin;
+    Texture2D SSProfilesTexture;
+    SamplerState SSProfilesSampler;
+    float4 SSProfilesTextureSizeAndInvSize;
+    Texture2D SobolSamplingTexture;
+    Texture3D VolumetricLightmapIndirectionTexture;
     float3 AtmosphereLightDirection[2];
     float2 ViewRectMin;
     float2 TemporalAAJitter;

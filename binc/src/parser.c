@@ -82,6 +82,30 @@ Type parse_type(TokStream *ts){
     else if(peek(ts)->kind==TK_IDENT){
         /* HLSL template-style type spellings + template-arg struct fallback */
         const char *txt=peek(ts)->text;
+        /* Resource spellings other than Texture2D are lexed as identifiers.
+         * Struct fields use this shared parser, so preserve their opaque type
+         * instead of misclassifying Texture3D/array/cube fields as structs. */
+        int tex=0, dim=2, array=0, cube=0, rw=0;
+        if(!strcmp(txt,"Texture1D")||!strcmp(txt,"Texture1DArray")||
+           !strcmp(txt,"Texture2DArray")||!strcmp(txt,"Texture2DMS")||
+           !strcmp(txt,"Texture2DMSArray")||!strcmp(txt,"Texture3D")||
+           !strcmp(txt,"TextureCube")||!strcmp(txt,"TextureCubeArray")||
+           !strcmp(txt,"RWTexture1D")||!strcmp(txt,"RWTexture1DArray")||
+           !strcmp(txt,"RWTexture2DArray")||!strcmp(txt,"RWTexture3D")){
+            tex=1; rw=!strncmp(txt,"RWTexture",9);
+            dim=!strcmp(txt,"Texture1D")||!strcmp(txt,"Texture1DArray")||
+                !strcmp(txt,"RWTexture1D")||!strcmp(txt,"RWTexture1DArray")?1:
+                !strcmp(txt,"Texture3D")||!strcmp(txt,"RWTexture3D")?3:2;
+            array=!strcmp(txt,"Texture1DArray")||!strcmp(txt,"Texture2DArray")||
+                  !strcmp(txt,"Texture2DMSArray")||!strcmp(txt,"TextureCubeArray")||
+                  !strcmp(txt,"RWTexture1DArray")||!strcmp(txt,"RWTexture2DArray");
+            cube=!strcmp(txt,"TextureCube")||!strcmp(txt,"TextureCubeArray");
+        }
+        if(tex){
+            advance(ts); t.kind=T_TEXTURE; t.tex_dim=dim; t.tex_array=array; t.tex_cube=cube; t.tex_rw=rw; t.tex_elt=T_FLOAT;
+            if(accept(ts,TK_LT)){ Type et=parse_type(ts); t.tex_elt=et.kind; expect(ts,TK_GT,">"); }
+            return t;
+        }
         int has_lt = (ts->i+1<ts->n) && ts->toks[ts->i+1].kind==TK_LT;
         if(has_lt&&(!strcmp(txt,"matrix")||!strcmp(txt,"Matrix"))){
             advance(ts); expect(ts,TK_LT,"<");
