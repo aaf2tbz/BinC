@@ -278,7 +278,7 @@ static void expr_type_of(CG *c, Expr *e, Type *out){
         if(r==R_LOCAL){ out->kind=c->locs[idx].kind; out->struct_name=c->locs[idx].sname;
             out->vecn=c->locs[idx].vecn; out->matn=c->locs[idx].matn; out->matm=c->locs[idx].matm;
             out->array_n=c->locs[idx].an; out->array_m=c->locs[idx].am; }
-        else if(r==R_CONST){ out->kind=c->prog->consts[idx].ty.kind; }
+        else if(r==R_CONST){ Type t=c->prog->consts[idx].ty; t.tvar=NULL; *out=t; }
         else if(r==R_PTR||r==R_SCALAR||r==R_TEXTURE||r==R_SAMPLER){ Type t=c->fn->params[idx].ty; t.tvar=NULL; *out=t; }
         else if(r==R_COORD||r==R_EXTENT){ Type t=c->fn->params[idx].ty; t.tvar=NULL; *out=t; }
         else { out->kind=T_INT32; }
